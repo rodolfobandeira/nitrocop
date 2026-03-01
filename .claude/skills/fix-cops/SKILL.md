@@ -10,6 +10,9 @@ This skill runs after a corpus oracle CI run. It triages the results, picks the
 highest-impact cops to fix, and dispatches parallel teammates (each in an
 isolated git worktree) to investigate and fix them.
 
+If you edit code yourself (without dispatching teammates), do that work in a dedicated
+git worktree by default. Only skip this when the user explicitly asks to use the current tree.
+
 ## Workflow
 
 ### Phase 1: Triage (you do this)

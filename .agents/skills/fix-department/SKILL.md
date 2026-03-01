@@ -8,6 +8,7 @@ allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
 
 This skill targets one gem (for example `rubocop-performance`, `rubocop-rspec`,
 or `rubocop-rails`) and drives it toward full corpus conformance (0 FP + 0 FN).
+Run fix work from a dedicated git worktree by default.
 
 ## Workflow
 
@@ -124,9 +125,8 @@ Report:
 
 ## Notes
 
-- Single-agent runs: use the current working tree by default (no extra worktree required).
-- Use worktrees when running in parallel with other agents, or when isolating risky experiments.
-- If the user explicitly requests a worktree/branch workflow, follow that request.
+- Use a dedicated git worktree for all code-editing runs of this skill, including single-agent runs.
+- Only skip the worktree if the user explicitly requests working in the current tree.
 - Parallel-agent activity is common; expect unrelated local changes in the working tree.
 - Do not revert or include unrelated files in your commit; stage only files for the cop(s) you are fixing.
 - Treat unrelated modified files as off-limits: do not edit them unless the user explicitly asks.

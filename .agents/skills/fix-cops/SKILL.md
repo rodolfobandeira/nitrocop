@@ -7,7 +7,7 @@ allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
 # Fix Cops (Codex)
 
 This skill runs after a corpus oracle run. It triages the results, chooses the
-highest-impact cops, and fixes them directly in this workspace using TDD.
+highest-impact cops, and fixes them in a dedicated git worktree using TDD.
 
 ## Workflow
 
@@ -109,6 +109,8 @@ Report:
 
 ## Notes
 
+- Use a dedicated git worktree for all code-editing runs of this skill, including single-agent runs.
+- Only skip the worktree if the user explicitly requests working in the current tree.
 - Parallel-agent activity is common; expect unrelated local changes in the working tree.
 - Treat unrelated modified files as off-limits: do not edit/revert them unless the user explicitly asks.
 - Do not include unrelated files in your commit; stage only files for the cop(s) you are fixing.

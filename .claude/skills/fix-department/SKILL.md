@@ -11,6 +11,9 @@ cops until it reaches 100% corpus conformance (0 FP + 0 FN). Unlike `/fix-cops` 
 fixes the globally worst cops, this focuses on *completing* one gem at a time to unlock
 incremental adoption.
 
+If you edit code yourself (without dispatching teammates), do that work in a dedicated
+git worktree by default. Only skip this when the user explicitly asks to use the current tree.
+
 ## Workflow
 
 ### Phase 0: Assess (you do this)

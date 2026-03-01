@@ -11,6 +11,9 @@ the cops that contribute the most FP/FN for that repo. Unlike `/fix-cops` (globa
 cops) or `/fix-department` (all cops in a gem), this focuses on improving a specific repo's
 match rate.
 
+If you edit code yourself (without dispatching teammates), do that work in a dedicated
+git worktree by default. Only skip this when the user explicitly asks to use the current tree.
+
 ## Workflow
 
 ### Phase 0: Assess (you do this)

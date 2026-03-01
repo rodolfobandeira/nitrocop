@@ -29,3 +29,4 @@ python3 scripts/investigate-cop.py Department/CopName --context --fp-only
 Then read the cop source in `src/cop/<dept>/<cop>.rs` and the vendor spec at `vendor/rubocop*/spec/` to understand the root cause before fixing.
 
 This skill is read-only. Parallel-agent activity may leave unrelated local modifications in the working tree; do not edit or revert them while triaging.
+If triage transitions into code edits, switch to a dedicated git worktree before making changes.
