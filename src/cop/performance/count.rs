@@ -152,7 +152,12 @@ impl CountVisitor<'_, '_> {
             }
         }
 
-        let loc = call.location();
+        // Report the offense at the inner selector call (select/reject/filter/find_all),
+        // not at the outer count/size/length call. This matches RuboCop's behavior
+        // and produces the correct line for multi-line chains.
+        let loc = inner_call
+            .message_loc()
+            .unwrap_or_else(|| inner_call.location());
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
         self.diagnostics.push(self.cop.diagnostic(
             self.source,
