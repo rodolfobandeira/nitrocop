@@ -495,8 +495,7 @@ fn should_skip_for_value_omission(args: &[ruby_prism::Node<'_>]) -> bool {
 
 fn has_any_value_omission(args: &[ruby_prism::Node<'_>]) -> bool {
     args.iter().any(|arg| {
-        hash_assoc_counts(arg)
-            .is_some_and(|(_assoc_count, implicit_count)| implicit_count > 0)
+        hash_assoc_counts(arg).is_some_and(|(_assoc_count, implicit_count)| implicit_count > 0)
     })
 }
 

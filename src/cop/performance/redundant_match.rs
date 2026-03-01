@@ -491,13 +491,11 @@ impl<'a> RedundantMatchVisitor<'a> {
         }
         let first_arg = arg_list.iter().next().unwrap();
 
-        let recv_is_literal = call
-            .receiver()
-            .is_some_and(|receiver| {
-                receiver.as_string_node().is_some()
-                    || receiver.as_regular_expression_node().is_some()
-                    || receiver.as_interpolated_regular_expression_node().is_some()
-            });
+        let recv_is_literal = call.receiver().is_some_and(|receiver| {
+            receiver.as_string_node().is_some()
+                || receiver.as_regular_expression_node().is_some()
+                || receiver.as_interpolated_regular_expression_node().is_some()
+        });
         let arg_is_literal = first_arg.as_string_node().is_some()
             || first_arg.as_regular_expression_node().is_some()
             || first_arg
