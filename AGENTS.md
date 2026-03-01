@@ -53,7 +53,8 @@ NITROCOP_COP_PROFILE=1 cargo run --release -- --debug bench/repos/mastodon
   hyperfine --warmup 2 --runs 5 'cargo run --release -- bench/repos/mastodon'
   ```
 - **Note on `--debug` timing:** The phase-level timings for filter+config and AST walk show cumulative thread time summed across all rayon workers, not wall time. This means the reported values will exceed wall clock time on multi-core machines.
-- **Clear result cache after code changes:** nitrocop caches lint results per-file in `~/.cache/nitrocop/`. The cache session hash includes version+config+args but NOT cop implementation code. After rebuilding with cop fixes, stale cached results are returned. Clear with `rm -rf ~/.cache/nitrocop` before verifying fixes. Using `--only CopName` produces a different session hash and uses a different (empty) cache, which is why `--only` runs may show different results than full scans after code changes.
+- **Corpus validation (current workflow):** use `python3 scripts/check-cop.py Department/Cop --input <local corpus-results.json> --verbose --rerun`. `--rerun` forces fresh per-repo execution, auto-rebuilds a stale release binary, and clears nitrocop's file cache before running. Prefer this over ad-hoc `--only` comparisons when validating conformance fixes.
+- **Manual cache clear (fallback):** if you are running ad-hoc commands outside `check-cop.py`, clear `~/.cache/nitrocop/` to avoid stale per-file cache reuse.
 - **Verify conformance with correct JSON format:** nitrocop's JSON output uses `offenses` at the top level (not `files[].offenses[]` like RuboCop). Parse with `d.get('offenses', [])`, not `d.get('files', [])`.
 
 ## Architecture
