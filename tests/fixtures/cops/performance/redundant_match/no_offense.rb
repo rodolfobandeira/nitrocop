@@ -62,6 +62,10 @@ mapper.match 'sms', via: [:get, :post]
 mapper.match '/', action: 'index', as: 'search', via: [:get, :post]
 # Value is used through string interpolation
 break "/docs/screens#{/#.*$/.match(url)}"
+# Value used through string interpolation nested inside an if body
+if url.match?(/\/colors#?/)
+  break "/docs/customizing-colors#{/#.*$/.match(url)}"
+end
 # Case branch return value is used (implicit method return)
 def check_type(type, name)
   case type
