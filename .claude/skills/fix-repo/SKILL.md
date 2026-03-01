@@ -97,6 +97,7 @@ Summarize: cop name, repo-specific FP/FN, global FP/FN, minimal repro(s), root c
    - The FP/FN counts (both repo-specific and global) and root cause hypothesis
    - **The minimal repro(s) from the delta reducer** — paste the reduced Ruby source directly
    - Whether to focus on FP fixes, FN fixes, or both
+   - A reminder that parallel-agent activity often leaves unrelated local modifications; those files are off-limits
    - The teammate workflow (Phase 3 below) — paste the full instructions
 
 ### Phase 3: Teammate Workflow (paste this into each teammate's prompt)
@@ -106,6 +107,7 @@ You are fixing false positives/negatives in a single nitrocop cop to improve cor
 conformance for a target repo. Follow the CLAUDE.md rules strictly.
 
 **NEVER use git stash or git stash pop.** You are in an isolated git worktree — just commit directly.
+Parallel-agent activity is common. If you see unrelated modified files, do not edit/revert them.
 
 ## Steps
 
@@ -141,6 +143,7 @@ conformance for a target repo. Follow the CLAUDE.md rules strictly.
 
    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
    ```
+   Stage only files for this cop fix. Do not include unrelated modified files.
 
 7. **Report back** via SendMessage with:
    - What the root cause was

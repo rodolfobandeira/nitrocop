@@ -60,6 +60,7 @@ isolated git worktree) to investigate and fix them.
    - The exact cop name (e.g., `Style/PercentQLiterals`)
    - The FP count and root cause hypothesis from your investigation
    - **The minimal repro(s) from the delta reducer** — paste the reduced Ruby source directly
+   - A reminder that parallel-agent activity often leaves unrelated local modifications; those files are off-limits
    - The teammate workflow (Phase 3 below) — paste the full instructions
 
 ### Phase 3: Teammate Workflow (paste this into each teammate's prompt)
@@ -68,6 +69,7 @@ isolated git worktree) to investigate and fix them.
 You are fixing false positives in a single nitrocop cop. Follow the CLAUDE.md rules strictly.
 
 **NEVER use git stash or git stash pop.** You are in an isolated git worktree — just commit directly.
+Parallel-agent activity is common. If you see unrelated modified files, do not edit/revert them.
 
 ## Steps
 
@@ -102,6 +104,7 @@ You are fixing false positives in a single nitrocop cop. Follow the CLAUDE.md ru
 
    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
    ```
+   Stage only files for this cop fix. Do not include unrelated modified files.
 
 7. **Report back** via SendMessage with:
    - What the FP root cause was
