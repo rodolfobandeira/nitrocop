@@ -9,3 +9,4 @@ cron_entry = find(:example)
 my_local = find(:other)
 expect { run }.to change { cron_entry.enabled? }
 expect { run }.to change { my_local.name }
+expect { run }.to change { Sidekiq.redis { |conn| conn.zcard("schedule") } }

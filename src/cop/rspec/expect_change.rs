@@ -142,6 +142,12 @@ impl Cop for ExpectChange {
             return;
         }
 
+        // Calls with their own block are not "simple message sends" and should
+        // stay in block form (e.g. `change { Sidekiq.redis { ... } }`).
+        if inner_call.block().is_some() {
+            return;
+        }
+
         // The receiver must match RuboCop's pattern: a constant or bare method
         // call (no receiver). Local variables and instance variables do NOT match
         // because RuboCop's pattern `(send nil? _)` only matches bare method calls,
