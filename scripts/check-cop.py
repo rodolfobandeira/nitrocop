@@ -292,8 +292,12 @@ def main():
     has_enriched = bool(by_repo_cop)
 
     if args.verbose and has_enriched and not args.rerun:
-        # Use cached corpus data instead of re-running nitrocop
-        print("Using cached corpus data (pass --rerun to re-execute nitrocop)", file=sys.stderr)
+        # Use baseline artifact data instead of re-running nitrocop.
+        # This reflects the downloaded corpus-oracle run, not local unverified changes.
+        print(
+            "Using baseline corpus artifact data (pass --rerun to validate current code)",
+            file=sys.stderr,
+        )
 
         # Reconstruct per-repo counts from by_repo_cop
         # nitrocop count = rubocop count + FP - FN per repo
@@ -320,8 +324,9 @@ def main():
                 print(f"  ... and {len(sorted_repos) - 30} more")
             print()
 
-        # For cached mode, use baseline FP/FN directly
-        nitrocop_total = expected_rubocop + baseline_fp
+        # In artifact mode, nitrocop_total for that run is:
+        # rubocop_matches + false_positives.
+        nitrocop_total = baseline_matches + baseline_fp
     else:
         # Try local cache first (unless --rerun forces re-execution)
         cached = None if args.rerun else get_cached_results(args.cop)
