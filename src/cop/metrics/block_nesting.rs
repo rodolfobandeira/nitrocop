@@ -29,7 +29,6 @@ impl Cop for BlockNesting {
             max,
             count_modifier_forms,
             depth: 0,
-            in_method: false,
             diagnostics: Vec::new(),
         };
         visitor.visit(&parse_result.node());
@@ -59,13 +58,14 @@ struct NestingVisitor<'a> {
     max: usize,
     count_modifier_forms: bool,
     depth: usize,
-    in_method: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl NestingVisitor<'_> {
-    fn check_nesting(&mut self, loc: &ruby_prism::Location<'_>) {
-        if self.in_method && self.depth > self.max {
+    /// Check nesting depth and fire offense if exceeded.
+    /// Returns true if an offense was fired (caller should skip subtree).
+    fn check_nesting(&mut self, loc: &ruby_prism::Location<'_>) -> bool {
+        if self.depth > self.max {
             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
             self.diagnostics.push(Diagnostic {
                 path: self.source.path_str().to_string(),
@@ -73,21 +73,19 @@ impl NestingVisitor<'_> {
                 severity: crate::diagnostic::Severity::Convention,
                 cop_name: "Metrics/BlockNesting".to_string(),
                 message: format!("Avoid more than {} levels of block nesting.", self.max),
-
                 corrected: false,
             });
+            return true;
         }
+        false
     }
 }
 
 impl<'pr> Visit<'pr> for NestingVisitor<'_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        let was_in_method = self.in_method;
         let old_depth = self.depth;
-        self.in_method = true;
         self.depth = 0;
         ruby_prism::visit_def_node(self, node);
-        self.in_method = was_in_method;
         self.depth = old_depth;
     }
 
@@ -98,14 +96,21 @@ impl<'pr> Visit<'pr> for NestingVisitor<'_> {
             .if_keyword_loc()
             .is_some_and(|kw| kw.as_slice() == b"elsif");
 
-        // Modifier if (e.g. `foo if bar`) has no `end` keyword.
-        // Skip if CountModifierForms is false (default).
-        let is_modifier = node.end_keyword_loc().is_none();
+        // Ternary: `a ? b : c` has no if_keyword_loc (it's None).
+        // Modifier if: `foo if bar` has if_keyword_loc but no end_keyword_loc.
+        // Only skip modifier forms (not ternaries) when CountModifierForms is false.
+        let is_ternary = node.if_keyword_loc().is_none();
+        let is_modifier = !is_ternary && node.end_keyword_loc().is_none();
         let should_count = !is_elsif && (self.count_modifier_forms || !is_modifier);
 
         if should_count {
             self.depth += 1;
-            self.check_nesting(&node.location());
+            let exceeded = self.check_nesting(&node.location());
+            if exceeded {
+                // Ignore-subtree: do not recurse into children
+                self.depth -= 1;
+                return;
+            }
         }
         ruby_prism::visit_if_node(self, node);
         if should_count {
@@ -121,39 +126,92 @@ impl<'pr> Visit<'pr> for NestingVisitor<'_> {
             return;
         }
         self.depth += 1;
-        self.check_nesting(&node.location());
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
         ruby_prism::visit_unless_node(self, node);
         self.depth -= 1;
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
-        let is_modifier = node.closing_loc().is_none();
+        // Modifier while: `foo while bar` has no closing_loc and is NOT begin_modifier.
+        // begin..end while: has no closing_loc but IS begin_modifier — should be counted.
+        let is_modifier = node.closing_loc().is_none() && !node.is_begin_modifier();
         if !self.count_modifier_forms && is_modifier {
             ruby_prism::visit_while_node(self, node);
             return;
         }
         self.depth += 1;
-        self.check_nesting(&node.location());
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
         ruby_prism::visit_while_node(self, node);
         self.depth -= 1;
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
-        let is_modifier = node.closing_loc().is_none();
+        // Modifier until: `foo until bar` has no closing_loc and is NOT begin_modifier.
+        // begin..end until: has no closing_loc but IS begin_modifier — should be counted.
+        let is_modifier = node.closing_loc().is_none() && !node.is_begin_modifier();
         if !self.count_modifier_forms && is_modifier {
             ruby_prism::visit_until_node(self, node);
             return;
         }
         self.depth += 1;
-        self.check_nesting(&node.location());
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
         ruby_prism::visit_until_node(self, node);
         self.depth -= 1;
     }
 
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         self.depth += 1;
-        self.check_nesting(&node.location());
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
         ruby_prism::visit_case_node(self, node);
+        self.depth -= 1;
+    }
+
+    fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
+        self.depth += 1;
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
+        ruby_prism::visit_case_match_node(self, node);
+        self.depth -= 1;
+    }
+
+    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+        self.depth += 1;
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
+        ruby_prism::visit_for_node(self, node);
+        self.depth -= 1;
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        self.depth += 1;
+        let exceeded = self.check_nesting(&node.location());
+        if exceeded {
+            self.depth -= 1;
+            return;
+        }
+        ruby_prism::visit_rescue_node(self, node);
         self.depth -= 1;
     }
 }
@@ -168,5 +226,12 @@ mod tests {
         nested_ifs = "nested_ifs.rb",
         nested_unless = "nested_unless.rb",
         nested_while = "nested_while.rb",
+        nested_rescue = "nested_rescue.rb",
+        nested_for = "nested_for.rb",
+        nested_case_match = "nested_case_match.rb",
+        toplevel_nesting = "toplevel_nesting.rb",
+        begin_end_while = "begin_end_while.rb",
+        ignore_subtree = "ignore_subtree.rb",
+        sibling_violations = "sibling_violations.rb",
     );
 }

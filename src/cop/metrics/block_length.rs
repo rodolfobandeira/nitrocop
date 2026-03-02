@@ -1,5 +1,7 @@
-use crate::cop::node_type::{BLOCK_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE};
-use crate::cop::util::{collect_foldable_ranges, count_body_lines, count_body_lines_ex};
+use crate::cop::node_type::{
+    BLOCK_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, LAMBDA_NODE,
+};
+use crate::cop::util::{collect_foldable_ranges, collect_heredoc_ranges, count_body_lines_ex};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -21,6 +23,7 @@ impl Cop for BlockLength {
             CALL_NODE,
             CONSTANT_PATH_NODE,
             CONSTANT_READ_NODE,
+            LAMBDA_NODE,
         ]
     }
 
@@ -33,6 +36,12 @@ impl Cop for BlockLength {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Handle lambda nodes: ->(x) do...end / ->(x) {...}
+        if let Some(lambda_node) = node.as_lambda_node() {
+            self.check_lambda(source, &lambda_node, config, diagnostics);
+            return;
+        }
+
         // We check CallNode (not BlockNode) so we can read the method name
         // for AllowedMethods/AllowedPatterns filtering.
         let call_node = match node.as_call_node() {
@@ -43,7 +52,7 @@ impl Cop for BlockLength {
         let block_node = match call_node.block() {
             Some(b) => match b.as_block_node() {
                 Some(bn) => bn,
-                None => return, // Lambda literal etc
+                None => return,
             },
             None => return,
         };
@@ -77,22 +86,15 @@ impl Cop for BlockLength {
             }
         }
 
-        let start_offset = block_node.opening_loc().start_offset();
         let end_offset = block_node.closing_loc().start_offset();
-        let count = if let Some(cao) = &count_as_one {
-            if !cao.is_empty() {
-                if let Some(body) = block_node.body() {
-                    let foldable = collect_foldable_ranges(source, &body, cao);
-                    count_body_lines_ex(source, start_offset, end_offset, count_comments, &foldable)
-                } else {
-                    0
-                }
-            } else {
-                count_body_lines(source, start_offset, end_offset, count_comments)
-            }
-        } else {
-            count_body_lines(source, start_offset, end_offset, count_comments)
-        };
+        let count = count_block_lines(
+            source,
+            block_node.opening_loc().start_offset(),
+            end_offset,
+            block_node.body(),
+            count_comments,
+            &count_as_one,
+        );
 
         if count > max {
             // Use call_node location (not block opening) to match RuboCop's
@@ -106,6 +108,92 @@ impl Cop for BlockLength {
             ));
         }
     }
+}
+
+impl BlockLength {
+    fn check_lambda(
+        &self,
+        source: &SourceFile,
+        lambda_node: &ruby_prism::LambdaNode<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let max = config.get_usize("Max", 25);
+        let count_comments = config.get_bool("CountComments", false);
+        let count_as_one = config.get_string_array("CountAsOne");
+
+        let end_offset = lambda_node.closing_loc().start_offset();
+        let count = count_block_lines(
+            source,
+            lambda_node.opening_loc().start_offset(),
+            end_offset,
+            lambda_node.body(),
+            count_comments,
+            &count_as_one,
+        );
+
+        if count > max {
+            let (line, column) = source.offset_to_line_col(lambda_node.location().start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Block has too many lines. [{count}/{max}]"),
+            ));
+        }
+    }
+}
+
+/// Count body lines for a block, folding heredocs and CountAsOne constructs.
+/// Uses the body node's start offset (not opening_loc) to avoid counting
+/// heredoc content lines that physically appear before the body starts.
+fn count_block_lines(
+    source: &SourceFile,
+    opening_offset: usize,
+    end_offset: usize,
+    body: Option<ruby_prism::Node<'_>>,
+    count_comments: bool,
+    count_as_one: &Option<Vec<String>>,
+) -> usize {
+    let body = match body {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    // Use body start offset to skip heredoc content that appears before body.
+    // Same approach as method_length.rs.
+    let (body_start_line, _) = source.offset_to_line_col(body.location().start_offset());
+    let effective_start_offset = if body_start_line > 1 {
+        source
+            .line_col_to_offset(body_start_line - 1, 0)
+            .unwrap_or(opening_offset)
+    } else {
+        opening_offset
+    };
+
+    // Always fold heredoc lines to match RuboCop behavior. In RuboCop's
+    // Parser AST, heredoc content is not included in body.source, so
+    // it never counts toward block length. Prism includes it in the
+    // byte range, so we must fold explicitly.
+    let mut all_foldable: Vec<(usize, usize)> = {
+        let mut ranges = collect_heredoc_ranges(source, &body);
+        if let Some(cao) = count_as_one {
+            if !cao.is_empty() {
+                ranges.extend(collect_foldable_ranges(source, &body, cao));
+            }
+        }
+        ranges
+    };
+    all_foldable.sort();
+    all_foldable.dedup();
+
+    count_body_lines_ex(
+        source,
+        effective_start_offset,
+        end_offset,
+        count_comments,
+        &all_foldable,
+    )
 }
 
 /// Check if a call is a class constructor like `Struct.new`, `Class.new`, `Module.new`, etc.
