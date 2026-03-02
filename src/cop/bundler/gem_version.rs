@@ -6,11 +6,20 @@ use ruby_prism::Visit;
 pub struct GemVersion;
 
 // Known corpus gap (as of 2026-03-02):
-// check-cop --rerun reports excess=0, missing=20 against the current oracle baseline.
-// Attempted fix (reverted): stop treating `!= x.y.z` as a version specification
-// to mirror RuboCop's VERSION_SPECIFICATION_REGEX.
-// Effect: missing went to 0 but excess rose to 9 (regression against acceptance gate).
-// A correct fix needs oracle-aligned per-repo diffing so FN cleanup does not surface FP drift.
+// Acceptance gate baseline for this cop (run: `python3 scripts/check-cop.py Bundler/GemVersion --verbose --rerun`):
+//   expected=14,199, actual=14,179, excess=0, missing=20.
+//
+// Attempted fix (reverted): changed `is_version_specification()` to stop treating
+// "!= x.y.z" as a valid version spec (removed `.trim_start_matches(\"!=\")`) to
+// match RuboCop's `/^\\s*[~<>=]*\\s*[0-9.]+/`.
+//
+// Observed effect at acceptance gate:
+//   expected=14,199, actual=14,208, excess=9, missing=0.
+// So the change removed 20 FN but introduced 9 FP, and was reverted.
+//
+// Follow-up constraint: do not retry this as a blanket parser tweak. A correct fix
+// needs oracle-aligned per-repo/line diffing for `!=` cases before changing
+// `is_version_specification()`.
 
 impl Cop for GemVersion {
     fn name(&self) -> &'static str {

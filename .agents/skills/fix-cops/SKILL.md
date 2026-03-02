@@ -81,6 +81,8 @@ After all selected cops are fixed:
    revert the code change but add a detailed investigation comment to the cop
    source file documenting:
    - What was attempted (with reverted commit SHA)
+   - Exact code path changed (function/condition)
+   - Acceptance-gate numbers before and after (`expected`, `actual`, `excess`, `missing`)
    - What improved and what regressed (X -> Y FP)
    - Why the regression happened
    - What a correct fix must do differently
@@ -89,6 +91,9 @@ After all selected cops are fixed:
    /// ## Known false positives (N FP in corpus as of YYYY-MM-DD)
    ///
    /// Attempted fix: <summary> (commit XXXXXXXX, reverted).
+   /// Code path changed: <file::function and condition changed>.
+   /// Acceptance gate before: expected=?, actual=?, excess=?, missing=?
+   /// Acceptance gate after: expected=?, actual=?, excess=?, missing=?
    /// Effect: fixed A target FP but introduced B new FP (X -> Y total FP).
    /// Root cause of regression: <why this approach overmatched or undermatched>.
    /// A correct fix needs to: <constraints for future implementation>.
@@ -107,6 +112,31 @@ Report:
 - Any cops deferred and why
 - Verification status (`fmt`, `clippy`, `test`, `check-cop`, coverage docs)
 
+### Phase 5: Integrate Back to Main (Default)
+
+Do not leave retained progress only in a worktree branch.
+
+1. Commit all progress worth keeping in the worktree:
+   - Accepted cop fixes: one commit per cop (preferred).
+   - Useful investigation artifacts retained in repo (for example, reverted-attempt notes): separate commit.
+
+2. Integrate those commit(s) into `main` immediately (unless the user explicitly says not to):
+   ```bash
+   git -C /path/to/main checkout main
+   git -C /path/to/main cherry-pick <sha1> [<sha2> ...]
+   ```
+   If a merge is preferred, use a normal non-interactive merge.
+
+3. Verify integration on `main`:
+   ```bash
+   git -C /path/to/main log --oneline -n 10
+   git -C /path/to/main status --short --branch
+   ```
+
+4. Report exactly what was integrated (commit SHA(s) and short subjects).
+
+5. If there is truly no repo-retained progress, explicitly report that no commit was made.
+
 ## Notes
 
 - Use a dedicated git worktree for all code-editing runs of this skill, including single-agent runs.
@@ -120,6 +150,7 @@ Report:
 - Treat unrelated modified files as off-limits: do not edit/revert them unless the user explicitly asks.
 - Do not include unrelated files in your commit; stage only files for the cop(s) you are fixing.
 - Do not pause or block on unrelated working-tree changes; continue your task and leave those files untouched.
+- Commit each cop fix separately for safe cherry-picks, then integrate into `main` before ending the run.
 - Never use `git stash` or `git stash pop`.
 - Do not copy identifiers from private repos into fixtures or source.
 - Prefer generic minimal repros and generic naming in tests.

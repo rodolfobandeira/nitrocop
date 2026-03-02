@@ -83,6 +83,9 @@ Read reduced repros from `/tmp/nitrocop-reduce/` and capture root-cause hypothes
    /// ## Known false positives (N FP in corpus as of YYYY-MM-DD)
    ///
    /// Attempted fix: <summary> (commit XXXXXXXX, reverted).
+   /// Code path changed: <file::function and condition changed>.
+   /// Acceptance gate before: expected=?, actual=?, excess=?, missing=?
+   /// Acceptance gate after: expected=?, actual=?, excess=?, missing=?
    /// Effect: fixed A target FP but introduced B new FP (X -> Y total FP).
    /// Root cause of regression: <why this approach regressed>.
    /// A correct fix needs to: <constraints for a future correct fix>.

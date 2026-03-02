@@ -180,11 +180,15 @@ Parallel-agent activity is common. If you see unrelated modified files, do not e
 
 5. **Handle regressions**: if a fix increases FP count (even if unit tests pass), revert
    the code change but **add a detailed investigation comment** to the cop source file
-   documenting what was tried, why it regressed, and what a correct fix would need. Use:
+   documenting what was tried, exactly where code changed, acceptance-gate numbers
+   before/after, why it regressed, and what a correct fix would need. Use:
    ```rust
    /// ## Known false positives (N FP in corpus as of YYYY-MM-DD)
    ///
    /// An attempt was made to ... (commit XXXXXXXX, reverted). The approach: ...
+   /// Code path changed: <file::function and condition changed>.
+   /// Acceptance gate before: expected=?, actual=?, excess=?, missing=?
+   /// Acceptance gate after: expected=?, actual=?, excess=?, missing=?
    /// This fixed the target FPs but introduced N NEW false positives (X→Y FP).
    /// Root cause of regression: ...
    /// A correct fix needs to: ...
@@ -202,6 +206,31 @@ Parallel-agent activity is common. If you see unrelated modified files, do not e
    - Estimated impact on the target repo's match rate
    - Which cops couldn't be fixed (and why)
    - Summary of changes ready for commit/PR
+
+### Phase 5: Integrate Back to Main (Default)
+
+Do not leave retained progress only in a worktree/collector branch.
+
+1. Ensure all retained progress is committed:
+   - Accepted cop fixes: one commit per cop (preferred).
+   - Useful investigation artifacts retained in repo (for example, reverted-attempt notes): separate commit.
+
+2. Integrate those commit(s) into `main` immediately (unless the user explicitly says not to):
+   ```bash
+   git -C /path/to/main checkout main
+   git -C /path/to/main cherry-pick <sha1> [<sha2> ...]
+   ```
+   If a merge is preferred, use a normal non-interactive merge.
+
+3. Verify integration on `main`:
+   ```bash
+   git -C /path/to/main log --oneline -n 10
+   git -C /path/to/main status --short --branch
+   ```
+
+4. Report exactly what was integrated (commit SHA(s) and short subjects).
+
+5. If there is truly no repo-retained progress, explicitly report that no commit was made.
 
 ## Arguments
 
