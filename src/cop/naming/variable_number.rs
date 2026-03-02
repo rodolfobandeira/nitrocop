@@ -1,7 +1,6 @@
 use crate::cop::node_type::{
     CLASS_VARIABLE_WRITE_NODE, DEF_NODE, GLOBAL_VARIABLE_WRITE_NODE, INSTANCE_VARIABLE_WRITE_NODE,
-    LOCAL_VARIABLE_WRITE_NODE, OPTIONAL_KEYWORD_PARAMETER_NODE, OPTIONAL_PARAMETER_NODE,
-    REQUIRED_KEYWORD_PARAMETER_NODE, REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
+    LOCAL_VARIABLE_WRITE_NODE, OPTIONAL_PARAMETER_NODE, REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -33,9 +32,7 @@ impl Cop for VariableNumber {
             GLOBAL_VARIABLE_WRITE_NODE,
             INSTANCE_VARIABLE_WRITE_NODE,
             LOCAL_VARIABLE_WRITE_NODE,
-            OPTIONAL_KEYWORD_PARAMETER_NODE,
             OPTIONAL_PARAMETER_NODE,
-            REQUIRED_KEYWORD_PARAMETER_NODE,
             REQUIRED_PARAMETER_NODE,
             SYMBOL_NODE,
         ]
@@ -202,40 +199,6 @@ impl Cop for VariableNumber {
                     self,
                     source,
                     name_str,
-                    &param.name_loc(),
-                    enforced_style,
-                    "variable",
-                ) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-        if let Some(param) = node.as_required_keyword_parameter_node() {
-            let name = param.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            let bare = name_str.trim_end_matches(':');
-            if !is_allowed(bare, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    bare,
-                    &param.name_loc(),
-                    enforced_style,
-                    "variable",
-                ) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-        if let Some(param) = node.as_optional_keyword_parameter_node() {
-            let name = param.name().as_slice();
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            let bare = name_str.trim_end_matches(':');
-            if !is_allowed(bare, &allowed_ids, &allowed_pats) {
-                if let Some(diag) = check_number_style(
-                    self,
-                    source,
-                    bare,
                     &param.name_loc(),
                     enforced_style,
                     "variable",
