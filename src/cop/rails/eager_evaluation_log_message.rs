@@ -49,6 +49,14 @@ impl Cop for EagerEvaluationLogMessage {
             return;
         }
 
+        // RuboCop's pattern matches `send` (not `csend`), so safe navigation
+        // `Rails.logger&.debug(...)` is excluded. Check the call operator.
+        if let Some(op) = call.call_operator_loc() {
+            if source.as_bytes()[op.start_offset()..op.end_offset()] == *b"&." {
+                return;
+            }
+        }
+
         // Receiver must be Rails.logger (a 2-method chain)
         let chain = match util::as_method_chain(node) {
             Some(c) => c,
