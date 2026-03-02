@@ -3207,8 +3207,10 @@ fn no_redundant_disable_all() {
 #[test]
 fn redundant_disable_renamed_cop_extended_format() {
     // Naming/PredicateName was renamed to Naming/PredicatePrefix (extended format
-    // in obsoletion.yml with new_name key). A disable directive for the old name
-    // should be flagged as redundant since the old cop name no longer exists.
+    // in obsoletion.yml with new_name key). Using the old name in a disable
+    // comment should suppress the new cop's offense via legacy alias resolution.
+    // Since `is_foo?` triggers Naming/PredicatePrefix, the disable is NOT
+    // redundant.
     let dir = temp_dir("redundant_disable_renamed_cop");
     let file = write_file(
         &dir,
@@ -3227,22 +3229,29 @@ fn redundant_disable_renamed_cop_extended_format() {
         &TierMap::load(),
         &AutocorrectAllowlist::load(),
     );
+
+    // The old name should suppress the offense — no PredicatePrefix diagnostic
+    let prefix_offenses: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Naming/PredicatePrefix")
+        .collect();
+    assert!(
+        prefix_offenses.is_empty(),
+        "Old name should suppress new cop offense, but got: {:?}",
+        prefix_offenses
+    );
+
+    // The directive is used, so it should NOT be redundant
     let redundant: Vec<_> = result
         .diagnostics
         .iter()
         .filter(|d| d.cop_name == "Lint/RedundantCopDisableDirective")
         .collect();
-
-    assert_eq!(
-        redundant.len(),
-        1,
-        "Expected 1 redundant disable for renamed cop Naming/PredicateName, got: {:?}",
-        redundant
-    );
     assert!(
-        redundant[0].message.contains("Naming/PredicateName"),
-        "Message should mention the old cop name: {}",
-        redundant[0].message
+        redundant.is_empty(),
+        "Disable with old cop name that suppresses new cop should not be redundant, got: {:?}",
+        redundant
     );
 
     fs::remove_dir_all(&dir).ok();
@@ -3931,7 +3940,10 @@ fn no_redundant_disable_executed_cop_no_offense() {
 #[test]
 fn redundant_disable_for_renamed_cop() {
     // Naming/PredicateName was renamed to Naming/PredicatePrefix.
-    // Disabling the old name is redundant.
+    // Using the old name in a disable comment should suppress the new cop's
+    // offense (legacy alias resolution). Since the `is_valid?` method
+    // triggers Naming/PredicatePrefix, the disable is NOT redundant — it
+    // actively suppresses the offense.
     let dir = temp_dir("redundant_disable_for_renamed_cop");
     let file = write_file(
         &dir,
@@ -3950,22 +3962,29 @@ fn redundant_disable_for_renamed_cop() {
         &TierMap::load(),
         &AutocorrectAllowlist::load(),
     );
+
+    // The old name should suppress the offense — no PredicatePrefix diagnostic
+    let prefix_offenses: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Naming/PredicatePrefix")
+        .collect();
+    assert!(
+        prefix_offenses.is_empty(),
+        "Old name should suppress new cop offense, but got: {:?}",
+        prefix_offenses
+    );
+
+    // The directive is used (it suppressed an offense), so it should NOT be redundant
     let redundant: Vec<_> = result
         .diagnostics
         .iter()
         .filter(|d| d.cop_name == "Lint/RedundantCopDisableDirective")
         .collect();
-
-    assert_eq!(
-        redundant.len(),
-        1,
-        "Renamed cop should be flagged as redundant, got: {:?}",
-        redundant
-    );
     assert!(
-        redundant[0].message.contains("Naming/PredicateName"),
-        "Message should mention the renamed cop: {}",
-        redundant[0].message
+        redundant.is_empty(),
+        "Disable with old cop name that suppresses new cop should not be redundant, got: {:?}",
+        redundant
     );
 
     fs::remove_dir_all(&dir).ok();

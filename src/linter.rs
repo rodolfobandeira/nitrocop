@@ -68,7 +68,7 @@ impl PhaseTimers {
 
 /// Renamed cops from vendor/rubocop/config/obsoletion.yml.
 /// Maps old cop name -> new cop name (e.g., "Naming/PredicateName" -> "Naming/PredicatePrefix").
-static RENAMED_COPS: LazyLock<HashMap<String, String>> =
+pub(crate) static RENAMED_COPS: LazyLock<HashMap<String, String>> =
     LazyLock::new(|| parse_renamed_cops(include_str!("../vendor/rubocop/config/obsoletion.yml")));
 
 /// Parse the `renamed:` section from obsoletion.yml content.

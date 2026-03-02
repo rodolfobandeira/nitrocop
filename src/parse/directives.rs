@@ -9,6 +9,17 @@ static DIRECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"#\s*(?:rubocop|nitrocop|standard)\s*:\s*(disable|enable|todo)\s+(.+)").unwrap()
 });
 
+/// Reverse map from new cop name -> list of old cop names that were renamed to it.
+/// Built from `RENAMED_COPS` in linter.rs. Used to resolve legacy cop names in
+/// disable comments (e.g., `Style/AccessorMethodName` suppresses `Naming/AccessorMethodName`).
+static REVERSE_RENAMED_COPS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
+    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+    for (old, new) in crate::linter::RENAMED_COPS.iter() {
+        reverse.entry(new.clone()).or_default().push(old.clone());
+    }
+    reverse
+});
+
 /// A single disable directive entry (one cop name from a `# rubocop:disable` comment).
 #[derive(Debug, Clone)]
 pub struct DisableDirective {
@@ -98,6 +109,13 @@ impl DisabledRanges {
                     }
                 })
                 .filter(|s| !s.is_empty())
+                .map(|s| {
+                    // Strip trailing non-identifier chars (e.g., trailing `?` in
+                    // `Naming/PredicatePrefix?`). RuboCop's regex stops at
+                    // `[A-Za-z]\w+(/[A-Za-z]\w+)*` so trailing punctuation is ignored.
+                    s.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '/')
+                })
+                .filter(|s| !s.is_empty())
                 .collect();
 
             match action {
@@ -163,11 +181,22 @@ impl DisabledRanges {
 
     /// Returns true if `cop_name` is disabled at `line`.
     ///
-    /// Checks the exact cop name, its department prefix, and "all".
+    /// Checks the exact cop name, legacy aliases (renamed cops), its department
+    /// prefix, and "all".
     pub fn is_disabled(&self, cop_name: &str, line: usize) -> bool {
         // Check exact cop name
         if self.check_ranges(cop_name, line) {
             return true;
+        }
+
+        // Check legacy cop names that were renamed to this cop
+        // (e.g., Style/AccessorMethodName -> Naming/AccessorMethodName)
+        if let Some(old_names) = REVERSE_RENAMED_COPS.get(cop_name) {
+            for old_name in old_names {
+                if self.check_ranges(old_name, line) {
+                    return true;
+                }
+            }
         }
 
         // Check department name (e.g., "Layout" for "Layout/LineLength")
@@ -191,6 +220,16 @@ impl DisabledRanges {
         if self.check_ranges(cop_name, line) {
             self.mark_directives_used(cop_name, line);
             suppressed = true;
+        }
+
+        // Check legacy cop names that were renamed to this cop
+        if let Some(old_names) = REVERSE_RENAMED_COPS.get(cop_name) {
+            for old_name in old_names {
+                if self.check_ranges(old_name, line) {
+                    self.mark_directives_used(old_name, line);
+                    suppressed = true;
+                }
+            }
         }
 
         // Check department name (e.g., "Layout" for "Layout/LineLength")
@@ -459,6 +498,41 @@ mod tests {
         let unused: Vec<_> = dr.unused_directives().collect();
         assert_eq!(unused.len(), 1);
         assert_eq!(unused[0].cop_name, "Baz/Qux");
+    }
+
+    #[test]
+    fn trailing_non_identifier_chars_stripped() {
+        // A trailing `?` on the cop name should be stripped so it matches
+        let dr = disabled_ranges("x = 1 # rubocop:disable Naming/PredicatePrefix?\ny = 2\n");
+        assert!(
+            dr.is_disabled("Naming/PredicatePrefix", 1),
+            "trailing ? should be stripped"
+        );
+        assert!(!dr.is_disabled("Naming/PredicatePrefix?", 1));
+    }
+
+    #[test]
+    fn legacy_cop_name_resolved() {
+        // Style/AccessorMethodName was renamed to Naming/AccessorMethodName
+        let dr = disabled_ranges("x = 1 # rubocop:disable Style/AccessorMethodName\ny = 2\n");
+        assert!(
+            dr.is_disabled("Naming/AccessorMethodName", 1),
+            "legacy name Style/AccessorMethodName should resolve to Naming/AccessorMethodName"
+        );
+    }
+
+    #[test]
+    fn legacy_cop_name_block_disable() {
+        let src = "# rubocop:disable Style/ConstantName\nFoo_bar = 1\n# rubocop:enable Style/ConstantName\nBAZ = 2\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            dr.is_disabled("Naming/ConstantName", 2),
+            "legacy block disable should cover new name"
+        );
+        assert!(
+            !dr.is_disabled("Naming/ConstantName", 4),
+            "after enable, should not be disabled"
+        );
     }
 
     mod prop_tests {
