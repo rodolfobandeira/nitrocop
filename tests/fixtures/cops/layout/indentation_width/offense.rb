@@ -82,3 +82,74 @@ end
       else
         nil
       end
+
+# else body with wrong indentation
+if cond
+  func1
+else
+ func2
+ ^^^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+end
+
+# elsif body with wrong indentation
+if a1
+  b1
+elsif a2
+ b2
+ ^^^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+else
+  c
+end
+
+# rescue body with wrong indentation
+begin
+  do_something
+rescue SomeException
+ handle_error
+ ^^^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+end
+
+# ensure body with wrong indentation
+begin
+  do_something
+ensure
+    cleanup
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+end
+
+# rescue in def body with wrong indentation
+def my_func
+  do_something
+rescue StandardError
+ handle_error
+ ^^^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+end
+
+# unless body with wrong indentation
+unless cond
+ func
+ ^^^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+end
+
+# for loop body with wrong indentation
+for var in 1..10
+ func
+ ^^^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+end
+
+# singleton class body with wrong indentation
+class << self
+    def foo
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+    end
+end
+
+# else in begin/rescue with wrong indentation
+begin
+  do_something
+rescue StandardError
+  handle
+else
+   success_action
+   ^^^ Layout/IndentationWidth: Use 2 (not 3) spaces for indentation.
+end

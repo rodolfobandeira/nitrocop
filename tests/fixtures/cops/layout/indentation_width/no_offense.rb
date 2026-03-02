@@ -147,3 +147,83 @@ end
 @cache ||= begin
   load_cache
 end
+
+# else body correctly indented
+if cond
+  func1
+else
+  func2
+end
+
+# elsif body correctly indented
+if a1
+  b1
+elsif a2
+  b2
+else
+  c
+end
+
+# rescue body correctly indented
+begin
+  do_something
+rescue StandardError
+  handle_error
+end
+
+# ensure body correctly indented
+begin
+  do_something
+ensure
+  cleanup
+end
+
+# rescue in def correctly indented
+def my_func
+  do_something
+rescue StandardError
+  handle_error
+end
+
+# unless body correctly indented
+unless cond
+  func
+end
+
+# for loop body correctly indented
+for var in 1..10
+  func
+end
+
+# singleton class body correctly indented
+class << self
+  def foo
+  end
+end
+
+# else in begin/rescue correctly indented
+begin
+  do_something
+rescue StandardError
+  handle
+else
+  success_action
+end
+
+# rescue after empty body (no offense)
+begin
+rescue
+  handle_error
+end
+
+# ensure after empty body (no offense)
+begin
+ensure
+  something
+end
+
+# rescue after empty def (no offense)
+def foo
+rescue
+  handle_error
+end

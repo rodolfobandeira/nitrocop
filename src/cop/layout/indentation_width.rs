@@ -1,6 +1,7 @@
 use crate::cop::node_type::{
-    BEGIN_NODE, BLOCK_NODE, CALL_NODE, CLASS_NODE, DEF_NODE, IF_NODE, MODULE_NODE, STATEMENTS_NODE,
-    UNTIL_NODE, WHEN_NODE, WHILE_NODE,
+    BEGIN_NODE, BLOCK_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, FOR_NODE,
+    IF_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE, UNLESS_NODE, UNTIL_NODE,
+    WHEN_NODE, WHILE_NODE,
 };
 use crate::cop::util::{assignment_context_base_col, expected_indent_for_body};
 use crate::cop::{Cop, CopConfig};
@@ -123,6 +124,83 @@ impl IndentationWidth {
 
         Vec::new()
     }
+
+    /// Check rescue/ensure/else clauses on a BeginNode. These nodes bypass
+    /// the generic visit_branch_node_enter callback, so they must be checked
+    /// from their parent.
+    fn check_begin_clauses(
+        &self,
+        source: &SourceFile,
+        begin_node: &ruby_prism::BeginNode<'_>,
+        width: usize,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Check rescue clause(s)
+        let mut rescue_opt = begin_node.rescue_clause();
+        while let Some(rescue_node) = rescue_opt {
+            let kw_offset = rescue_node.keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            diagnostics.extend(self.check_statements_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                None,
+                rescue_node.statements(),
+                width,
+            ));
+            rescue_opt = rescue_node.subsequent();
+        }
+
+        // Check else clause (in begin/rescue/else/end)
+        if let Some(else_clause) = begin_node.else_clause() {
+            let kw_offset = else_clause.else_keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            diagnostics.extend(self.check_statements_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                None,
+                else_clause.statements(),
+                width,
+            ));
+        }
+
+        // Check ensure clause
+        if let Some(ensure_node) = begin_node.ensure_clause() {
+            let kw_offset = ensure_node.ensure_keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            diagnostics.extend(self.check_statements_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                None,
+                ensure_node.statements(),
+                width,
+            ));
+        }
+    }
+
+    /// Check else body indentation for an if/unless subsequent (ElseNode).
+    /// ElseNode bypasses visit_branch_node_enter, so must be checked from
+    /// the parent IfNode/UnlessNode.
+    fn check_else_clause(
+        &self,
+        source: &SourceFile,
+        else_node: &ruby_prism::ElseNode<'_>,
+        width: usize,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let kw_offset = else_node.else_keyword_loc().start_offset();
+        let (_, kw_col) = source.offset_to_line_col(kw_offset);
+        diagnostics.extend(self.check_statements_indentation(
+            source,
+            kw_offset,
+            kw_col,
+            None,
+            else_node.statements(),
+            width,
+        ));
+    }
 }
 
 impl Cop for IndentationWidth {
@@ -135,11 +213,16 @@ impl Cop for IndentationWidth {
             BEGIN_NODE,
             BLOCK_NODE,
             CALL_NODE,
+            CASE_MATCH_NODE,
+            CASE_NODE,
             CLASS_NODE,
             DEF_NODE,
+            FOR_NODE,
             IF_NODE,
             MODULE_NODE,
+            SINGLETON_CLASS_NODE,
             STATEMENTS_NODE,
+            UNLESS_NODE,
             UNTIL_NODE,
             WHEN_NODE,
             WHILE_NODE,
@@ -185,6 +268,7 @@ impl Cop for IndentationWidth {
         //   end
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(begin_kw_loc) = begin_node.begin_keyword_loc() {
+                // Explicit `begin...end` block
                 let kw_offset = begin_kw_loc.start_offset();
                 let (_, kw_col) = source.offset_to_line_col(kw_offset);
                 let base_col = if let Some(end_loc) = begin_node.end_keyword_loc() {
@@ -205,8 +289,12 @@ impl Cop for IndentationWidth {
                     begin_node.statements(),
                     width,
                 ));
-                return;
+                // Check rescue/ensure/else clauses (these bypass the walker)
+                self.check_begin_clauses(source, &begin_node, width, diagnostics);
             }
+            // Implicit BeginNode (e.g., `def...rescue...end`) — clauses are
+            // checked by the parent DefNode handler, skip here to avoid dupes.
+            return;
         }
 
         if let Some(class_node) = node.as_class_node() {
@@ -217,6 +305,19 @@ impl Cop for IndentationWidth {
                 kw_offset,
                 kw_col,
                 class_node.body(),
+                width,
+            ));
+            return;
+        }
+
+        if let Some(sclass_node) = node.as_singleton_class_node() {
+            let kw_offset = sclass_node.class_keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            diagnostics.extend(self.check_body_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                sclass_node.body(),
                 width,
             ));
             return;
@@ -256,6 +357,13 @@ impl Cop for IndentationWidth {
                 def_node.body(),
                 width,
             ));
+            // For `def...rescue...end`, the body is an implicit BeginNode.
+            // Check its rescue/ensure/else clauses.
+            if let Some(body) = def_node.body() {
+                if let Some(begin_node) = body.as_begin_node() {
+                    self.check_begin_clauses(source, &begin_node, width, diagnostics);
+                }
+            }
             return;
         }
 
@@ -287,8 +395,48 @@ impl Cop for IndentationWidth {
                     if_node.statements(),
                     width,
                 ));
+                // Check else body (ElseNode bypasses the walker).
+                // elsif is another IfNode that will be visited directly.
+                if let Some(subsequent) = if_node.subsequent() {
+                    if let Some(else_node) = subsequent.as_else_node() {
+                        self.check_else_clause(source, &else_node, width, diagnostics);
+                    }
+                }
                 return;
             }
+        }
+
+        if let Some(unless_node) = node.as_unless_node() {
+            let kw_offset = unless_node.keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            diagnostics.extend(self.check_statements_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                None,
+                unless_node.statements(),
+                width,
+            ));
+            // Check else clause (ElseNode bypasses the walker)
+            if let Some(else_clause) = unless_node.else_clause() {
+                self.check_else_clause(source, &else_clause, width, diagnostics);
+            }
+            return;
+        }
+
+        // Handle for loop body indentation.
+        if let Some(for_node) = node.as_for_node() {
+            let kw_offset = for_node.for_keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            diagnostics.extend(self.check_statements_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                None,
+                for_node.statements(),
+                width,
+            ));
+            return;
         }
 
         // Handle block body indentation from CallNode (since BlockNode is
@@ -395,6 +543,22 @@ impl Cop for IndentationWidth {
                 when_node.statements(),
                 width,
             ));
+            return;
+        }
+
+        // Check else clause on case/when (ElseNode bypasses the walker)
+        if let Some(case_node) = node.as_case_node() {
+            if let Some(else_clause) = case_node.else_clause() {
+                self.check_else_clause(source, &else_clause, width, diagnostics);
+            }
+            return;
+        }
+
+        // Check else clause on case/in pattern matching
+        if let Some(case_match_node) = node.as_case_match_node() {
+            if let Some(else_clause) = case_match_node.else_clause() {
+                self.check_else_clause(source, &else_clause, width, diagnostics);
+            }
             return;
         }
 
