@@ -5,6 +5,13 @@ use ruby_prism::Visit;
 
 pub struct GemVersion;
 
+// Known corpus gap (as of 2026-03-02):
+// check-cop --rerun reports excess=0, missing=20 against the current oracle baseline.
+// Attempted fix (reverted): stop treating `!= x.y.z` as a version specification
+// to mirror RuboCop's VERSION_SPECIFICATION_REGEX.
+// Effect: missing went to 0 but excess rose to 9 (regression against acceptance gate).
+// A correct fix needs oracle-aligned per-repo diffing so FN cleanup does not surface FP drift.
+
 impl Cop for GemVersion {
     fn name(&self) -> &'static str {
         "Bundler/GemVersion"
