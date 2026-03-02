@@ -482,6 +482,9 @@ impl RedundantLineBreakVisitor<'_> {
         if !self.suitable_as_single_line(start_offset, end_offset) {
             return;
         }
+        if self.configured_to_not_be_inspected(start_offset, end_offset) {
+            return;
+        }
         self.register_offense(start_offset, end_offset);
     }
 }

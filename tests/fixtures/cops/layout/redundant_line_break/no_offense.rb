@@ -172,3 +172,23 @@ User
   .where(role: "manager", department_id: Department.find_by(name: "Engineering").id)
   .includes(:department, :reports, :direct_reports, :manager)
   .order(:last_name, :first_name)
+
+# Assignment with a block on RHS (InspectBlocks: false should skip these)
+wrap = lambda do |_, inner|
+  inner.call
+end
+
+# Instance variable assignment with a block on RHS
+@thread = Thread.new do
+  listen
+end
+
+# Assignment with a method call that has a multiline do block
+result = items.select do |item|
+  item.active?
+end
+
+# Assignment with a multiline brace block
+handler = proc { |x|
+  process(x)
+}
