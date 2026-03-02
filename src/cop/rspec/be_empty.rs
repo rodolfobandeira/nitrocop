@@ -48,8 +48,7 @@ impl Cop for BeEmpty {
             Some(c) => c,
             None => return,
         };
-        if expectation_call.receiver().is_some() || expectation_call.name().as_slice() != b"expect"
-        {
+        if expectation_call.receiver().is_some() || expectation_call.name().as_slice() != b"expect" {
             return;
         }
 
