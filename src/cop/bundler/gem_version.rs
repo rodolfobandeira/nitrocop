@@ -1,8 +1,7 @@
-use crate::cop::{Cop, CopConfig};
+use crate::cop::{Cop, CopConfig, util};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
-
-use super::extract_gem_name;
+use ruby_prism::Visit;
 
 pub struct GemVersion;
 
@@ -15,137 +14,145 @@ impl Cop for GemVersion {
         &["**/*.gemfile", "**/Gemfile", "**/gems.rb"]
     }
 
-    fn check_lines(
+    fn check_source(
         &self,
         source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let enforced_style = config.get_str("EnforcedStyle", "required");
         let allowed_gems = config.get_string_array("AllowedGems").unwrap_or_default();
+        let enforced_style = config.get_str("EnforcedStyle", "required");
 
-        for (i, line) in source.lines().enumerate() {
-            let line_str = std::str::from_utf8(line).unwrap_or("");
-
-            if let Some(gem_name) = extract_gem_name(line_str) {
-                // Skip allowed gems
-                if allowed_gems.iter().any(|g| g == gem_name) {
-                    continue;
-                }
-
-                let has_version = has_version_or_source_specifier(line_str);
-                let line_num = i + 1;
-
-                match enforced_style {
-                    "required" => {
-                        if !has_version {
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line_num,
-                                0,
-                                "Gem version specification is required.".to_string(),
-                            ));
-                        }
-                    }
-                    "forbidden" => {
-                        if has_version {
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line_num,
-                                0,
-                                "Gem version specification is forbidden.".to_string(),
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let mut visitor = GemVersionVisitor {
+            cop: self,
+            source,
+            diagnostics: Vec::new(),
+            allowed_gems,
+            enforced_style,
+        };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
     }
 }
 
-/// ## Known false positives/negatives (corpus as of 2026-03-02)
-///
-/// Attempted fix (reverted): treat `git:`/`github:` without `branch`/`ref`/`tag`
-/// as missing version specs to eliminate known false negatives.
-/// Effect: reduced FN but introduced FP regressions in corpus reruns
-/// (`Bundler/GemVersion` changed from FP=0/FN=198 to FP=25/FN=0).
-/// Root cause: this cop currently uses line-based parsing, so multi-line gem
-/// declarations can place commit references (`branch`/`ref`/`tag`) on later
-/// lines that this function cannot see, which causes false positives.
-/// A correct fix needs to inspect full call arguments (AST/source-aware) across
-/// multi-line declarations before changing `git:` handling.
-///
-/// Check if a gem declaration has a version specifier or source alternative
-/// (git:, github:, branch:, ref:, tag:).
-fn has_version_or_source_specifier(line: &str) -> bool {
-    let trimmed = line.trim();
+struct GemVersionVisitor<'a> {
+    cop: &'a GemVersion,
+    source: &'a SourceFile,
+    diagnostics: Vec<Diagnostic>,
+    allowed_gems: Vec<String>,
+    enforced_style: &'a str,
+}
 
-    // Find the end of the gem name (closing quote)
-    let first_quote = match trimmed.find(['\'', '"']) {
-        Some(idx) => idx,
-        None => return false,
-    };
-    let quote_char = trimmed.as_bytes()[first_quote];
-    let after_name_start = first_quote + 1;
-    let name_end = match trimmed[after_name_start..].find(|c: char| c as u8 == quote_char) {
-        Some(idx) => after_name_start + idx + 1,
-        None => return false,
-    };
-
-    let rest = trimmed[name_end..].trim();
-
-    // No arguments after gem name
-    if rest.is_empty() {
-        return false;
-    }
-
-    // Must have a comma to have additional arguments
-    let rest = if let Some(stripped) = rest.strip_prefix(',') {
-        stripped.trim()
-    } else {
-        return false;
-    };
-
-    // Check for source alternatives: git:, github:, branch:, ref:, tag:
-    let source_keywords = ["git:", "github:", "branch:", "ref:", "tag:"];
-    for keyword in &source_keywords {
-        if rest.contains(keyword) {
-            return true;
+impl<'pr> Visit<'pr> for GemVersionVisitor<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if node.receiver().is_some() || node.name().as_slice() != b"gem" {
+            ruby_prism::visit_call_node(self, node);
+            return;
         }
-    }
 
-    // Check for version string — first non-keyword argument that is a quoted version
-    // A version string starts with optional operator then digits
-    if rest.starts_with('\'') || rest.starts_with('"') {
-        let q = rest.as_bytes()[0];
-        if let Some(end) = rest[1..].find(|c: char| c as u8 == q) {
-            let val = &rest[1..1 + end];
-            if is_version_string(val) {
+        let Some(gem_name) = gem_name_from_call(node) else {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        };
+        if self
+            .allowed_gems
+            .iter()
+            .any(|allowed| allowed.as_bytes() == gem_name.as_slice())
+        {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        }
+
+        let has_version_spec = includes_version_specification(node);
+        let has_commit_ref = includes_commit_reference(node);
+        let offense = match self.enforced_style {
+            "required" => !has_version_spec && !has_commit_ref,
+            "forbidden" => has_version_spec || has_commit_ref,
+            _ => false,
+        };
+
+        if offense {
+            let loc = node.location();
+            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            let message = if self.enforced_style == "forbidden" {
+                "Gem version specification is forbidden."
+            } else {
+                "Gem version specification is required."
+            };
+            self.diagnostics.push(self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                message.to_string(),
+            ));
+        }
+
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+fn gem_name_from_call(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
+    let first_arg = util::first_positional_arg(call)?;
+    util::string_value(&first_arg)
+}
+
+fn includes_version_specification(call: &ruby_prism::CallNode<'_>) -> bool {
+    let Some(args) = call.arguments() else {
+        return false;
+    };
+
+    let mut positional_index = 0usize;
+    for arg in args.arguments().iter() {
+        if arg.as_keyword_hash_node().is_some() {
+            continue;
+        }
+
+        if positional_index == 0 {
+            positional_index += 1;
+            continue;
+        }
+        positional_index += 1;
+
+        if let Some(s) = arg.as_string_node() {
+            if is_version_specification(s.unescaped()) {
                 return true;
             }
         }
     }
 
-    // Check if there's a keyword-only argument like `require: false` (not a version)
-    // If we get here and haven't found a version, there's no version
     false
 }
 
-/// Check if a string looks like a version specifier.
-fn is_version_string(s: &str) -> bool {
-    let s = s.trim();
-    let s = s
+fn includes_commit_reference(call: &ruby_prism::CallNode<'_>) -> bool {
+    [b"branch".as_slice(), b"ref".as_slice(), b"tag".as_slice()]
+        .iter()
+        .any(|key| {
+            util::keyword_arg_value(call, key)
+                .and_then(|value| value.as_string_node())
+                .is_some()
+        })
+}
+
+fn is_version_specification(value: &[u8]) -> bool {
+    let s = std::str::from_utf8(value).unwrap_or("").trim();
+    let stripped = s
         .trim_start_matches("~>")
         .trim_start_matches(">=")
         .trim_start_matches("<=")
+        .trim_start_matches("==")
         .trim_start_matches("!=")
         .trim_start_matches('>')
         .trim_start_matches('<')
         .trim_start_matches('=')
         .trim();
-    s.starts_with(|c: char| c.is_ascii_digit())
+
+    stripped
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '.')
 }
 
 #[cfg(test)]

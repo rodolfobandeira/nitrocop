@@ -6,6 +6,17 @@ use super::extract_gem_name;
 
 pub struct GemComment;
 
+/// ## Known corpus gap (1 FN as of 2026-03-02)
+///
+/// Landed fix: ignore magic comments (e.g., `# frozen_string_literal: true`) as
+/// gem description comments.
+/// Attempted fix (reverted): also ignore preceding comments on modifier-guarded
+/// gem declarations (`gem ... if/unless ...`).
+/// Effect of reverted attempt: introduced FP regressions in corpus rerun
+/// (`Bundler/GemComment` moved from FP=0/FN=1 to FP=13/FN=0).
+/// A correct remaining fix likely needs AST/comment-association parity with RuboCop
+/// (`processed_source.ast_with_comments`) instead of line-adjacent heuristics.
+
 impl Cop for GemComment {
     fn name(&self) -> &'static str {
         "Bundler/GemComment"
@@ -63,7 +74,10 @@ impl Cop for GemComment {
                         && std::str::from_utf8(lines[i - 1])
                             .unwrap_or("")
                             .trim()
-                            .starts_with('#'));
+                            .starts_with('#')
+                        && !is_magic_comment(
+                            std::str::from_utf8(lines[i - 1]).unwrap_or("").trim(),
+                        ));
 
                 if !has_comment {
                     let line_num = i + 1;
@@ -146,6 +160,19 @@ fn has_inline_comment(line: &str) -> bool {
         }
     }
     false
+}
+
+fn is_magic_comment(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return false;
+    }
+
+    let body = trimmed.trim_start_matches('#').trim_start();
+    body.starts_with("frozen_string_literal:")
+        || body.starts_with("encoding:")
+        || body.starts_with("coded by:")
+        || body.starts_with("-*-")
 }
 
 #[cfg(test)]
