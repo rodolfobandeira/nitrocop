@@ -98,16 +98,24 @@ fn check_param_name(
 ) {
     let name_str = std::str::from_utf8(name).unwrap_or("");
 
-    // Check allowed names
+    // RuboCop skips plain `_` entirely
+    if name_str == "_" {
+        return;
+    }
+
+    // Strip leading underscores for all checks, matching RuboCop's UncommunicativeName mixin
+    let stripped = name_str.trim_start_matches('_');
+
+    // Check allowed names (against stripped name, matching RuboCop)
     if let Some(allowed) = config.get_string_array("AllowedNames") {
-        if allowed.iter().any(|a| a == name_str) {
+        if allowed.iter().any(|a| a == stripped) {
             return;
         }
     }
 
-    // Check forbidden names
+    // Check forbidden names (against stripped name, matching RuboCop)
     if let Some(forbidden) = config.get_string_array("ForbiddenNames") {
-        if forbidden.iter().any(|f| f == name_str) {
+        if forbidden.iter().any(|f| f == stripped) {
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             diagnostics.push(cop.diagnostic(
                 source,
@@ -119,8 +127,8 @@ fn check_param_name(
         }
     }
 
-    // Check for capital letters
-    if name.iter().any(|&b| b.is_ascii_uppercase()) {
+    // Check for capital letters (against stripped name, matching RuboCop)
+    if stripped.bytes().any(|b| b.is_ascii_uppercase()) {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(cop.diagnostic(
             source,
@@ -131,8 +139,8 @@ fn check_param_name(
         return;
     }
 
-    // Check minimum length
-    if name.len() < min_length {
+    // Check minimum length (against stripped name, matching RuboCop)
+    if stripped.len() < min_length {
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(cop.diagnostic(
             source,
