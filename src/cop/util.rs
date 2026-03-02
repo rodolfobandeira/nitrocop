@@ -22,13 +22,14 @@ pub fn count_body_lines_ex(
     count_comments: bool,
     foldable_ranges: &[(usize, usize)],
 ) -> usize {
-    count_body_lines_full(
+    count_body_lines_impl(
         source,
         start_offset,
         end_offset,
         count_comments,
         foldable_ranges,
         &[],
+        false,
     )
 }
 
@@ -44,6 +45,35 @@ pub fn count_body_lines_full(
     count_comments: bool,
     foldable_ranges: &[(usize, usize)],
     excluded_ranges: &[(usize, usize)],
+) -> usize {
+    count_body_lines_impl(
+        source,
+        start_offset,
+        end_offset,
+        count_comments,
+        foldable_ranges,
+        excluded_ranges,
+        true,
+    )
+}
+
+/// Internal implementation for counting body lines.
+///
+/// When `classlike` is true, replicates RuboCop's off-by-one in
+/// `CodeLengthCalculator#classlike_code_length`: for each line number `ln` in the
+/// body range, RuboCop accesses `@processed_source[ln]` (0-indexed array lookup on
+/// 1-indexed line numbers), which effectively examines the content of line `ln+1`.
+/// This skips the first body line and instead counts the `end` keyword line.
+/// For most modules/classes the two effects cancel out, but they diverge when the
+/// first body line is blank/comment (FN) or near inner class/module boundaries (FP).
+fn count_body_lines_impl(
+    source: &SourceFile,
+    start_offset: usize,
+    end_offset: usize,
+    count_comments: bool,
+    foldable_ranges: &[(usize, usize)],
+    excluded_ranges: &[(usize, usize)],
+    classlike: bool,
 ) -> usize {
     let (start_line, _) = source.offset_to_line_col(start_offset);
     let (end_line, _) = source.offset_to_line_col(end_offset);
@@ -86,7 +116,14 @@ pub fn count_body_lines_full(
             continue;
         }
 
-        let line = lines[line_num - 1]; // convert to 0-indexed
+        // When classlike is true, use lines[line_num] (shifted by +1) to match
+        // RuboCop's off-by-one in processed_source[ln] indexing.
+        // Otherwise use lines[line_num - 1] (correct 0-indexed access).
+        let line_index = if classlike { line_num } else { line_num - 1 };
+        if line_index >= lines.len() {
+            break;
+        }
+        let line = lines[line_index];
         let trimmed = trim_bytes(line);
 
         // Skip blank lines
