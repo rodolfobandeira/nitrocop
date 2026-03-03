@@ -181,11 +181,19 @@ def clear_file_cache():
     shutil.rmtree(cache_dir, ignore_errors=True)
 
 
-def corpus_env() -> dict[str, str]:
-    """Environment variables for corpus runs, matching CI exactly."""
+def corpus_env(repo_dir: str | None = None) -> dict[str, str]:
+    """Environment variables for corpus runs, matching CI exactly.
+
+    When repo_dir is set, GIT_CEILING_DIRECTORIES isolates the corpus repo
+    from the parent nitrocop project's .gitignore (which excludes vendor/corpus/).
+    Without this, the `ignore` crate's gitignore-aware file walker skips all
+    files in corpus repos, producing 0 offenses.
+    """
     env = os.environ.copy()
     env["BUNDLE_GEMFILE"] = str(PROJECT_ROOT / "bench" / "corpus" / "Gemfile")
     env["BUNDLE_PATH"] = str(PROJECT_ROOT / "bench" / "corpus" / "vendor" / "bundle")
+    if repo_dir:
+        env["GIT_CEILING_DIRECTORIES"] = str(CORPUS_DIR)
     return env
 
 
@@ -229,7 +237,7 @@ def _run_one_repo(args: tuple[str, str]) -> tuple[str, int]:
         result = subprocess.run(
             nitrocop_cmd(cop_name, "."),
             capture_output=True, text=True, timeout=120,
-            cwd=repo_dir, env=corpus_env(),
+            cwd=repo_dir, env=corpus_env(repo_dir),
         )
     except subprocess.TimeoutExpired:
         return (repo_id, -1)
