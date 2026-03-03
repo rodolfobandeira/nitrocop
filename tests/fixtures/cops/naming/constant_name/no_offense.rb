@@ -17,3 +17,9 @@ Config = setup_config
 # Lambda
 Handler = -> { process }
 MyProc = proc { do_something }
+
+# Array/regex literal assignments are allowed
+Helpcmd = %w(-help --help -h)
+Pattern = /\d+/
+BracketDirectives = /\[\s*(?:ditto|tight)\s*\]/
+Symbols = %i(a b c)

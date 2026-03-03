@@ -99,6 +99,16 @@ fn is_valid_rhs_for_assignment(value: &ruby_prism::Node<'_>) -> bool {
         return true;
     }
 
+    // Array literal: `Helpcmd = %w(...)`, `Symbols = %i(...)`
+    if value.as_array_node().is_some() {
+        return true;
+    }
+
+    // Regex literal: `Pattern = /regex/`
+    if value.as_regular_expression_node().is_some() {
+        return true;
+    }
+
     // Method call: allowed if receiver is nil or receiver is not a literal.
     // This covers patterns like `NewClass = some_factory_method` and
     // `Uchar1max = (1<<7) - 1` (receiver is a call expression, not a literal).
