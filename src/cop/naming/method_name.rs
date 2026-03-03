@@ -47,6 +47,14 @@ impl Cop for MethodName {
             return;
         }
 
+        // Skip CamelCase singleton methods (def self.ClassName) — RuboCop allows these
+        // as factory/constructor methods
+        if def_node.receiver().is_some()
+            && method_name.first().is_some_and(|b| b.is_ascii_uppercase())
+        {
+            return;
+        }
+
         let loc = def_node.name_loc();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
 

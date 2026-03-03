@@ -344,12 +344,13 @@ pub fn is_snake_case(name: &[u8]) -> bool {
         return true;
     }
     // Allow leading underscores (e.g., _foo)
-    // Must not contain uppercase letters
+    // Must not contain ASCII uppercase letters
+    // Non-ASCII bytes (UTF-8 multibyte sequences like μ/µ) are allowed
     for &b in name {
         if b.is_ascii_uppercase() {
             return false;
         }
-        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || !b.is_ascii()) {
             // Allow ? and ! at end for Ruby method names
             if b == b'?' || b == b'!' || b == b'=' {
                 continue;

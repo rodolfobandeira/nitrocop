@@ -29,3 +29,23 @@ end
 def valid?
   true
 end
+
+# Unicode characters in method names (not ASCII uppercase)
+def elapsed_μs
+  42
+end
+
+def nowµs
+  Time.now
+end
+
+# CamelCase singleton factory methods (def self.X)
+module Foo
+  def self.Dimension(*args)
+    new(*args)
+  end
+
+  def self.Point(*args)
+    new(*args)
+  end
+end
