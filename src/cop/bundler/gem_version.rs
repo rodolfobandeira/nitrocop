@@ -150,7 +150,7 @@ fn is_version_specification(value: &[u8]) -> bool {
     let s = std::str::from_utf8(value).unwrap_or("");
     let rest = s.trim_start();
     // Skip zero or more characters from [~<>=]
-    let rest = rest.trim_start_matches(|c: char| matches!(c, '~' | '<' | '>' | '='));
+    let rest = rest.trim_start_matches(['~', '<', '>', '=']);
     let rest = rest.trim_start();
     // Must have at least one [0-9.]
     rest.starts_with(|c: char| c.is_ascii_digit() || c == '.')

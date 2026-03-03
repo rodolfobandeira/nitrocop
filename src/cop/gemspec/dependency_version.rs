@@ -107,10 +107,8 @@ fn parse_dependency_args(after_method: &str) -> (Option<String>, bool) {
             let name = rest[..end].to_string();
             (name, &rest[end + 1..])
         })
-    } else if let Some(result) = try_parse_percent_string(s) {
-        Some(result)
     } else {
-        None
+        try_parse_percent_string(s)
     };
 
     let (name, remainder) = match gem_name {

@@ -162,10 +162,8 @@ fn extract_gem_name(after_method: &str) -> Option<String> {
         let rest = &s[1..];
         rest.find(|c: char| c as u8 == quote)
             .map(|end| rest[..end].to_string())
-    } else if let Some(name) = parse_percent_string(s) {
-        Some(name)
     } else {
-        None
+        parse_percent_string(s)
     }
 }
 
