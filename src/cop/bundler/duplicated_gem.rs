@@ -9,6 +9,81 @@ use crate::parse::source::SourceFile;
 
 pub struct DuplicatedGem;
 
+/// ## Corpus investigation (2026-03-03)
+///
+/// Corpus oracle reported FP=6, FN=6.
+///
+/// ### FP=6 — FIXED (commit d10cfe6)
+///
+/// Three root causes, all in the conditional tracking visitor:
+///
+/// 1. **Modifier if/unless created spurious conditional roots** (rswag, 1 FP):
+///    `gem 'concurrent-ruby' if rails_version.segments[1] < 2` inside a `when 7`
+///    branch. The modifier `if` was wrapped in an IfNode which got its own
+///    conditional root Y, shadowing the outer case/when root X. Since roots
+///    differed across branches, all gems were flagged as duplicates.
+///    Fix: modifier if/unless (no else/elsif) is now BeginLike (transparent).
+///
+/// 2. **Block calls broke the ancestor chain** (discourse 3 FP, pact-ruby 1 FP):
+///    `gem "faker"` inside `else { group :dev, :test do ... end }` got
+///    conditional_root=None because the `group` CallNode/BlockNode pushed an
+///    AncestorKind::Other frame, which made `nearest_conditional_root` return None.
+///    Fix: all frames now default to BeginLike; only if/case/when override their kind.
+///
+/// 3. **Same pattern as #2** (fat_free_crm 1 FP): `gem 'sqlite3'` inside a `group`
+///    block had its conditional root broken by the group block frame.
+///
+/// ### FN=6 — PARTIALLY FIXED (5 of 6 fixed, 1 remaining)
+///
+/// **5 FN from sentry-ruby (FIXED in commit d10cfe6):**
+/// `sentry-rails/Gemfile` has 6 `gem "sqlite3"` declarations in an if/elsif/else
+/// chain where the else branch contains a nested if/else:
+/// ```text
+/// if rails >= 8.1      → sqlite3 ~> 2.1.1   (root A)
+/// elsif rails >= 8.0   → sqlite3 ~> 2.1.1   (root A)
+/// elsif rails >= 7.1   → sqlite3 ~> 1.7.3   (root A)
+/// elsif rails >= 6.1   → sqlite3 ~> 1.7.3   (root A)
+/// else
+///   if rails >= 6.0    → sqlite3 ~> 1.4.0   (was root A due to leak, now root B)
+///   else               → sqlite3 ~> 1.3.0   (was root A due to leak, now root B)
+/// ```
+/// Bug: `pending_elsif_root` was set to Some(A) for the elsif chain but never
+/// cleared when entering the else clause. The nested if inside else inherited
+/// root A from the leaked pending value, making ALL 6 gems share root A →
+/// `is_conditional_declaration` was true → no duplicates reported.
+/// Fix: clear `pending_elsif_root` when subsequent is not an IfNode (i.e., else).
+/// Now the nested if gets root B, roots differ across the group, and all 5
+/// duplicates (of the first declaration) are correctly flagged.
+///
+/// **1 FN from Casecommons/pg_search — REMAINING:**
+/// ```ruby
+/// if ENV["ACTIVE_RECORD_BRANCH"]
+///   gem "activerecord", git: "https://github.com/rails/rails.git", branch: ...
+/// end
+/// gem "activerecord", ENV.fetch("ACTIVE_RECORD_VERSION", nil) if ENV[...]
+/// ```
+/// Line 11 has `gem "activerecord"` inside `if ENV["ACTIVE_RECORD_BRANCH"]` (root X).
+/// Line 15 has `gem "activerecord"` with a modifier `if` at top level (root None,
+/// since modifier ifs are now transparent). These have different conditional roots
+/// (Some(X) vs None) → `is_conditional_declaration` is false → nitrocop SHOULD flag
+/// line 15 as duplicate. But the FN says RuboCop flags it and nitrocop doesn't.
+///
+/// Possible explanation: `gem_name_from_call` requires the first argument to be a
+/// string literal (via `util::string_value`). Line 15's first arg IS a string literal
+/// `"activerecord"`, so it should match. However, line 15 also has an inline comment
+/// `# standard:disable Bundler/DuplicatedGem` — nitrocop's disable-comment handling
+/// may be suppressing the offense. RuboCop does NOT recognize `standard:disable` as
+/// a valid disable directive, so RuboCop still reports the offense. If this is the
+/// cause, the fix is to only recognize `rubocop:disable` (and `nitrocop:disable`),
+/// not `standard:disable`.
+///
+/// Alternatively, the modifier-if transparency fix may have changed the conditional
+/// root assignment such that both declarations now share the same root (making
+/// `is_conditional_declaration` true and suppressing the report). The top-level
+/// `if ENV["ACTIVE_RECORD_BRANCH"]` around line 11 gives it root X. Line 15's
+/// modifier `if ENV["ACTIVE_RECORD_VERSION"]` is transparent, so it inherits from
+/// the top-level scope (None). Different roots → should be flagged. Needs a debugger
+/// trace to confirm which path is taken at runtime.
 impl Cop for DuplicatedGem {
     fn name(&self) -> &'static str {
         "Bundler/DuplicatedGem"

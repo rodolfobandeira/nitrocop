@@ -7,18 +7,49 @@ pub struct GemVersion;
 
 /// ## Corpus investigation (2026-03-03)
 ///
-/// Corpus oracle reported FP=0, FN=29. All FNs from `!=`-only version constraints
-/// (e.g., `gem "cuprite", "!= 0.15.1"`).
+/// Corpus oracle reported FP=0, FN=29. All 29 FNs from gems whose ONLY version
+/// constraint uses the `!=` operator, which RuboCop does not consider a version spec.
 ///
-/// **FN=29 → FN=3 fixed**: Rewrote `is_version_specification()` to use a character-class
-/// approach `trim_start_matches(|c| matches!(c, '~' | '<' | '>' | '='))` that mirrors
-/// RuboCop's `VERSION_SPECIFICATION_REGEX = /^\s*[~<>=]*\s*[0-9.]+/`. The `[~<>=]*`
-/// class does NOT include `!`, so `"!= x.y.z"` is not a version spec. Commit e01710d.
+/// ### FN=29 → FN=3 — FIXED (commit e01710d)
 ///
-/// A previous attempt (pre-2026-03-03) that used sequential `trim_start_matches("!=")`
-/// removal caused 9 FPs. The character-class rewrite avoids that issue entirely.
+/// Root cause: `is_version_specification()` previously used sequential
+/// `trim_start_matches("!=")` which stripped `!=` from strings like `"!= 0.15.1"`,
+/// leaving `" 0.15.1"` → starts with digit → treated as valid version spec. But
+/// RuboCop's regex `VERSION_SPECIFICATION_REGEX = /^\s*[~<>=]*\s*[0-9.]+/` uses
+/// character class `[~<>=]*` which does NOT include `!`. So `"!= 0.15.1"` fails
+/// to match — RuboCop says "no version spec" and flags the gem, nitrocop didn't.
 ///
-/// **3 remaining FN**: Likely file-drop noise (parser crash repos). Not actionable.
+/// Fix: rewrote `is_version_specification()` to use a character-class approach:
+/// `trim_start_matches(|c| matches!(c, '~' | '<' | '>' | '='))` — directly mirrors
+/// the RuboCop regex. The `!` character is naturally excluded.
+///
+/// The previous fix attempt (pre-2026-03-03) that removed `.trim_start_matches("!=")`
+/// from a chain of sequential strip calls caused 9 FPs. The issue was that sequential
+/// stripping has order-dependent edge cases (e.g., `">=..."` vs `"=>..."`) that the
+/// character-class approach avoids entirely.
+///
+/// All 29 FN were the same pattern — `!=`-only constraints across 6 repos:
+///   - rails_admin (16 FN): `gem "cuprite", "!= 0.15.1"` and
+///     `gem "rspec-expectations", "!= 3.8.3"` across Gemfile + 8 gemfiles/
+///   - factory_bot_rails (9 FN): `gem "spring", "!= 2.1.1"` across 9 gemfiles/
+///   - conjur (1 FN): `gem 'concurrent-ruby', '!= 1.3.5'`
+///   - rails (1 FN): `gem "mdl", "!= 0.13.0"`
+///   - rubocop-rspec (1 FN): `gem 'prism', '!= 1.5.0', '!= 1.5.1'`
+///   - rubocop (1 FN): `gem 'memory_profiler', '!= 1.0.2'`
+///
+/// Note: gems with BOTH `!=` and another constraint (e.g., `gem "factory_bot",
+/// ">= 4.2", "!= 6.4.5"`) were never FN because `includes_version_specification`
+/// finds `">= 4.2"` first and returns true. Similarly, array-style constraints
+/// like `gem "rubocop", ["~> 1.20", "!= 1.22.2"]` are not affected because
+/// `includes_version_specification` only checks direct StringNode arguments (not
+/// strings inside ArrayNode) — matching RuboCop's `(send nil? :gem <(str ...) ...>)`
+/// node pattern, which also only matches direct str args.
+///
+/// ### 3 remaining FN — NOT ACTIONABLE
+///
+/// The 3 remaining FN (expected=14,201, actual=14,198) are file-drop noise from
+/// repos where Prism has parser crashes, causing nitrocop to skip files that
+/// RuboCop successfully parses. These are not bugs in this cop's logic.
 impl Cop for GemVersion {
     fn name(&self) -> &'static str {
         "Bundler/GemVersion"

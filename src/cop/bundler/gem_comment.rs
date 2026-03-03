@@ -10,19 +10,79 @@ pub struct GemComment;
 ///
 /// Corpus oracle reported FP=10, FN=16 (after prior fixes).
 ///
-/// **FP=10 fixed**: All FPs were from `extract_gem_name` matching lines where the gem
-/// "name" was a variable (`gem db_gem`), interpolation (`gem "x-#{g}"`), or method call
-/// (`gem ENV.fetch(...)`). Fixed by requiring a quoted string literal immediately after
-/// `gem `. Commit 0a40768.
+/// ### FP=10 — FIXED (commit 0a40768)
 ///
-/// **FN=16 deferred**: All 16 FNs are gems with preceding line comments that RuboCop
-/// still flags as missing a comment. Examples: `gem 'rails', ENV['VER'] if ENV['VER']`
-/// with `# Allow CI ...` on the line above — nitrocop sees the comment and skips,
-/// RuboCop still flags. Root cause: RuboCop's GemComment uses AST-level comment
-/// association (not line-adjacent heuristics). A previous attempt to fix this by
-/// ignoring comments on modifier-guarded declarations caused FP regressions
-/// (FP=0/FN=1 → FP=13/FN=0). A correct fix needs AST-based comment-to-gem
-/// association matching RuboCop's `preceding_lines` method.
+/// All 10 FPs were from `extract_gem_name` (in `mod.rs`) matching lines where the gem
+/// "name" was a variable, interpolation, or method call. The function found the first
+/// quoted string anywhere on the line, which picked up argument values rather than gem
+/// names. Examples:
+///   - `gem db_gem, get_env("DB_GEM_VERSION")` → extracted "DB_GEM_VERSION"
+///   - `gem plugin_name, :git => "https://..."` → extracted URL fragment
+///   - `gem "social_stream-#{ g }"` → extracted interpolated string
+///   - `gem ENV.fetch('MODEL_PARSER', nil)` → extracted "MODEL_PARSER"
+///   - `gem tty_gem["name"], tty_gem["version"]` → extracted "name"
+///
+/// Fix: `extract_gem_name` now requires the first non-whitespace character after `gem `
+/// to be a quote (`'` or `"`), and rejects names containing `#{` (interpolation).
+///
+/// ### FN=16 — DEFERRED (needs `check_lines` → `check_source` rewrite)
+///
+/// All 16 FNs share the same pattern: a gem declaration with a trailing modifier
+/// `if`/`unless` that has a comment on the preceding line. nitrocop sees the comment
+/// and considers the gem as documented, but RuboCop still flags it as missing a comment.
+///
+/// Affected repos (16 FN across 15 repos):
+///   - refinery/Gemfile:8,11 — `gem 'rails' if ...` / `gem 'mutex_m' if ...`
+///   - apipie-rails/Gemfile:17 — `gem 'net-smtp' if Gem.ruby_version >= ...`
+///   - asciidoctor-pdf/Gemfile:22 — `gem 'rouge' unless ENV['ROUGE_VERSION'] == 'false'`
+///   - asciidoctor/Gemfile:16 — `gem 'pygments.rb' if ENV.key? 'PYGMENTS_VERSION'`
+///   - mysql2/Gemfile:28 — `gem 'mysql' if Gem::Version.new(RUBY_VERSION) < ...`
+///   - carrierwave/Gemfile:8 — `gem "fog-google" if RUBY_VERSION.to_f < 2.7`
+///   - draper/Gemfile:32 — `gem 'mongoid' unless rails_version == 'edge'`
+///   - endoflife.date/Gemfile:23 — `gem "wdm" if Gem.win_platform?`
+///   - jekyll/Gemfile:27 — `gem "mutex_m" if RUBY_VERSION >= "3.4"`
+///   - opal/Gemfile:18 — `gem 'puma' unless RUBY_ENGINE == 'truffleruby'`
+///   - rack-contrib/Gemfile:22 — `gem 'cgi' if RUBY_VERSION >= '2.7.0' && ...`
+///   - rubocop/Gemfile:18 — `gem 'ruby-lsp' if RUBY_VERSION >= '3.0'`
+///   - grape-swagger/Gemfile:44 — `gem 'ostruct' if Gem::Version.new(...)`
+///   - stripe-ruby/Gemfile:27 — `gem "rubocop" if RUBY_VERSION >= "2.7"`
+///   - activerecord-import/Gemfile:30 — `gem "seamless_database_pool" if ...`
+///
+/// Root cause analysis:
+///
+/// nitrocop uses a line-based heuristic: "if the line above is a comment, skip."
+/// RuboCop uses AST-level comment association via `preceding_comment?` which calls
+/// `processed_source.comment_at_line(node.first_line - 1)`. The key difference:
+/// RuboCop resolves the gem call's AST node position, which for modifier if/unless
+/// is the LINE OF THE GEM CALL, not the if/unless wrapper. When there's a modifier
+/// conditional, the AST node for `gem 'x' if cond` starts at the `gem` keyword.
+/// RuboCop then checks `comment_at_line(gem_line - 1)`.
+///
+/// So in principle RuboCop should also find the preceding comment. The discrepancy
+/// likely comes from one of:
+///   1. The comment is associated with the if/unless node in RuboCop's AST rather
+///      than the gem send node, so `comment_at_line` sees it as belonging to the
+///      conditional, not the gem.
+///   2. RuboCop's `gem_declarations` node search `(send nil? :gem str ...)` may not
+///      match some of these (e.g., `gem 'x', ENV['Y'] if ...` where the 2nd arg is
+///      not a `str` node) — but the FN means RuboCop IS matching them.
+///   3. Some comments are multi-line (e.g., carrierwave has `# See https://...` then
+///      `# ...restriction.`), and RuboCop might require the comment to be on the
+///      immediately preceding line with no gap.
+///
+/// Previous fix attempt (reverted): tried ignoring preceding comments for gems with
+/// modifier conditionals. This eliminated all FN but caused 13 new FP (gems with
+/// modifier conditionals that genuinely had no comment were now also skipped).
+/// Score went from FP=0/FN=1 to FP=13/FN=0.
+///
+/// To fix correctly, this cop needs to be rewritten from `check_lines` to
+/// `check_source` (AST-based), using Prism's comment API to associate comments with
+/// gem CallNodes. The AST approach would:
+///   1. Find all `gem 'name'` CallNodes (like DuplicatedGem's visitor does)
+///   2. For each, check `parse_result.comments()` for a comment on `node.line - 1`
+///   3. Handle modifier if/unless wrapping (the CallNode is inside an IfNode —
+///      use the CallNode's location, not the IfNode's)
+///   4. Also handle inline comments (comment on the same line as the gem call)
 impl Cop for GemComment {
     fn name(&self) -> &'static str {
         "Bundler/GemComment"
