@@ -113,23 +113,17 @@ impl Cop for InclusiveLanguage {
                         let byte_offset = line_byte_start + abs_pos;
                         let match_len = mat.end() - mat.start();
 
-                        let in_code = code_map.is_code(byte_offset);
-                        let in_string = !code_map.is_not_string(byte_offset);
-                        // Not code and not string means comment
-                        let in_comment = !in_code && !in_string;
-
-                        let should_flag = if in_comment {
-                            check_comments
-                        } else if in_string {
-                            check_strings
-                        } else {
-                            // In code — skip hash labels
-                            if is_hash_label(line, abs_pos, match_len) {
-                                false
-                            } else {
-                                should_check_code
-                            }
-                        };
+                        let should_flag = classify_match(
+                            code_map,
+                            byte_offset,
+                            line,
+                            abs_pos,
+                            match_len,
+                            check_comments,
+                            check_strings,
+                            check_symbols,
+                            should_check_code,
+                        );
                         if should_flag {
                             let msg = format_message(&term.name, &term.suggestions);
                             diagnostics.push(self.diagnostic(source, line_num, abs_pos, msg));
@@ -142,29 +136,22 @@ impl Cop for InclusiveLanguage {
                         let abs_pos = search_start + pos;
                         let byte_offset = line_byte_start + abs_pos;
 
-                        let in_code = code_map.is_code(byte_offset);
-                        let in_string = !code_map.is_not_string(byte_offset);
-                        let in_comment = !in_code && !in_string;
-
-                        let should_flag = if in_comment {
-                            check_comments
-                        } else if in_string {
-                            check_strings
-                        } else {
-                            should_check_code
-                        };
+                        let should_flag = classify_match(
+                            code_map,
+                            byte_offset,
+                            line,
+                            abs_pos,
+                            term.pattern.len(),
+                            check_comments,
+                            check_strings,
+                            check_symbols,
+                            should_check_code,
+                        );
 
                         if should_flag
                             && (!term.whole_word
                                 || is_whole_word(&line_lower, abs_pos, term.pattern.len()))
                         {
-                            // Skip hash label syntax (e.g., `auto_correct:`).
-                            // RuboCop's token-based detection uses tLABEL for these,
-                            // which is not in its check_token mapping.
-                            if !in_comment && is_hash_label(line, abs_pos, term.pattern.len()) {
-                                search_start = abs_pos + term.pattern.len();
-                                continue;
-                            }
                             let msg = format_message(&term.name, &term.suggestions);
                             diagnostics.push(self.diagnostic(source, line_num, abs_pos, msg));
                         }
@@ -332,6 +319,70 @@ fn is_whole_word(line: &str, pos: usize, len: usize) -> bool {
     let after_pos = pos + len;
     let after_ok = after_pos >= line.len() || !line.as_bytes()[after_pos].is_ascii_alphanumeric();
     before_ok && after_ok
+}
+
+/// Classify a match at the given byte offset to determine if it should be flagged.
+///
+/// Maps CodeMap regions to RuboCop's token-based classification:
+/// - Code identifiers → should_check_code (except hash labels, which are skipped)
+/// - Comments → check_comments
+/// - Symbols (`:foo`) → check_symbols
+/// - Strings, heredocs, %i/%w, regex → check_strings
+#[allow(clippy::too_many_arguments)]
+fn classify_match(
+    code_map: &CodeMap,
+    byte_offset: usize,
+    line: &[u8],
+    line_pos: usize,
+    match_len: usize,
+    check_comments: bool,
+    check_strings: bool,
+    check_symbols: bool,
+    should_check_code: bool,
+) -> bool {
+    let in_code = code_map.is_code(byte_offset);
+    let in_string = !code_map.is_not_string(byte_offset);
+    // Not in code and not in string → must be a comment
+    let in_comment = !in_code && !in_string;
+
+    if in_comment {
+        check_comments
+    } else if in_string {
+        // In string_ranges: could be string, heredoc, regex, %i/%w, or symbol.
+        // Standalone symbols (`:foo`) use check_symbols; everything else uses check_strings.
+        if is_symbol_literal(line, line_pos) {
+            check_symbols
+        } else {
+            check_strings
+        }
+    } else {
+        // In code — skip hash labels (tLABEL in RuboCop, not checked)
+        if is_hash_label(line, line_pos, match_len) {
+            false
+        } else {
+            should_check_code
+        }
+    }
+}
+
+/// Check if the match at `pos` in `line` is inside a standalone symbol literal (`:foo`).
+/// Returns true for `:whitelist` but false for `%i[whitelist]` (no `:` prefix) and
+/// `Foo::whitelist` (`::` is a constant path, not a symbol).
+fn is_symbol_literal(line: &[u8], pos: usize) -> bool {
+    // Walk backward from pos to find the start of the identifier
+    let mut start = pos;
+    while start > 0 && (line[start - 1].is_ascii_alphanumeric() || line[start - 1] == b'_') {
+        start -= 1;
+    }
+    // Check if preceded by : (symbol prefix)
+    if start > 0 && line[start - 1] == b':' {
+        // Exclude :: (constant path like Foo::Bar)
+        if start >= 2 && line[start - 2] == b':' {
+            return false;
+        }
+        return true;
+    }
+    false
 }
 
 /// Check if a match at `pos` of length `len` in `line` falls within a hash label.

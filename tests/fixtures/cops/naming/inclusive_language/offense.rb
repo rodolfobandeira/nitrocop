@@ -9,3 +9,7 @@ blacklist_ips = []
 
 msg = "connected to #{slave_host}"
                       ^^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `slave`. Suggested alternatives: `replica`, `secondary`, `follower`.
+
+# Symbol literals should be flagged (CheckSymbols: true by default)
+config[:whitelist] = []
+        ^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `whitelist`. Suggested alternatives: `allowlist`, `permit`.
