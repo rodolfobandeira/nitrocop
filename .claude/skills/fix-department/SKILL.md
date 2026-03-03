@@ -72,11 +72,15 @@ Summarize: cop name, FP/FN counts, minimal repro(s), root cause hypothesis.
 
 2. Create tasks for each cop fix.
 
-3. Spawn one teammate per cop using the Task tool. **Critical settings:**
+3. Spawn one teammate per cop using the Agent tool. **Critical settings:**
    - `isolation: "worktree"` — each teammate gets its own git worktree
    - `subagent_type: "general-purpose"` — needs full edit/bash access
    - `team_name: "fix-department"`
    - `mode: "bypassPermissions"` — teammates need to run cargo test etc.
+
+   **Worktree caveat:** `isolation: "worktree"` may silently fail, leaving the teammate
+   writing directly to the main tree. The teammate workflow below includes a self-check.
+   During Phase 4, also verify with `git status --short` that no leaked changes landed on main.
 
 4. Each teammate prompt MUST include:
    - The exact cop name (e.g., `Performance/AncestorsInclude`)
@@ -92,8 +96,14 @@ Summarize: cop name, FP/FN counts, minimal repro(s), root cause hypothesis.
 You are fixing false positives/negatives in a single nitrocop cop to bring its gem
 to 100% corpus conformance. Follow the CLAUDE.md rules strictly.
 
-**NEVER use git stash or git stash pop.** You are in an isolated git worktree — just commit directly.
+**NEVER use git stash or git stash pop.** You should be in an isolated git worktree — just commit directly.
 Parallel-agent activity is common. If you see unrelated modified files, do not edit/revert them.
+
+## Step 0: Verify your working directory
+
+Run `git rev-parse --show-toplevel` and check that it contains `.claude/worktrees/` in the path.
+If you are in the main repo (no worktree), note this in your report — your commits will land
+directly on main.
 
 ## Steps
 
@@ -232,17 +242,19 @@ Do not leave retained progress only in a worktree/collector branch.
    - Accepted cop fixes: one commit per cop (preferred).
    - Useful investigation artifacts retained in repo (for example, reverted-attempt notes): separate commit.
 
-2. Integrate those commit(s) into `main` immediately (unless the user explicitly says not to):
+2. Integrate those commit(s) into `main` immediately (unless the user explicitly says not to).
+   If teammates committed in worktrees, cherry-pick from the worktree branch:
    ```bash
-   git -C /path/to/main checkout main
-   git -C /path/to/main cherry-pick <sha1> [<sha2> ...]
+   git checkout main
+   git cherry-pick <sha1> [<sha2> ...]
    ```
-   If a merge is preferred, use a normal non-interactive merge.
+   If teammates committed directly on main (worktree isolation failed), their commits
+   are already on main — just verify with `git log`.
 
 3. Verify integration on `main`:
    ```bash
-   git -C /path/to/main log --oneline -n 10
-   git -C /path/to/main status --short --branch
+   git log --oneline -n 10
+   git status --short --branch
    ```
 
 4. Report exactly what was integrated (commit SHA(s) and short subjects).

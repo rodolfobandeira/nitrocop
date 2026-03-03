@@ -131,17 +131,18 @@ Do not leave retained progress only in a worktree branch.
    - Accepted cop fixes: one commit per cop (preferred).
    - Useful investigation artifacts retained in repo (for example, reverted-attempt notes): separate commit.
 
-2. Integrate those commit(s) into `main` immediately (unless the user explicitly says not to):
+2. Integrate those commit(s) into `main` immediately (unless the user explicitly says not to).
+   If working in a worktree, cherry-pick from the worktree branch:
    ```bash
-   git -C /path/to/main checkout main
-   git -C /path/to/main cherry-pick <sha1> [<sha2> ...]
+   git checkout main
+   git cherry-pick <sha1> [<sha2> ...]
    ```
-   If a merge is preferred, use a normal non-interactive merge.
+   If already on main (worktree not used), commits are already there — just verify.
 
 3. Verify integration on `main`:
    ```bash
-   git -C /path/to/main log --oneline -n 10
-   git -C /path/to/main status --short --branch
+   git log --oneline -n 10
+   git status --short --branch
    ```
 
 4. Report exactly what was integrated (commit SHA(s) and short subjects).
@@ -150,8 +151,9 @@ Do not leave retained progress only in a worktree branch.
 
 ## Notes
 
-- Use a dedicated git worktree for all code-editing runs of this skill, including single-agent runs.
-- Only skip the worktree if the user explicitly requests working in the current tree.
+- Prefer a dedicated git worktree for code-editing runs of this skill, but worktree isolation
+  may silently fail. Always verify your working directory with `git rev-parse --show-toplevel`.
+  If not in a worktree, continue working on main — do not block on this.
 - New worktree bootstrap (run before reducers/tests/check-cop):
   - Initialize submodules: `git submodule update --init`
   - Ensure `vendor/corpus/` exists. If the main checkout already has corpus data, symlink it into the worktree:
