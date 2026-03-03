@@ -170,6 +170,16 @@ impl Cop for FileName {
             return;
         }
 
+        // Allow files whose name ends with a known CamelCase name (e.g., ImportFastfile,
+        // SwitcherFastfile). This matches RuboCop's `allowed_camel_case_file?` which
+        // checks AllCops/Include patterns containing uppercase letters like `**/*Fastfile`.
+        if ALLOWED_NAMES
+            .iter()
+            .any(|name| file_name.len() > name.len() && file_name.ends_with(name))
+        {
+            return;
+        }
+
         // Regex: if a custom regex is provided, use it instead of snake_case check
         if !regex_pattern.is_empty() {
             if let Ok(re) = regex::Regex::new(regex_pattern) {
@@ -194,6 +204,10 @@ impl Cop for FileName {
                 check_name = check_name.replace(acronym.as_str(), &acronym.to_lowercase());
             }
         }
+
+        // RuboCop replaces + with _ before the snake_case check, to support
+        // Action Pack Variants filenames like `some_file.xlsx+mobile.axlsx`.
+        check_name = check_name.replacen('+', "_", 1);
 
         // RuboCop allows dots in filenames (e.g., show.html.haml_spec).
         // Check snake_case on each dot-separated segment individually.
@@ -465,6 +479,41 @@ mod tests {
         let mut diags = Vec::new();
         FileName.check_lines(&source, &config, &mut diags, None);
         assert!(diags.is_empty(), "Should accept matching namespaced class");
+    }
+
+    #[test]
+    fn no_offense_plus_in_filename() {
+        // RuboCop replaces + with _ before snake_case check (Action Pack Variants convention)
+        let source = SourceFile::from_bytes("some_file.xlsx+mobile.axlsx", b"x = 1\n".to_vec());
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should allow + in filenames (Action Pack Variants convention)"
+        );
+    }
+
+    #[test]
+    fn no_offense_fastfile_suffix() {
+        // Files matching *Fastfile are allowed (AllCops/Include pattern)
+        let source = SourceFile::from_bytes("ImportFastfile", b"x = 1\n".to_vec());
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should allow files matching *Fastfile pattern"
+        );
+    }
+
+    #[test]
+    fn no_offense_switcher_fastfile() {
+        let source = SourceFile::from_bytes("SwitcherFastfile", b"x = 1\n".to_vec());
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should allow files matching *Fastfile pattern"
+        );
     }
 
     #[test]
