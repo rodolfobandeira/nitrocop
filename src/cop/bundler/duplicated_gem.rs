@@ -143,17 +143,14 @@ fn gem_name_from_call(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
 }
 
 impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
-    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
-        let kind = if node.as_begin_node().is_some()
-            || node.as_parentheses_node().is_some()
-            || node.as_statements_node().is_some()
-            || node.as_else_node().is_some()
-        {
-            AncestorKind::BeginLike
-        } else {
-            AncestorKind::Other
-        };
-        self.ancestors.push(AncestorFrame { kind });
+    fn visit_branch_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {
+        // Default to BeginLike (transparent). Conditional nodes (if, case, when)
+        // override their frame kind in their specific visit methods. Non-conditional
+        // constructs like blocks, calls, and DSL methods (group, source, platforms)
+        // should not break the conditional ancestor chain.
+        self.ancestors.push(AncestorFrame {
+            kind: AncestorKind::BeginLike,
+        });
     }
 
     fn visit_branch_node_leave(&mut self) {
@@ -161,6 +158,23 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        // Modifier if (no else/elsif) is transparent — don't create a conditional root.
+        // This prevents `gem 'x' if cond` inside a case/when from shadowing the
+        // outer conditional root.
+        let is_modifier = node.subsequent().is_none();
+        if is_modifier {
+            if let Some(frame) = self.ancestors.last_mut() {
+                frame.kind = AncestorKind::BeginLike;
+            }
+            self.visit(&node.predicate());
+            if let Some(statements) = node.statements() {
+                for statement in statements.body().iter() {
+                    self.visit(&statement);
+                }
+            }
+            return;
+        }
+
         let root_id = self
             .pending_elsif_root
             .unwrap_or_else(|| self.allocate_conditional_root_id());
@@ -178,6 +192,10 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
             let previous = self.pending_elsif_root;
             if subsequent.as_if_node().is_some() {
                 self.pending_elsif_root = Some(root_id);
+            } else {
+                // Clear pending_elsif_root when entering an else clause to prevent
+                // it from leaking into nested if statements inside the else body.
+                self.pending_elsif_root = None;
             }
             self.visit(&subsequent);
             self.pending_elsif_root = previous;
@@ -185,6 +203,21 @@ impl<'pr> Visit<'pr> for GemDeclarationVisitor<'_> {
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        // Modifier unless (no else) is transparent — same as modifier if.
+        let is_modifier = node.else_clause().is_none();
+        if is_modifier {
+            if let Some(frame) = self.ancestors.last_mut() {
+                frame.kind = AncestorKind::BeginLike;
+            }
+            self.visit(&node.predicate());
+            if let Some(statements) = node.statements() {
+                for statement in statements.body().iter() {
+                    self.visit(&statement);
+                }
+            }
+            return;
+        }
+
         let root_id = self.allocate_conditional_root_id();
         if let Some(frame) = self.ancestors.last_mut() {
             frame.kind = AncestorKind::If { root_id };
