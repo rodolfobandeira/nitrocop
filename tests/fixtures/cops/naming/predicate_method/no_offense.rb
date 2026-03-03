@@ -147,3 +147,14 @@ end
 def authorized?
   -> { true }
 end
+
+# Bare begin block — procedural method returning boolean status
+def unlock
+  begin
+    if file.flock(flag)
+      true
+    else
+      false
+    end
+  end
+end

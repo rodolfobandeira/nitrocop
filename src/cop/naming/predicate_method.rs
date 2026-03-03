@@ -350,21 +350,10 @@ fn collect_implicit_return(
         return;
     }
 
-    // BeginNode -- if it has rescue/ensure, treat as Opaque.
-    // Otherwise, take last statement from its statements.
-    if let Some(begin) = node.as_begin_node() {
-        if begin.rescue_clause().is_some() || begin.ensure_clause().is_some() {
-            returns.push(ReturnType::Opaque);
-        } else if let Some(stmts) = begin.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            if let Some(last) = body.last() {
-                collect_implicit_return(last, returns, wayward);
-            } else {
-                returns.push(ReturnType::NonBooleanLiteral);
-            }
-        } else {
-            returns.push(ReturnType::NonBooleanLiteral);
-        }
+    // BeginNode -- always treat as Opaque. Bare begin blocks wrap procedural
+    // logic whose return type shouldn't make the method a predicate candidate.
+    if node.as_begin_node().is_some() {
+        returns.push(ReturnType::Opaque);
         return;
     }
 
