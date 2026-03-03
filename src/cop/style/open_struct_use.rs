@@ -38,19 +38,22 @@ impl Cop for OpenStructUse {
             }
         }
 
-        // Check ConstantPathNode (::OpenStruct or Module::OpenStruct)
+        // Check ConstantPathNode — only flag root-scoped ::OpenStruct (parent is None),
+        // not namespaced like YARD::OpenStruct or Foo::Bar::OpenStruct
         if let Some(cp) = node.as_constant_path_node() {
-            if let Some(name) = cp.name() {
-                if name.as_slice() == b"OpenStruct" {
-                    let loc = cp.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Avoid using `OpenStruct`; use `Struct`, `Hash`, a class, or ActiveModel attributes instead."
-                            .to_string(),
-                    ));
+            if cp.parent().is_none() {
+                if let Some(name) = cp.name() {
+                    if name.as_slice() == b"OpenStruct" {
+                        let loc = cp.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid using `OpenStruct`; use `Struct`, `Hash`, a class, or ActiveModel attributes instead."
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }
