@@ -278,7 +278,10 @@ impl DisabledRanges {
     /// Mark all directives with the given key that cover the given line as used.
     fn mark_directives_used(&mut self, key: &str, line: usize) {
         for directive in &mut self.directives {
-            if directive.cop_name == key && line >= directive.range.0 && line <= directive.range.1 {
+            if (directive.cop_name == key || directive.cop_name.eq_ignore_ascii_case(key))
+                && line >= directive.range.0
+                && line <= directive.range.1
+            {
                 directive.used = true;
             }
         }
@@ -299,10 +302,24 @@ impl DisabledRanges {
     }
 
     fn check_ranges(&self, key: &str, line: usize) -> bool {
+        // Try exact match first (fast path)
         if let Some(ranges) = self.ranges.get(key) {
             for &(start, end) in ranges {
                 if line >= start && line <= end {
                     return true;
+                }
+            }
+        }
+        // Fallback: case-insensitive match for department names.
+        // RuboCop normalizes cop names via Badge.parse which applies camel_case,
+        // so `Rspec/AnyInstance` matches `RSpec/AnyInstance`. We do a simple
+        // case-insensitive comparison as fallback.
+        for (stored_key, ranges) in &self.ranges {
+            if stored_key.eq_ignore_ascii_case(key) && stored_key != key {
+                for &(start, end) in ranges {
+                    if line >= start && line <= end {
+                        return true;
+                    }
                 }
             }
         }
@@ -559,6 +576,21 @@ mod tests {
             "trailing ? should be stripped"
         );
         assert!(!dr.is_disabled("Naming/PredicatePrefix?", 1));
+    }
+
+    #[test]
+    fn case_insensitive_department_name() {
+        // `Rspec/AnyInstance` (lowercase 's') should match `RSpec/AnyInstance`
+        let src = "# rubocop:disable Rspec/AnyInstance\nx = 1\n# rubocop:enable Rspec/AnyInstance\ny = 2\n";
+        let dr = disabled_ranges(src);
+        assert!(
+            dr.is_disabled("RSpec/AnyInstance", 2),
+            "case-insensitive department should match"
+        );
+        assert!(
+            !dr.is_disabled("RSpec/AnyInstance", 4),
+            "after enable, should not be disabled"
+        );
     }
 
     #[test]
