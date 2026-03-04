@@ -7,9 +7,9 @@ use crate::parse::source::SourceFile;
 ///
 /// Corpus oracle reported FP=2, FN=5.
 ///
-/// FP=2: Both in samg/timetrap `lib/Getopt/Declare.rb` (lines 32, 1266) on an
-/// invalid-encoding file RuboCop treats as parser error. This remains a parser/file-drop
-/// parity issue, not cop logic.
+/// FP=2: Both in samg/timetrap `lib/Getopt/Declare.rb` (lines 32, 1266). RuboCop
+/// reports `Invalid byte sequence in utf-8` for that file and does not run Security/Eval.
+/// We now skip this cop on non-UTF-8 source when no Ruby magic encoding comment is present.
 ///
 /// FN=5: Previously caused by `# standard:disable Security/Eval` directives being
 /// treated as suppressions. Fixed by parsing only `rubocop:`/`nitrocop:` directives
@@ -44,6 +44,12 @@ impl Cop for Eval {
         };
 
         if call.name().as_slice() != b"eval" {
+            return;
+        }
+
+        // RuboCop reports an encoding error and does not run Security/Eval for
+        // files with invalid UTF-8 and no magic encoding comment.
+        if skip_for_invalid_utf8_without_magic_encoding(source) {
             return;
         }
 
@@ -104,6 +110,26 @@ fn is_kernel_receiver(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool 
         let loc = cp.location();
         let recv_src = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
         return recv_src == b"Kernel" || recv_src == b"::Kernel";
+    }
+    false
+}
+
+fn skip_for_invalid_utf8_without_magic_encoding(source: &SourceFile) -> bool {
+    if std::str::from_utf8(source.as_bytes()).is_ok() {
+        return false;
+    }
+    !has_magic_encoding_comment(source.as_bytes())
+}
+
+fn has_magic_encoding_comment(source: &[u8]) -> bool {
+    for line in source.split(|&b| b == b'\n').take(2) {
+        let lower = String::from_utf8_lossy(line).to_ascii_lowercase();
+        if lower.contains("coding:") || lower.contains("coding=") {
+            return true;
+        }
+        if lower.contains("encoding:") || lower.contains("encoding=") {
+            return true;
+        }
     }
     false
 }
@@ -178,4 +204,23 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(Eval, "cops/security/eval");
+
+    #[test]
+    fn ignores_non_utf8_source() {
+        let diagnostics = crate::testutil::run_cop_full(&Eval, b"# \xF1\neval(user_input)\n");
+        assert!(
+            diagnostics.is_empty(),
+            "expected no diagnostics on non-UTF8 source, got: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_ignore_non_utf8_source_with_magic_encoding_comment() {
+        let diagnostics = crate::testutil::run_cop_full(
+            &Eval,
+            b"# encoding: iso-8859-1\n# \xF1\neval(user_input)\n",
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].cop_name, "Security/Eval");
+    }
 }
