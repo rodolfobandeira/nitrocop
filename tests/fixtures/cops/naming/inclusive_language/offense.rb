@@ -13,3 +13,13 @@ msg = "connected to #{slave_host}"
 # Symbol literals should be flagged (CheckSymbols: true by default)
 config[:whitelist] = []
         ^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `whitelist`. Suggested alternatives: `allowlist`, `permit`.
+
+def whitelisted?
+    ^^^^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `whitelist`. Suggested alternatives: `allowlist`, `permit`.
+  true
+end
+
+def blacklisted?
+    ^^^^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `blacklist`. Suggested alternatives: `denylist`, `block`.
+  false
+end

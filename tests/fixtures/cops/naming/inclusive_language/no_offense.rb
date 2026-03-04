@@ -12,6 +12,8 @@ puts 'blacklist'
 msg = "add to whitelist"
 log("removed from blacklist")
 error_msg = "the slave node is down"
+warn "[DEPRECATION] `:whitelist` mode is deprecated."
+warn "replace :blacklist with :denylist"
 # Heredoc content should not be flagged (CheckStrings: false by default)
 description = <<~TEXT
   The whitelist feature allows blocking specific IPs.

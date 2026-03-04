@@ -5,6 +5,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=5, FN=15.
+///
+/// FP=5: examples were concentrated in generated/fixture-style files and
+/// legacy paths (for example long generated build filenames and mixed-case
+/// library paths). Some reducer runs suggest path/config interactions rather
+/// than a single filename-rule bug.
+///
+/// FN=15: misses include acronym/extension/path variants (for example
+/// `URI_test.rb`-style names and non-`.rb` Ruby sources) that appear sensitive
+/// to project-specific include/exclude/config layering.
+///
+/// Deferred in this batch: a safe fix requires end-to-end path matching parity
+/// with RuboCop config resolution across multi-extension and per-project
+/// include/exclude overrides.
 pub struct FileName;
 
 /// Well-known Ruby files that don't follow snake_case convention.

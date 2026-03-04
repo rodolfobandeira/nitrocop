@@ -1,11 +1,28 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use ruby_prism::Visit;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=6, FN=60.
+///
+/// FP=6: false positives were concentrated in string literals containing
+/// symbol-like text (for example `":whitelist"`). nitrocop previously treated
+/// those as symbols and flagged them even with `CheckStrings: false`.
+///
+/// FN=60: misses were concentrated in predicate/bang method identifiers with
+/// flagged terms (for example `whitelisted?`, `blacklisted?`). The previous
+/// token heuristic skipped all `?`/`!` suffix identifiers.
+///
+/// This implementation now uses parse-derived symbol ranges to distinguish real
+/// symbol literals from string content, and keeps `?`/`!` skipping only for
+/// non-definition contexts.
 pub struct InclusiveLanguage;
 
 /// Global cache of compiled flagged terms, keyed by CopConfig pointer.
@@ -55,7 +72,7 @@ impl Cop for InclusiveLanguage {
     fn check_source(
         &self,
         source: &SourceFile,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
@@ -74,6 +91,8 @@ impl Cop for InclusiveLanguage {
         if terms.is_empty() {
             return;
         }
+
+        let symbol_ranges = collect_symbol_ranges(parse_result);
 
         // Check filepath
         if check_filepaths {
@@ -123,6 +142,7 @@ impl Cop for InclusiveLanguage {
                             check_strings,
                             check_symbols,
                             should_check_code,
+                            &symbol_ranges,
                         );
                         if should_flag {
                             let msg = format_message(&term.name, &term.suggestions);
@@ -146,6 +166,7 @@ impl Cop for InclusiveLanguage {
                             check_strings,
                             check_symbols,
                             should_check_code,
+                            &symbol_ranges,
                         );
 
                         if should_flag
@@ -339,6 +360,7 @@ fn classify_match(
     check_strings: bool,
     check_symbols: bool,
     should_check_code: bool,
+    symbol_ranges: &[(usize, usize)],
 ) -> bool {
     let in_code = code_map.is_code(byte_offset);
     let in_string = !code_map.is_not_string(byte_offset);
@@ -349,41 +371,23 @@ fn classify_match(
         check_comments
     } else if in_string {
         // In string_ranges: could be string, heredoc, regex, %i/%w, or symbol.
-        // Standalone symbols (`:foo`) use check_symbols; everything else uses check_strings.
-        if is_symbol_literal(line, line_pos) {
+        // Symbol literal ranges are checked via parse_result ranges.
+        if in_ranges(symbol_ranges, byte_offset) {
             check_symbols
         } else {
             check_strings
         }
     } else {
         // In code — skip hash labels (tLABEL in RuboCop, not checked)
-        // and tFID tokens (identifiers ending in ! or ?, not in RuboCop's check map)
-        if is_hash_label(line, line_pos, match_len) || is_fid_token(line, line_pos) {
+        // and tFID tokens (identifiers ending in ! or ?) except method definitions.
+        if is_hash_label(line, line_pos, match_len)
+            || (is_fid_token(line, line_pos) && !is_method_definition_name(line, line_pos))
+        {
             false
         } else {
             should_check_code
         }
     }
-}
-
-/// Check if the match at `pos` in `line` is inside a standalone symbol literal (`:foo`).
-/// Returns true for `:whitelist` but false for `%i[whitelist]` (no `:` prefix) and
-/// `Foo::whitelist` (`::` is a constant path, not a symbol).
-fn is_symbol_literal(line: &[u8], pos: usize) -> bool {
-    // Walk backward from pos to find the start of the identifier
-    let mut start = pos;
-    while start > 0 && (line[start - 1].is_ascii_alphanumeric() || line[start - 1] == b'_') {
-        start -= 1;
-    }
-    // Check if preceded by : (symbol prefix)
-    if start > 0 && line[start - 1] == b':' {
-        // Exclude :: (constant path like Foo::Bar)
-        if start >= 2 && line[start - 2] == b':' {
-            return false;
-        }
-        return true;
-    }
-    false
 }
 
 /// Check if a match at `pos` of length `len` in `line` falls within a hash label.
@@ -431,6 +435,83 @@ fn is_fid_token(line: &[u8], pos: usize) -> bool {
         return true;
     }
     false
+}
+
+fn is_method_definition_name(line: &[u8], pos: usize) -> bool {
+    let mut start = pos;
+    while start > 0 && (line[start - 1].is_ascii_alphanumeric() || line[start - 1] == b'_') {
+        start -= 1;
+    }
+
+    let prefix = std::str::from_utf8(&line[..start])
+        .unwrap_or("")
+        .trim_start();
+    prefix.starts_with("def ")
+}
+
+fn collect_symbol_ranges(parse_result: &ruby_prism::ParseResult<'_>) -> Vec<(usize, usize)> {
+    struct SymbolRangeCollector {
+        ranges: Vec<(usize, usize)>,
+    }
+
+    impl<'pr> Visit<'pr> for SymbolRangeCollector {
+        fn visit_symbol_node(&mut self, node: &ruby_prism::SymbolNode<'pr>) {
+            if node
+                .opening_loc()
+                .is_some_and(|open| open.as_slice().starts_with(b":"))
+            {
+                let loc = node.location();
+                self.ranges.push((loc.start_offset(), loc.end_offset()));
+            }
+        }
+
+        fn visit_interpolated_symbol_node(
+            &mut self,
+            node: &ruby_prism::InterpolatedSymbolNode<'pr>,
+        ) {
+            if node
+                .opening_loc()
+                .is_some_and(|open| open.as_slice().starts_with(b":"))
+            {
+                let loc = node.location();
+                self.ranges.push((loc.start_offset(), loc.end_offset()));
+            }
+            ruby_prism::visit_interpolated_symbol_node(self, node);
+        }
+    }
+
+    let mut collector = SymbolRangeCollector { ranges: Vec::new() };
+    collector.visit(&parse_result.node());
+    collector.ranges.sort_unstable();
+    merge_ranges(collector.ranges)
+}
+
+fn merge_ranges(sorted: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in sorted {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn in_ranges(ranges: &[(usize, usize)], offset: usize) -> bool {
+    ranges
+        .binary_search_by(|&(start, end)| {
+            if offset < start {
+                std::cmp::Ordering::Greater
+            } else if offset >= end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
 fn format_message(term: &str, suggestions: &[String]) -> String {

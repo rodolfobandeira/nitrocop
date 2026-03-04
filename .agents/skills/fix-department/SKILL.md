@@ -134,10 +134,9 @@ Refresh department status:
 python3 .agents/skills/fix-department/scripts/gem_progress.py --gem <gem-name>
 ```
 
-Regenerate coverage artifacts after cop fixes:
+Regenerate benchmark conformance artifacts only when explicitly requested by the user (or for a dedicated docs/release refresh):
 ```bash
 cargo run --release --bin bench_nitrocop -- conform
-cargo run --bin coverage_table -- --show-missing --output docs/coverage.md
 ```
 
 If diverging cops remain, loop back to Phase 1.
@@ -148,7 +147,7 @@ Report:
 - Gem targeted
 - Cops fixed with FP/FN deltas
 - Cops deferred/reverted and why
-- Verification status (`fmt`, `clippy`, `test`, `check-cop`, coverage docs)
+- Verification status (`fmt`, `clippy`, `test`, `check-cop`, benchmark artifacts if requested)
 
 ### Phase 5: Integrate Back to Main (Default)
 

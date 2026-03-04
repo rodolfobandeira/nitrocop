@@ -113,10 +113,9 @@ After all selected cops are fixed:
    /// <conclusion and whether a fix is needed>
    ```
 
-5. Regenerate coverage artifacts after cop fixes:
+5. Regenerate benchmark conformance artifacts only when explicitly requested by the user:
    ```bash
    cargo run --release --bin bench_nitrocop -- conform
-   cargo run --bin coverage_table -- --show-missing --output docs/coverage.md
    ```
 
 ### Phase 4: Report
@@ -124,7 +123,7 @@ After all selected cops are fixed:
 Report:
 - Cops fixed and their FP reductions
 - Any cops deferred and why
-- Verification status (`fmt`, `clippy`, `test`, `check-cop`, coverage docs)
+- Verification status (`fmt`, `clippy`, `test`, `check-cop`, benchmark artifacts if requested)
 
 ### Phase 5: Integrate Back to Main (Default)
 

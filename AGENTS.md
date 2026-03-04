@@ -23,7 +23,7 @@ cargo run -- --debug .       # phase-level timing breakdown
 
 ## Before Committing
 
-Always run these before committing to match CI:
+Run these checks before committing **when your change touches Rust code** (`src/**/*.rs`, `bench/**/*.rs`, `Cargo.toml`, `Cargo.lock`):
 
 ```
 cargo fmt -- src/path/to/changed_file.rs    # format only the files you modified
@@ -31,7 +31,9 @@ cargo clippy --release -- -D warnings       # incremental — fast when few file
 cargo test --release
 ```
 
-**Important:** Run `cargo fmt` on the specific files you edited (not `cargo fmt` with no args, which formats everything). Run `cargo clippy` which leverages incremental compilation and is fast when few files changed. Do NOT use `git diff` to discover changed files — multiple agents may be working on main concurrently.
+If the change is non-Rust only (for example `docs/`, fixtures under `tests/fixtures/`, or skill markdown/scripts), these Rust checks are optional and should not be run by default.
+
+**Important:** Run `cargo fmt` on the specific Rust files you edited (not `cargo fmt` with no args, which formats everything). Run `cargo clippy` which leverages incremental compilation and is fast when few files changed. Do NOT use `git diff` to discover changed files — multiple agents may be working on main concurrently.
 
 ## Performance Profiling
 
@@ -253,21 +255,6 @@ Results go to `bench/private_results.md` and `bench/private_conform.json` (both 
 
 See [docs/rubygem.md](docs/rubygem.md) for the gem build/release pipeline, platform variants, and build scripts.
 
-## Coverage Reporting
-
-```
-cargo run --bin coverage_table                                  # print to stdout
-cargo run --bin coverage_table -- --show-missing                # include missing cop lists
-cargo run --bin coverage_table -- --output docs/coverage.md     # write to file (checked in)
-```
-
-Generates `docs/coverage.md` with:
-- **Cop coverage table** — counts per department from vendor YAML vs registry
-- **Missing cops** — which vendor cops aren't implemented yet (with `--show-missing`)
-- **Conformance table** — FP/FN rates per bench repo (reads `bench/conform.json` if available)
-
-Pipeline: `bench_nitrocop conform` → `bench/conform.json` → `coverage_table` → `docs/coverage.md`
-
 ## Corpus Fix Loop
 
 After a corpus oracle CI run, use `/fix-cops` to auto-fix a batch of high-divergence cops in parallel. It triages by total FP+FN (prioritizing biggest conformance impact), investigates, spawns worktree-isolated teammates to fix each cop, and collects results. See `.claude/skills/fix-cops/SKILL.md`.
@@ -340,6 +327,6 @@ The script compares nitrocop offense counts against the RuboCop baseline from th
 - **Every cop fix or false-positive fix must include test coverage.** When fixing a false positive, add the previously-false-positive case to the cop's `no_offense.rb` fixture. When fixing a missed detection, add it to `offense.rb`. This prevents regressions and documents the expected behavior.
 - **Don't remove or move test cases unless they are factually incorrect.** Existing offense and no_offense fixtures represent verified correct behavior. If a code change causes existing tests to fail, the change is likely too aggressive and introduces regressions (FPs or FNs on other repos). Fix the approach rather than deleting tests. The exception: if a test case is provably wrong (e.g., nitrocop was flagging something RuboCop doesn't flag), it should be moved to the correct fixture file (offense → no_offense or vice versa) with a clear explanation.
 - **NEVER use `git stash` or `git stash pop`.** Work has been lost in the past from stash conflicts and forgotten stashes. Instead, commit work-in-progress to a branch, or use a worktree for parallel work. If you need to switch context, commit first with a WIP message.
-- **After adding or fixing cops, regenerate coverage docs.** Run the full pipeline to keep docs up to date:
-  1. `cargo run --release --bin bench_nitrocop -- conform` — regenerate conformance data (`bench/conform.json`)
-  2. `cargo run --bin coverage_table -- --show-missing --output docs/coverage.md` — regenerate coverage table
+- **Do not run local benchmark regeneration by default during cop-fix loops.**
+  Use per-cop corpus gates (`scripts/check-cop.py ... --verbose [--rerun]`) as the acceptance check.
+  Only run `cargo run --release --bin bench_nitrocop -- conform` when explicitly requested (for example release/docs refresh), since it rewrites `bench/results.md`.

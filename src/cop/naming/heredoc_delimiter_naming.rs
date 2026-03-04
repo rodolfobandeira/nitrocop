@@ -3,10 +3,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=14,002, FN=14,273.
+///
+/// FP=14,002 / FN=14,273: the primary divergence was offense location.
+/// nitrocop reported at heredoc opening (`<<~END`) while RuboCop reports at the
+/// closing delimiter token (`END`). This produced symmetric location mismatches
+/// at large scale. This implementation now reports at `closing_loc()` and also
+/// handles non-word delimiters (for example `<<-'+'`) as offenses.
+///
+/// Remaining gaps (if any after rerun) are expected to come from edge-case
+/// delimiter regex compatibility and not from opening-vs-closing location.
 pub struct HeredocDelimiterNaming;
 
-// Default forbidden patterns: EO followed by one uppercase letter, or END
-fn is_forbidden_delimiter(delimiter: &str) -> bool {
+// Default forbidden patterns: EO followed by one uppercase letter, or END.
+fn is_default_forbidden_delimiter(delimiter: &str) -> bool {
     // Default: /(^|\s)(EO[A-Z]{1}|END)(\s|$)/i
     let d = delimiter.to_uppercase();
     if d == "END" {
@@ -16,6 +28,57 @@ fn is_forbidden_delimiter(delimiter: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_word_delimiter(delimiter: &str) -> bool {
+    delimiter
+        .as_bytes()
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+fn delimiter_matches_pattern(delimiter: &str, raw_pattern: &str) -> bool {
+    let pattern = raw_pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+
+    // RuboCop config stores regexes as strings like `/.../i`.
+    let (regex_body, flags) = if let Some(stripped) = pattern.strip_prefix('/') {
+        if let Some(last_slash) = stripped.rfind('/') {
+            (&stripped[..last_slash], &stripped[last_slash + 1..])
+        } else {
+            (stripped, "")
+        }
+    } else {
+        (pattern, "")
+    };
+
+    if !regex_body.is_empty() {
+        let mut compiled = String::new();
+        if flags.contains('i') {
+            compiled.push_str("(?i)");
+        }
+        compiled.push_str(regex_body);
+        if let Ok(re) = regex::Regex::new(&compiled) {
+            return re.is_match(delimiter);
+        }
+    }
+
+    delimiter.eq_ignore_ascii_case(pattern)
+}
+
+fn is_forbidden_delimiter(delimiter: &str, configured_patterns: Option<&Vec<String>>) -> bool {
+    if let Some(patterns) = configured_patterns {
+        for pattern in patterns {
+            if delimiter_matches_pattern(delimiter, pattern) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    is_default_forbidden_delimiter(delimiter)
 }
 
 impl Cop for HeredocDelimiterNaming {
@@ -36,13 +99,20 @@ impl Cop for HeredocDelimiterNaming {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _forbidden_delimiters = config.get_string_array("ForbiddenDelimiters");
+        let forbidden_delimiters = config.get_string_array("ForbiddenDelimiters");
 
-        // Check InterpolatedStringNode and StringNode for heredoc openings
-        let opening_loc = if let Some(interp) = node.as_interpolated_string_node() {
-            interp.opening_loc()
+        // Check InterpolatedStringNode and StringNode for heredoc openings.
+        let (opening_loc, closing_start) = if let Some(interp) = node.as_interpolated_string_node()
+        {
+            (
+                interp.opening_loc(),
+                interp.closing_loc().map(|loc| loc.start_offset()),
+            )
         } else if let Some(s) = node.as_string_node() {
-            s.opening_loc()
+            (
+                s.opening_loc(),
+                s.closing_loc().map(|loc| loc.start_offset()),
+            )
         } else {
             return;
         };
@@ -59,7 +129,7 @@ impl Cop for HeredocDelimiterNaming {
             return;
         }
 
-        // Extract delimiter
+        // Extract delimiter.
         let after_arrows = &opening[2..];
         let after_prefix = if after_arrows.starts_with(b"~") || after_arrows.starts_with(b"-") {
             &after_arrows[1..]
@@ -78,7 +148,15 @@ impl Cop for HeredocDelimiterNaming {
                 .unwrap_or(after_prefix.len() - 1);
             &after_prefix[1..1 + end]
         } else {
-            after_prefix
+            let end = after_prefix
+                .iter()
+                .position(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+                .unwrap_or(after_prefix.len());
+            if end == 0 {
+                &after_prefix[..1]
+            } else {
+                &after_prefix[..end]
+            }
         };
 
         let delimiter_str = std::str::from_utf8(delimiter).unwrap_or("");
@@ -86,9 +164,12 @@ impl Cop for HeredocDelimiterNaming {
             return;
         }
 
-        if is_forbidden_delimiter(delimiter_str) {
-            // RuboCop points at the opening heredoc delimiter (<<~EOF), not the closing
-            let (line, column) = source.offset_to_line_col(opening_loc.start_offset());
+        // RuboCop flags the closing delimiter token.
+        if !is_word_delimiter(delimiter_str)
+            || is_forbidden_delimiter(delimiter_str, forbidden_delimiters.as_ref())
+        {
+            let offense_offset = closing_start.unwrap_or(opening_loc.start_offset() + 2);
+            let (line, column) = source.offset_to_line_col(offense_offset);
             diagnostics.push(self.diagnostic(
                 source,
                 line,

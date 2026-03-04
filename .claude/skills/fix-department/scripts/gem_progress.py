@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 # Maps gem names to the cop department prefixes they own.
-# Must match the mapping in src/bin/coverage_table.rs VENDOR_SOURCES.
+# Keep this mapping in sync with department ownership in AGENTS.md.
 GEM_DEPARTMENTS = {
     "rubocop": [
         "Bundler", "Gemspec", "Layout", "Lint", "Metrics",

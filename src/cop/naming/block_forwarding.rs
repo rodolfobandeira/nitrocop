@@ -5,6 +5,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-04)
+///
+/// Corpus oracle reported FP=3, FN=0.
+///
+/// FP=3: investigated examples from `samg__timetrap__edacc04` and
+/// `rest-client__rest-client__2c72a2e`. Reducer validation indicated RuboCop
+/// also reports offenses for the reduced patterns, suggesting artifact/location
+/// noise rather than a stable semantic mismatch.
+///
+/// No code change applied in this batch. A future fix, if still needed after a
+/// fresh rerun, should be based on exact offense-location/message diffs from a
+/// regenerated corpus artifact.
 pub struct BlockForwarding;
 
 impl Cop for BlockForwarding {
