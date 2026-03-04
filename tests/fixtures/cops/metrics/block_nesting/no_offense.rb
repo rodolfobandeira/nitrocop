@@ -49,6 +49,19 @@ def respond_to_destroy(method)
   end
 end
 
+# Method inside nesting: depth carries through def boundaries
+unless guard_condition
+  class Base
+    def process(arg)
+      if check_a
+        if check_b
+          do_something
+        end
+      end
+    end
+  end
+end
+
 # Multiple rescue clauses are sibling nesting, not nested within each other
 def handle_connections
   while running
