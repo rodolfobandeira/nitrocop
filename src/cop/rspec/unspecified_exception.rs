@@ -46,6 +46,20 @@ impl Cop for UnspecifiedException {
             return;
         }
 
+        // RuboCop only matches block form: expect { ... }.to raise_error
+        // Not parens form: expect(...).to raise_error
+        // The receiver of `.to` must be an `expect` call with a block and no arguments.
+        if let Some(receiver) = call.receiver() {
+            if let Some(expect_call) = receiver.as_call_node() {
+                if expect_call.name().as_slice() == b"expect" {
+                    // Must have a block (expect { ... }) and no arguments (not expect(...))
+                    if expect_call.block().is_none() || expect_call.arguments().is_some() {
+                        return;
+                    }
+                }
+            }
+        }
+
         let args = match call.arguments() {
             Some(a) => a,
             None => return,

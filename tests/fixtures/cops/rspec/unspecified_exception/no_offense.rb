@@ -29,4 +29,13 @@ RSpec.describe User do
       expect(error).to be_a(StandardError)
     end
   end
+
+  # Parens form expect(...) should not be flagged — only block form expect { }
+  it 'allows expect(...).to raise_error' do
+    expect(run_assertions('assert_match("blah")', result)).to raise_error
+  end
+
+  it 'allows expect(...).to raise_exception' do
+    expect(some_method_call).to raise_exception
+  end
 end
