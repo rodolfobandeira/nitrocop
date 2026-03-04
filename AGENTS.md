@@ -270,7 +270,7 @@ Pipeline: `bench_nitrocop conform` → `bench/conform.json` → `coverage_table`
 
 ## Corpus Fix Loop
 
-After a corpus oracle CI run, use `/fix-cops` to auto-fix a batch of high-FP cops in parallel. It triages, investigates, spawns worktree-isolated teammates to fix each cop, and collects results. See `.claude/skills/fix-cops/SKILL.md`.
+After a corpus oracle CI run, use `/fix-cops` to auto-fix a batch of high-divergence cops in parallel. It triages by total FP+FN (prioritizing biggest conformance impact), investigates, spawns worktree-isolated teammates to fix each cop, and collects results. See `.claude/skills/fix-cops/SKILL.md`.
 
 Use `/fix-department <gem-name>` to bring all cops in a specific gem to 100% corpus conformance. This is the preferred approach for incremental adoption — completing one gem at a time (e.g., `rubocop-performance`) so users can adopt it with confidence. See `.claude/skills/fix-department/SKILL.md`.
 

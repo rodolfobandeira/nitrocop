@@ -1,6 +1,6 @@
 ---
 name: fix-cops
-description: Auto-fix batch of cops after a corpus oracle run. Triages, investigates, and fixes top FP cops in parallel using worktree-isolated teammates.
+description: Auto-fix batch of cops after a corpus oracle run. Triages by total divergence (FP+FN), investigates, and fixes top cops in parallel using worktree-isolated teammates.
 allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Task, TeamCreate, TaskCreate, TaskUpdate, TaskList, TaskGet, SendMessage
 ---
 
@@ -19,19 +19,19 @@ git worktree by default. Only skip this when the user explicitly asks to use the
 
 1. Download corpus results and run triage (automatically excludes cops fixed since the oracle run):
    ```bash
-   python3 .claude/skills/triage/scripts/triage.py --fp-only --limit 20 $ARGUMENTS
+   python3 .claude/skills/triage/scripts/triage.py --limit 20 $ARGUMENTS
    ```
 
 2. From the triage output, select **up to 4 cops** to fix in this batch. Prioritize:
-   - **FP-only cops** (FN=0) — these are pure regressions, usually straightforward
-   - **High FP count** — more impact per fix
-   - **High match rate** (>90%) — the cop mostly works, just has edge case FPs
-   - Skip Layout/ alignment cops (HashAlignment, IndentationWidth, etc.) — these are complex multi-line state machines, not good for batch fixing
+   - **Highest total divergence** (FP+FN) — these move overall conformance the most
+   - All departments are fair game, including Layout cops
+   - Consider feasibility: prefer cops where the FP/FN pattern is identifiable and fixable over cops where the root cause is unclear
 
-3. For each selected cop, run investigate-cop.py to understand the FP pattern:
+3. For each selected cop, run investigate-cop.py to understand the divergence pattern:
    ```bash
-   python3 scripts/investigate-cop.py Department/CopName --context --fp-only --limit 10
+   python3 scripts/investigate-cop.py Department/CopName --context --limit 10
    ```
+   Use `--fp-only` or `--fn-only` to focus on one side if the cop has both.
 
 4. **Run the delta reducer** on up to 3 FP examples per cop to get minimal reproductions:
    ```bash
@@ -218,7 +218,8 @@ Do not leave retained progress only in a worktree/collector branch.
 ## Arguments
 
 Pass arguments through to the triage script:
-- `/fix-cops` — default: top FP-only cops
+- `/fix-cops` — default: top cops by total divergence (FP+FN)
 - `/fix-cops --department Style` — only Style cops
+- `/fix-cops --fp-only` — only fix FP-only cops (legacy behavior)
 - `/fix-cops --limit 10` — consider more candidates
 - `/fix-cops --input /path/to/corpus-results.json` — use local file
