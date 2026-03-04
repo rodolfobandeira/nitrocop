@@ -46,3 +46,12 @@ context 'when
     expect(true).to eq(true)
   end
 end
+
+# Interpolated string where the first part is interpolation — RuboCop skips these
+describe Foo do
+  { "bar" => :baz? }.each_pair do |name, method|
+    it "#{method} returns true for #{name} " do
+      expect(true).to eq(true)
+    end
+  end
+end

@@ -4,6 +4,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RuboCop's NodePattern for this cop (`(dstr ({str dstr sym} ...) ...)`) requires
+/// the first child of a dstr to be str/dstr/sym. Interpolated strings where the
+/// first part is an EmbeddedStatementsNode (e.g., `"#{method} text "`) don't match
+/// the pattern, so RuboCop skips them entirely. We mirror this by checking that
+/// the first part of an InterpolatedStringNode is a StringNode before inspecting
+/// for excessive whitespace.
+///
+/// Corpus FP fix: decidim/decidim — `"#{method} returns true for #{os} "` was
+/// incorrectly flagged for trailing space because we checked raw source of all
+/// interpolated strings. Now we skip strings whose first part is interpolation.
 pub struct ExcessiveDocstringSpacing;
 
 impl Cop for ExcessiveDocstringSpacing {
@@ -112,7 +122,16 @@ impl Cop for ExcessiveDocstringSpacing {
                 }
                 combined
             } else {
-                // Real interpolated string ("...#{...}...") — check raw source between quotes
+                // Real interpolated string ("...#{...}...").
+                // RuboCop's NodePattern `(dstr ({str dstr sym} ...) ...)` requires the
+                // first child of the dstr to be a str/dstr/sym. If the first part is
+                // interpolation (EmbeddedStatementsNode), the pattern doesn't match and
+                // RuboCop skips the check entirely.
+                let parts: Vec<_> = s.parts().iter().collect();
+                if parts.is_empty() || parts[0].as_string_node().is_none() {
+                    return;
+                }
+                // First part is a string literal — check raw source between quotes
                 let loc = s.location();
                 let raw = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
                 if raw.len() >= 2 {
