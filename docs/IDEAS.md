@@ -34,6 +34,17 @@ unsupported config keys, external cops breakdown by source (plugin vs custom req
 A `bin/lint` recipe that runs nitrocop for covered cops, then `bundle exec rubocop --only <remaining>`
 for the rest. Documents the incremental adoption path for teams that can't drop RuboCop yet.
 
+## Corpus Scaling & Advanced Harness
+
+Phase 1 of the corpus oracle is live (CI workflow, ~22 repos, diff engine). Future phases:
+
+- Scale manifest to ~100+ repos from 3 feeds (GitHub stars, RubyGems, `.rubocop.yml` search)
+- Config pre-scan + repo-config mode eligibility (skip repos with unsafe `require:` entries)
+- Noise bucket classification (syntax/parse, gem version mismatch, unimplemented, true behavior diff)
+- Tier generator: `corpus_results.json` → `resources/tiers.json` (Stable/Preview)
+- Autocorrect oracle CI lane: per-cop autocorrect parity with safety gates (parse, idempotence, non-overlap)
+- Regression fixture capture: extract minimal repros from `true_behavior_diff` into `testdata/`
+
 ---
 
 # Optimization Ideas
@@ -225,9 +236,11 @@ File hash uses path + content SHA-256.
 
 ## Investigated & Rejected
 
+- **Config loading optimization** — after `.nitrocop.cache`, config loading is 35-140ms (3-18% of wall time). Breakdown: file I/O (40 YAML reads) ~100-120ms, YAML parsing ~80-120ms, config merging ~60-100ms, tree walk for nested configs ~50-80ms. Discourse is the worst case at 140ms due to 31 nested `.rubocop.yml` files. Not worth further optimization — cop execution dominates at 75-95% of linting time.
+- **Faster YAML parser** — rapidyaml is ~15x faster but the Rust bindings (`ryml`) are GPLv3-incompatible. Even a 10x speedup would only save ~70-100ms on Discourse (worst case) and ~10-30ms on most repos, since per-file syscall overhead dominates over parse speed at these sizes.
+- **mmap for file I/O** — 98.4% of files under 32KB. Kernel page cache means `read()` already serves from memory. Benchmarked on Discourse (5895 files): 775ms→768ms (~1%, within noise). Reverted — added unsafe complexity for zero gain.
 - **Skip fully-disabled departments** — cops already short-circuit on boolean flag (~10ns). Would save ~12ms total.
-- **Faster YAML parser** — config loading is only 13-162ms with `.nitrocop.cache`. Diminishing returns.
-- **mmap for file I/O** — 98.4% of files under 32KB. Kernel page cache means `read()` already serves from memory. No measurable difference.
+- **GEM_HOME/GEM_PATH direct lookup** — these env vars are not set by mise (popular Ruby version manager). No way to find gem paths without a Ruby subprocess, confirming `.nitrocop.cache` is the right design.
 
 ---
 
