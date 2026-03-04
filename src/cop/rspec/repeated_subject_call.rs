@@ -6,6 +6,19 @@ use crate::parse::source::SourceFile;
 
 /// RSpec/RepeatedSubjectCall: Flag calling `subject` multiple times in the same example
 /// when at least one call is inside a block (expect { subject }).
+///
+/// ## FP fix (2026-03): align with RuboCop's `detect_offense` filtering
+///
+/// RuboCop only flags a repeated `subject` call when ALL three conditions hold:
+/// 1. `subject` is NOT chained (`subject.foo` — skip, subject is a receiver)
+/// 2. `subject`'s parent is NOT a send/call node (e.g., `expect(subject)` — skip,
+///    subject is an argument)
+/// 3. `subject` is inside an `expect { ... }` block (not just any block)
+///
+/// The previous implementation only tracked `in_block` (any block) and didn't
+/// check condition 2. This caused 42 FPs from patterns like:
+///   `expect(subject).to be_allowed(resource)` inside `.each` loops —
+///   subject as an argument was incorrectly counted as a flaggable call.
 pub struct RepeatedSubjectCall;
 
 impl Cop for RepeatedSubjectCall {
@@ -61,32 +74,30 @@ impl Cop for RepeatedSubjectCall {
             None => return,
         };
 
-        // Find all `subject` calls in the example body, tracking which are in blocks
-        let mut subject_calls: Vec<(usize, usize, bool)> = Vec::new(); // (line, col, is_in_block)
+        // Find all `subject` calls in the example body.
+        // Each entry: (line, col, is_in_expect_block, is_arg_of_call, is_chained)
+        let mut subject_calls: Vec<SubjectCall> = Vec::new();
         collect_subject_calls(source, &body, false, false, &mut subject_calls);
 
         if subject_calls.len() <= 1 {
             return;
         }
 
-        // Only flag if at least one call is inside a block
-        let has_block_call = subject_calls.iter().any(|(_, _, in_block)| *in_block);
-        if !has_block_call {
-            return;
-        }
-
-        // Flag all block calls after the first subject reference
+        // Flag 2nd+ subject calls that are:
+        // - inside an expect { } block
+        // - NOT chained (subject.foo)
+        // - NOT an argument to another call (expect(subject))
         let mut seen_first = false;
-        for &(line, col, in_block) in &subject_calls {
+        for call in &subject_calls {
             if !seen_first {
                 seen_first = true;
                 continue;
             }
-            if in_block {
+            if call.in_expect_block && !call.is_chained && !call.is_arg_of_call {
                 diagnostics.push(self.diagnostic(
                     source,
-                    line,
-                    col,
+                    call.line,
+                    call.col,
                     "Calls to subject are memoized, this block is misleading".to_string(),
                 ));
             }
@@ -94,16 +105,24 @@ impl Cop for RepeatedSubjectCall {
     }
 }
 
+struct SubjectCall {
+    line: usize,
+    col: usize,
+    in_expect_block: bool,
+    is_chained: bool,
+    is_arg_of_call: bool,
+}
+
 fn collect_subject_calls(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
-    in_block: bool,
+    in_expect_block: bool,
     is_receiver: bool,
-    results: &mut Vec<(usize, usize, bool)>,
+    results: &mut Vec<SubjectCall>,
 ) {
     if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_subject_calls(source, &stmt, in_block, false, results);
+            collect_subject_calls(source, &stmt, in_expect_block, false, results);
         }
         return;
     }
@@ -111,32 +130,52 @@ fn collect_subject_calls(
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
 
-        // Check if this is a bare `subject` call (no receiver, no args).
-        // Skip chained calls like `subject.something` — RuboCop's cop skips
-        // calls where subject is chained (used as a receiver of another call).
-        if name == b"subject" && call.receiver().is_none() && !is_receiver {
+        // Check if this is a bare `subject` call (no receiver).
+        if name == b"subject" && call.receiver().is_none() {
             let loc = call.location();
             let (line, col) = source.offset_to_line_col(loc.start_offset());
-            results.push((line, col, in_block));
+            results.push(SubjectCall {
+                line,
+                col,
+                in_expect_block,
+                is_chained: is_receiver,
+                // subject is an argument if it's not a receiver and it's inside
+                // the arguments of another call — tracked by the caller passing
+                // is_arg=true via the arguments recursion below
+                is_arg_of_call: false, // will be set by caller
+            });
         }
 
         // Recurse into receiver, marking it as a receiver context
         if let Some(recv) = call.receiver() {
-            collect_subject_calls(source, &recv, in_block, true, results);
+            collect_subject_calls(source, &recv, in_expect_block, true, results);
         }
 
-        // Check arguments
+        // Check arguments — subject here is an argument to this call
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
-                collect_subject_calls(source, &arg, in_block, false, results);
+                let before = results.len();
+                collect_subject_calls(source, &arg, in_expect_block, false, results);
+                // Mark any subject calls found in args as arguments of a call
+                for r in &mut results[before..] {
+                    r.is_arg_of_call = true;
+                }
             }
         }
 
-        // Check the call's own block
+        // Check the call's own block — track if this is an `expect` block
         if let Some(block) = call.block() {
             if let Some(block_node) = block.as_block_node() {
                 if let Some(body) = block_node.body() {
-                    collect_subject_calls(source, &body, true, false, results);
+                    let is_expect =
+                        name == b"expect" || (in_expect_block && call.receiver().is_none());
+                    collect_subject_calls(
+                        source,
+                        &body,
+                        in_expect_block || is_expect,
+                        false,
+                        results,
+                    );
                 }
             }
         }

@@ -19,3 +19,31 @@ RSpec.describe Baz do
     expect { subject.destroy }.to_not raise_error
   end
 end
+
+# subject as argument to expect() — parent is a send node, not flagged
+RSpec.describe Qux do
+  it "allows voting" do
+    expect(subject).not_to be_allowed(some_resource)
+    other_resources.each do |resource|
+      expect(subject).to be_allowed(resource)
+    end
+  end
+end
+
+# subject as argument inside blocks should not be flagged
+RSpec.describe Quux do
+  it "checks results" do
+    expect(subject).to eq(expected)
+    items.each do |item|
+      expect(subject).to include(item)
+    end
+  end
+end
+
+# subject as argument to create/other methods inside expect blocks
+RSpec.describe Corge do
+  it do
+    expect { create(:item, owner: subject) }.to change { Item.count }
+    expect { create(:item, subject) }.to not_change { Item.count }
+  end
+end
