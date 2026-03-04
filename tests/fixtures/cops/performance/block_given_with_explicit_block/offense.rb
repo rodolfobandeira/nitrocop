@@ -40,3 +40,22 @@ def in_ternary(&block)
   block_given? ? block.call : default
   ^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
 end
+
+# FN fix: qualified ::Kernel.block_given?
+def with_qualified_kernel(&block)
+  if ::Kernel.block_given?
+     ^^^^^^^^^^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
+    block.call
+  end
+end
+
+def with_kernel_receiver(&block)
+  do_something if Kernel.block_given?
+                  ^^^^^^^^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
+end
+
+# FN fix: block_given? as keyword argument value
+def as_keyword_arg(&block)
+  render(timing: block_given?)
+                 ^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
+end

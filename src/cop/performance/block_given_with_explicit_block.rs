@@ -5,6 +5,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for uses of `block_given?` inside methods with explicit `&block` parameter.
+///
+/// ## Investigation findings (2026-03)
+/// - 11 FN from corpus, two root causes:
+///   1. Qualified `::Kernel.block_given?` / `Kernel.block_given?` — the visitor only matched
+///      bare `block_given?` (no receiver). Fixed by accepting `Kernel` and `::Kernel` as
+///      valid receivers via `is_kernel_or_no_receiver()`.
+///   2. `block_given?` used as keyword arg value (e.g., `timing: block_given?`) — these were
+///      already handled by the recursive visitor; the real gap was only pattern 1.
 pub struct BlockGivenWithExplicitBlock;
 
 impl Cop for BlockGivenWithExplicitBlock {
@@ -83,6 +92,28 @@ impl Cop for BlockGivenWithExplicitBlock {
     }
 }
 
+/// Returns true if the receiver is absent (bare `block_given?`), or is
+/// `Kernel` / `::Kernel` (qualified `Kernel.block_given?`).
+fn is_kernel_or_no_receiver(receiver: Option<ruby_prism::Node<'_>>) -> bool {
+    let recv = match receiver {
+        None => return true,
+        Some(r) => r,
+    };
+    // Kernel.block_given?
+    if let Some(cr) = recv.as_constant_read_node() {
+        return cr.name().as_slice() == b"Kernel";
+    }
+    // ::Kernel.block_given?
+    if let Some(cp) = recv.as_constant_path_node() {
+        if cp.parent().is_none() {
+            if let Some(name) = cp.name() {
+                return name.as_slice() == b"Kernel";
+            }
+        }
+    }
+    false
+}
+
 struct BlockGivenFinder {
     offsets: Vec<usize>,
 }
@@ -90,8 +121,8 @@ struct BlockGivenFinder {
 impl<'pr> Visit<'pr> for BlockGivenFinder {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if node.name().as_slice() == b"block_given?"
-            && node.receiver().is_none()
             && node.arguments().is_none()
+            && is_kernel_or_no_receiver(node.receiver())
         {
             self.offsets.push(node.location().start_offset());
         }
