@@ -74,8 +74,11 @@ impl Cop for Size {
 /// - `.to_a` / `.to_h` calls (any receiver)
 /// - `Array[...]` / `Array(...)` / `Hash[...]` / `Hash(...)`
 fn is_array_or_hash_receiver(node: &ruby_prism::Node<'_>) -> bool {
-    // Array or Hash literal
-    if node.as_array_node().is_some() || node.as_hash_node().is_some() {
+    // Array or Hash literal (including keyword hash arguments)
+    if node.as_array_node().is_some()
+        || node.as_hash_node().is_some()
+        || node.as_keyword_hash_node().is_some()
+    {
         return true;
     }
 
@@ -107,12 +110,19 @@ fn is_array_or_hash_receiver(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Checks if a node is a simple constant read of `Array` or `Hash`.
+/// Checks if a node is a constant `Array` or `Hash` (simple or qualified like `::Array`).
 fn is_array_or_hash_constant(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(c) = node.as_constant_read_node() {
         let name = c.name();
         let name_bytes = name.as_slice();
         return name_bytes == b"Array" || name_bytes == b"Hash";
+    }
+    if let Some(cp) = node.as_constant_path_node() {
+        // ::Array or ::Hash (top-level constant path with no parent)
+        if cp.parent().is_none() {
+            let src = cp.location().as_slice();
+            return src == b"::Array" || src == b"::Hash";
+        }
     }
     false
 }
