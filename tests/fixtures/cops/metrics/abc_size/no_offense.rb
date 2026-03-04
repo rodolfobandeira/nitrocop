@@ -49,3 +49,19 @@ def moderate_method
   p = 16
   q = 17
 end
+
+# Short define_method block should not fire
+define_method(:simple_dm) do
+  x = 1
+  x
+end
+
+# define_method with string argument
+define_method("another_dm") do
+  a = 1
+  b = 2
+end
+
+# Empty define_method
+define_method(:empty_dm) do
+end

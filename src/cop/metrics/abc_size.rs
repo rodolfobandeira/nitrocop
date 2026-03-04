@@ -285,10 +285,12 @@ impl AbcCounter {
                         {
                             self.conditions += 1;
                         }
-                        // Iterating block: a call with a block to a known iterating method
-                        // counts as a condition (block is in RuboCop's CONDITION_NODES).
-                        if call.block().is_some_and(|b| b.as_block_node().is_some())
-                            && KNOWN_ITERATING_METHODS.contains(&method_name)
+                        // Iterating block: a call with a block (BlockNode or BlockArgumentNode)
+                        // to a known iterating method counts as a condition.
+                        // BlockArgumentNode handles `items.map(&:foo)` (block_pass).
+                        if call.block().is_some_and(|b| {
+                            b.as_block_node().is_some() || b.as_block_argument_node().is_some()
+                        }) && KNOWN_ITERATING_METHODS.contains(&method_name)
                         {
                             self.conditions += 1;
                         }
@@ -408,6 +410,143 @@ fn is_setter_method(name: &[u8]) -> bool {
         && !matches!(name, b"==" | b"!=" | b"<=" | b">=" | b"===" | b"[]=")
 }
 
+impl AbcSize {
+    fn check_def(
+        &self,
+        source: &SourceFile,
+        def_node: &ruby_prism::DefNode<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let max = config.get_usize("Max", 17);
+        let count_repeated_attributes = config.get_bool("CountRepeatedAttributes", true);
+
+        let method_name_str = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
+        if self.is_allowed_method(method_name_str, config) {
+            return;
+        }
+
+        // RuboCop's AbcSize passes only the method body to AbcSizeCalculator,
+        // so method-level parameters are NOT counted as assignments. Block
+        // parameters inside the body ARE counted because the visitor traverses them.
+        let body = match def_node.body() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let mut counter = AbcCounter::new(count_repeated_attributes);
+        counter.visit(&body);
+
+        let score = counter.score();
+        if score > max as f64 {
+            let start_offset = def_node.def_keyword_loc().start_offset();
+            let (line, column) = source.offset_to_line_col(start_offset);
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                format!(
+                    "Assignment Branch Condition size for {method_name_str} is too high. [{score:.2}/{max}]"
+                ),
+            ));
+        }
+    }
+
+    fn check_define_method(
+        &self,
+        source: &SourceFile,
+        call_node: &ruby_prism::CallNode<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Only handle bare define_method calls (no receiver)
+        if call_node.name().as_slice() != b"define_method" {
+            return;
+        }
+        if call_node.receiver().is_some() {
+            return;
+        }
+
+        // Must have a block
+        let block = match call_node.block() {
+            Some(b) => match b.as_block_node() {
+                Some(bn) => bn,
+                None => return,
+            },
+            None => return,
+        };
+
+        let max = config.get_usize("Max", 17);
+        let count_repeated_attributes = config.get_bool("CountRepeatedAttributes", true);
+
+        // Extract method name from first argument
+        let method_name = extract_define_method_name(call_node);
+        let method_name_str = method_name.as_deref().unwrap_or("(unknown)");
+        if self.is_allowed_method(method_name_str, config) {
+            return;
+        }
+
+        let body = match block.body() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let mut counter = AbcCounter::new(count_repeated_attributes);
+        counter.visit(&body);
+
+        let score = counter.score();
+        if score > max as f64 {
+            let start_offset = call_node.location().start_offset();
+            let (line, column) = source.offset_to_line_col(start_offset);
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                format!(
+                    "Assignment Branch Condition size for {method_name_str} is too high. [{score:.2}/{max}]"
+                ),
+            ));
+        }
+    }
+
+    fn is_allowed_method(&self, method_name: &str, config: &CopConfig) -> bool {
+        let allowed_methods = config.get_string_array("AllowedMethods");
+        let allowed_patterns = config.get_string_array("AllowedPatterns");
+
+        if let Some(allowed) = &allowed_methods {
+            if allowed.iter().any(|m| m == method_name) {
+                return true;
+            }
+        }
+        if let Some(patterns) = &allowed_patterns {
+            if patterns.iter().any(|p| {
+                regex::Regex::new(p)
+                    .ok()
+                    .is_some_and(|re| re.is_match(method_name))
+            }) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Extract the method name from a `define_method` call's first argument.
+/// Handles symbol literals (:name), string literals ("name"), and returns
+/// None for dynamic/interpolated names.
+fn extract_define_method_name(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let args = call.arguments()?;
+    let first = args.arguments().iter().next()?;
+
+    if let Some(sym) = first.as_symbol_node() {
+        return Some(String::from_utf8_lossy(sym.unescaped()).into_owned());
+    }
+    if let Some(s) = first.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    None
+}
+
 impl Cop for AbcSize {
     fn name(&self) -> &'static str {
         "Metrics/AbcSize"
@@ -443,56 +582,11 @@ impl Cop for AbcSize {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let def_node = match node.as_def_node() {
-            Some(d) => d,
-            None => return,
-        };
-
-        let max = config.get_usize("Max", 17);
-        let count_repeated_attributes = config.get_bool("CountRepeatedAttributes", true);
-
-        // AllowedMethods / AllowedPatterns: skip methods matching these
-        let allowed_methods = config.get_string_array("AllowedMethods");
-        let allowed_patterns = config.get_string_array("AllowedPatterns");
-        let method_name_str = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
-        if let Some(allowed) = &allowed_methods {
-            if allowed.iter().any(|m| m == method_name_str) {
-                return;
-            }
-        }
-        if let Some(patterns) = &allowed_patterns {
-            if patterns
-                .iter()
-                .any(|p| method_name_str.contains(p.as_str()))
-            {
-                return;
-            }
-        }
-
-        let mut counter = AbcCounter::new(count_repeated_attributes);
-
-        // RuboCop's AbcSize passes only the method body to AbcSizeCalculator,
-        // so method-level parameters are NOT counted as assignments. Block
-        // parameters inside the body ARE counted because the visitor traverses them.
-        let body = match def_node.body() {
-            Some(b) => b,
-            None => return,
-        };
-        counter.visit(&body);
-
-        let score = counter.score();
-        if score > max as f64 {
-            let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("unknown");
-            let start_offset = def_node.def_keyword_loc().start_offset();
-            let (line, column) = source.offset_to_line_col(start_offset);
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                format!(
-                    "Assignment Branch Condition size for {method_name} is too high. [{score:.2}/{max}]"
-                ),
-            ));
+        // Handle both `def` nodes and `define_method(:name) do...end` blocks.
+        if let Some(def_node) = node.as_def_node() {
+            self.check_def(source, &def_node, config, diagnostics);
+        } else if let Some(call_node) = node.as_call_node() {
+            self.check_define_method(source, &call_node, config, diagnostics);
         }
     }
 }
@@ -594,6 +688,94 @@ mod tests {
         assert!(
             !diags_true2.is_empty(),
             "Should fire with CountRepeatedAttributes:true and Max:4"
+        );
+    }
+
+    #[test]
+    fn define_method_offense() {
+        use crate::testutil::run_cop_full;
+
+        // 18 assignments in define_method block => ABC = 18 > 17
+        let source = b"define_method(:complex_dm) do\n  a = 1\n  b = 2\n  c = 3\n  d = 4\n  e = 5\n  f = 6\n  g = 7\n  h = 8\n  i = 9\n  j = 10\n  k = 11\n  l = 12\n  m = 13\n  n = 14\n  o = 15\n  p = 16\n  q = 17\n  r = 18\nend\n";
+        let diags = run_cop_full(&AbcSize, source);
+        assert!(
+            !diags.is_empty(),
+            "Should fire on define_method with high ABC"
+        );
+        assert!(
+            diags[0].message.contains("complex_dm"),
+            "Message should include method name"
+        );
+    }
+
+    #[test]
+    fn define_method_no_offense() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"define_method(:simple) do\n  x = 1\n  x\nend\n";
+        let diags = run_cop_full(&AbcSize, source);
+        assert!(diags.is_empty(), "Should not fire on short define_method");
+    }
+
+    #[test]
+    fn define_method_string_name() {
+        use crate::testutil::run_cop_full;
+
+        // define_method with string arg
+        let source = b"define_method(\"complex_dm\") do\n  a = 1\n  b = 2\n  c = 3\n  d = 4\n  e = 5\n  f = 6\n  g = 7\n  h = 8\n  i = 9\n  j = 10\n  k = 11\n  l = 12\n  m = 13\n  n = 14\n  o = 15\n  p = 16\n  q = 17\n  r = 18\nend\n";
+        let diags = run_cop_full(&AbcSize, source);
+        assert!(
+            !diags.is_empty(),
+            "Should fire on define_method with string name"
+        );
+        assert!(
+            diags[0].message.contains("complex_dm"),
+            "Message should include string method name"
+        );
+    }
+
+    #[test]
+    fn block_pass_iterating_method() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        // items.map(&:foo) — with block_pass, map should count as condition
+        // A=1 (x), B=2 (map, transform), C=1 (map block_pass condition)
+        // With Max:1, the score sqrt(1+4+1) = 2.45 > 1
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        let source = b"def foo\n  x = items.map(&:bar)\nend\n";
+        let diags = run_cop_full_with_config(&AbcSize, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Should count block_pass iterating method as condition"
+        );
+    }
+
+    #[test]
+    fn allowed_patterns_regex() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        // AllowedPatterns with regex pattern ^_
+        let config = CopConfig {
+            options: HashMap::from([
+                ("Max".into(), serde_yml::Value::Number(1.into())),
+                (
+                    "AllowedPatterns".into(),
+                    serde_yml::Value::Sequence(vec![serde_yml::Value::String("^_".into())]),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        // Method starting with underscore should be allowed by regex
+        let source = b"def _internal\n  a = 1\n  b = foo\nend\n";
+        let diags = run_cop_full_with_config(&AbcSize, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should skip method matching AllowedPatterns regex ^_"
         );
     }
 }
