@@ -14,6 +14,19 @@ use crate::parse::source::SourceFile;
 /// Root cause of FN=294: the cop previously rejected all calls with blocks,
 /// missing the block-based addition pattern. Also missed non-zero initial
 /// values with `:+` and `&:+` block-pass form.
+///
+/// FP fix (5 FP): `check_map_sum` flagged `map { it.foo }.sum` and
+/// `map { _1[:bar] }.sum` — blocks using Ruby 3.4 `it` keyword or numbered
+/// parameters (`_1`). In Parser gem these create `numblock`/`itblock` nodes
+/// that RuboCop's `(block ...)` NodePattern doesn't match. In Prism they use
+/// `NumberedParametersNode`/`ItParametersNode` inside a regular block. Fix:
+/// skip blocks whose parameters are these node types.
+///
+/// FN fix (10 FN): Two bugs: (1) receiver-less `inject(:+)` / `reduce(0, :+)`
+/// was rejected by an unnecessary `call.receiver().is_none()` guard — removed.
+/// (2) `inject(0, :+) do |count| ... end` entered the block path because
+/// `.block()` returned the `do..end` block, but `is_sum_block` failed.
+/// Fix: check args for `:+` symbol before entering block logic.
 pub struct Sum;
 
 impl Cop for Sum {
@@ -56,14 +69,46 @@ impl Cop for Sum {
             return;
         }
 
-        // Must have a receiver
-        if call.receiver().is_none() {
-            return;
-        }
-
         let method_str = std::str::from_utf8(method_name).unwrap_or("inject");
 
         if let Some(block) = call.block() {
+            // Check if args contain :+ symbol — if so, handle as symbol form
+            // (the :+ takes precedence over the block, matching RuboCop's behavior).
+            // This handles: inject(0, :+) do |count| ... end
+            if let Some(args) = call.arguments() {
+                let arg_nodes: Vec<_> = args.arguments().iter().collect();
+                if arg_nodes.len() == 2 && is_plus_symbol(&arg_nodes[1]) {
+                    let msg_loc = match call.message_loc() {
+                        Some(loc) => loc,
+                        None => return,
+                    };
+                    let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
+                    let raw_init = get_raw_init_text(source, call.arguments()).unwrap_or_default();
+                    let suggestion_init = get_suggestion_init(source, call.arguments());
+                    let message =
+                        format_symbol_message(method_str, &raw_init, &suggestion_init, ":+");
+                    diagnostics.push(self.diagnostic(source, line, column, message));
+                    return;
+                }
+                if arg_nodes.len() == 1 && is_plus_symbol(&arg_nodes[0]) {
+                    if only_sum_or_with_initial_value {
+                        return;
+                    }
+                    let msg_loc = match call.message_loc() {
+                        Some(loc) => loc,
+                        None => return,
+                    };
+                    let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        format!("Use `sum` instead of `{method_str}(:+)`, unless calling `{method_str}(:+)` on an empty array."),
+                    ));
+                    return;
+                }
+            }
+
             // Check for block-based pattern: inject(init) { |acc, elem| acc + elem }
             if let Some(block_node) = block.as_block_node() {
                 if is_sum_block(&block_node) {
@@ -208,9 +253,22 @@ impl Sum {
         }
 
         // map/collect must have a block or block_arg
-        let has_block = map_call.block().is_some();
-        if !has_block {
-            return;
+        let map_block = match map_call.block() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Skip blocks using numbered parameters (_1, _2) or `it` keyword —
+        // RuboCop's NodePattern `(block ...)` doesn't match numblock/itblock nodes
+        // from Parser gem, so RuboCop doesn't flag these.
+        if let Some(block_node) = map_block.as_block_node() {
+            if let Some(params) = block_node.parameters() {
+                if params.as_numbered_parameters_node().is_some()
+                    || params.as_it_parameters_node().is_some()
+                {
+                    return;
+                }
+            }
         }
 
         let map_method_str = std::str::from_utf8(map_method).unwrap_or("map");

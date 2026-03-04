@@ -46,3 +46,15 @@ items.map(&:count).sum
       ^^^ Performance/Sum: Use `sum { ... }` instead of `map { ... }.sum`.
 items.map { |x| x.value }.sum(10)
       ^^^ Performance/Sum: Use `sum(10) { ... }` instead of `map { ... }.sum(10)`.
+inject(:+)
+^^^^^^ Performance/Sum: Use `sum` instead of `inject(:+)`.
+reduce(0, :+)
+^^^^^^ Performance/Sum: Use `sum` instead of `reduce(0, :+)`.
+inject { |sum, x| sum + x }
+^^^^^^ Performance/Sum: Use `sum` instead of `inject { |acc, elem| acc + elem }`.
+reduce(0) { |acc, e| acc + e }
+^^^^^^ Performance/Sum: Use `sum` instead of `reduce(0) { |acc, elem| acc + elem }`.
+inject(0, :+) do |count|
+^^^^^^ Performance/Sum: Use `sum` instead of `inject(0, :+)`.
+  percentage = count.to_f / 10
+end
