@@ -12,8 +12,11 @@ use crate::parse::source::SourceFile;
 ///   1. Qualified `::Kernel.block_given?` / `Kernel.block_given?` — the visitor only matched
 ///      bare `block_given?` (no receiver). Fixed by accepting `Kernel` and `::Kernel` as
 ///      valid receivers via `is_kernel_or_no_receiver()`.
-///   2. `block_given?` used as keyword arg value (e.g., `timing: block_given?`) — these were
-///      already handled by the recursive visitor; the real gap was only pattern 1.
+///   2. `block_given?` used as keyword arg value in method body (e.g., `render(timing: block_given?)`)
+///      — already handled by the recursive visitor.
+/// - 2 additional FN: `block_given?` used as parameter default value in the method signature
+///   (e.g., `def open(timing: block_given?, &block)`). Fixed by scanning OptionalKeywordParameterNode
+///   and OptionalParameterNode default values in addition to the body.
 pub struct BlockGivenWithExplicitBlock;
 
 impl Cop for BlockGivenWithExplicitBlock {
@@ -64,10 +67,35 @@ impl Cop for BlockGivenWithExplicitBlock {
             None => return,
         };
 
+        let mut finder = BlockGivenFinder {
+            offsets: Vec::new(),
+        };
+
+        // Walk parameter default values for `block_given?` calls.
+        // In Prism, keyword/optional param defaults are part of the parameter
+        // list, not the body, so we must scan them separately.
+        for kw in params.keywords().iter() {
+            if let Some(opt_kw) = kw.as_optional_keyword_parameter_node() {
+                finder.visit(&opt_kw.value());
+            }
+        }
+        for opt in params.optionals().iter() {
+            if let Some(opt_param) = opt.as_optional_parameter_node() {
+                finder.visit(&opt_param.value());
+            }
+        }
+
         // Walk the body looking for `block_given?` calls
         let body = match def_node.body() {
             Some(b) => b,
-            None => return,
+            None => {
+                // No body, but we may have found offenses in param defaults
+                for offset in finder.offsets {
+                    let (line, column) = source.offset_to_line_col(offset);
+                    diagnostics.push(self.diagnostic(source, line, column, "Check `block` instead of using `block_given?` with explicit `&block` parameter.".to_string()));
+                }
+                return;
+            }
         };
 
         // Check if the block param is reassigned in the body — if so, skip
@@ -80,9 +108,6 @@ impl Cop for BlockGivenWithExplicitBlock {
             return;
         }
 
-        let mut finder = BlockGivenFinder {
-            offsets: Vec::new(),
-        };
         finder.visit(&body);
 
         for offset in finder.offsets {

@@ -59,3 +59,15 @@ def as_keyword_arg(&block)
   render(timing: block_given?)
                  ^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
 end
+
+# FN fix: block_given? as default value for keyword parameter in method signature
+def open(text, timing: block_given?, &block)
+                       ^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
+  do_something
+end
+
+# FN fix: block_given? as default value for optional positional parameter
+def process(flag = block_given?, &block)
+                   ^^^^^^^^^^^^^ Performance/BlockGivenWithExplicitBlock: Check `block` instead of using `block_given?` with explicit `&block` parameter.
+  do_something
+end
