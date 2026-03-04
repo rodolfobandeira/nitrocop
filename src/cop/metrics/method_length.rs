@@ -460,4 +460,21 @@ mod tests {
             "Should fire on firstname which doesn't match /_name/ pattern"
         );
     }
+
+    #[test]
+    fn reduced_fp_method_with_rescue() {
+        use crate::testutil::run_cop_full;
+        // From corpus FP: method with inline rescue, 10 body lines should NOT fire (Max=10)
+        let source = b"module ActionCable\n  module Connection\n    class Subscriptions\n      def initialize(connection)\n        case data[\"command\"]\n        when \"subscribe\"   then add data\n        when \"unsubscribe\" then remove data\n        when \"message\"     then perform_action data\n        else\n          logger.error \"msg\"\n        end\n      rescue Exception => e\n        handle(e)\n        logger.error \"msg2\"\n      end\n      def unsubscribe_from_all\n          if subscription = subscriptions[data[\"identifier\"]]\n          end\n        end\n    end\n  end\nend\n";
+        let diags = run_cop_full(&MethodLength, source);
+        // Body lines: case, when, when, when, else, logger, end, rescue, handle, logger = 10
+        // Should NOT fire (10 <= Max:10)
+        for d in &diags {
+            eprintln!("  DIAG: {} at line {}", d.message, d.location.line);
+        }
+        assert!(
+            diags.iter().all(|d| !d.message.contains("initialize")),
+            "initialize with 10 body lines should not fire (Max:10)"
+        );
+    }
 }
