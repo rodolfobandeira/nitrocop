@@ -33,4 +33,9 @@ Gem::Specification.new do |spec|
   # Version in if/unless modifier condition is not a version arg
   spec.add_development_dependency 'coverage' if RUBY_VERSION >= '2.7.0'
        ^^^^^^^^^^^^^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
+  # Commented-out version should not count
+  spec.add_dependency 'webmock'#, '< 2' # used in vcr
+       ^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
+  spec.add_dependency 'builder'#, '~> 2.3.1'
+       ^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
 end

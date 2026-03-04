@@ -330,6 +330,32 @@ fn truncate_at_statement_modifier(s: &str) -> &str {
     s
 }
 
+/// Strip trailing Ruby comments from a line, respecting quoted strings.
+///
+/// `'webmock'#, '< 2' # used in vcr` → `'webmock'`
+/// `'foo', '>= 1.0' # comment` → `'foo', '>= 1.0' `
+fn strip_trailing_comment(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        if bytes[pos] == b'\'' || bytes[pos] == b'"' {
+            let quote = bytes[pos];
+            pos += 1;
+            while pos < bytes.len() && bytes[pos] != quote {
+                pos += 1;
+            }
+            if pos < bytes.len() {
+                pos += 1; // skip closing quote
+            }
+        } else if bytes[pos] == b'#' {
+            return &s[..pos];
+        } else {
+            pos += 1;
+        }
+    }
+    s
+}
+
 /// Check if a string's content matches RuboCop's VERSION_SPECIFICATION_REGEX.
 ///
 /// Pattern: `/^\s*[~<>=]*\s*[0-9.]+/`
