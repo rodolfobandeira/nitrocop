@@ -17,3 +17,7 @@ end
 specify 'should do something' do
   expect(true).to be true
 end
+# Pending examples (no block) — RuboCop skips these
+it "should limit owners to only updating owner-accessible fields"
+it "should limit admins to only updating admin-accessible fields"
+it "should limit members to only updating member-accessible fields"

@@ -4,6 +4,9 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation: 63 FPs were caused by flagging pending examples (no block),
+/// e.g. `it "should do something"` without a `do...end`. RuboCop's ExampleWording
+/// only checks examples that have a block body. Fixed by checking `call.block().is_some()`.
 pub struct ExampleWording;
 
 /// Example methods that take a description string.
@@ -61,6 +64,11 @@ impl Cop for ExampleWording {
 
         let method_name = call.name().as_slice();
         if !EXAMPLE_METHODS.contains(&method_name) {
+            return;
+        }
+
+        // Pending examples (no block) are not checked by RuboCop
+        if call.block().is_none() {
             return;
         }
 
