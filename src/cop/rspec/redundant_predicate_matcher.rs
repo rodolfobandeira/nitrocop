@@ -4,6 +4,11 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation: 63 FPs caused by flagging argument-less matchers like
+/// `be_exist`, `be_exists`, `be_match` etc. RuboCop's cop has an
+/// `arguments.empty?` guard that skips matchers without arguments — these are
+/// dynamic predicate matchers (calling `object.exist?`) not redundant wrappers
+/// around built-in matchers. Fixed by adding the same argument-presence check.
 pub struct RedundantPredicateMatcher;
 
 /// Maps redundant `be_X` matchers to their built-in equivalents.
@@ -84,36 +89,36 @@ impl Cop for RedundantPredicateMatcher {
             Err(_) => return,
         };
 
+        // RuboCop requires the matcher to have arguments — matchers without
+        // arguments (e.g., `be_exist`, `be_match`) are not considered redundant.
+        let matcher_args = matcher_call.arguments();
+        let has_args = matcher_args
+            .as_ref()
+            .is_some_and(|a| a.arguments().iter().next().is_some());
+
         // Check if this is a redundant matcher
         for &(redundant, builtin) in REDUNDANT_MATCHERS {
             if matcher_str == redundant {
+                // Skip matchers without arguments (matches RuboCop's `arguments.empty?` guard)
+                if !has_args {
+                    return;
+                }
+
                 // Special case: be_all with a block is not redundant
                 if redundant == "be_all" {
                     if matcher_call.block().is_some() {
                         return;
                     }
-                    // Also check if the argument is a non-send node (literal)
-                    // be_all(false) or be_all(1) are not redundant
-                    if let Some(args) = matcher_call.arguments() {
+                    // be_all(false) or be_all(1) are not redundant — only be_all(matcher) is
+                    if let Some(args) = &matcher_args {
                         let inner_args: Vec<_> = args.arguments().iter().collect();
                         if !inner_args.is_empty() {
                             let arg = &inner_args[0];
-                            // If the arg is a simple call (a matcher), it's redundant
-                            // If it's a literal, it's not
                             if arg.as_call_node().is_none() {
                                 return;
                             }
-                        } else {
-                            return;
                         }
-                    } else {
-                        return;
                     }
-                }
-
-                // Special case: be_match without argument is not redundant
-                if redundant == "be_match" && matcher_call.arguments().is_none() {
-                    return;
                 }
 
                 let loc = matcher_call.location();
