@@ -159,16 +159,30 @@ impl Cop for IoReadlines {
 
         // RuboCop matches two patterns:
         // 1. Class call: (IO|File).readlines(...).method — receiver is IO/File constant
+        //    readlines_on_class? uses `_` (no `...`) for outer method → no arguments allowed
         // 2. Instance call: expr.readlines(...).method — receiver is non-constant or nil
+        //    readlines_on_instance? uses `_ ...` → arguments allowed
         // We accept both. If receiver is a constant but NOT IO/File, skip.
+        let is_class_form;
         if let Some(recv) = readlines_call.receiver() {
-            if (recv.as_constant_read_node().is_some() || recv.as_constant_path_node().is_some())
-                && !is_io_or_file_const(&recv)
-            {
-                return;
+            if recv.as_constant_read_node().is_some() || recv.as_constant_path_node().is_some() {
+                if !is_io_or_file_const(&recv) {
+                    return;
+                }
+                is_class_form = true;
+            } else {
+                is_class_form = false;
             }
+        } else {
+            // nil receiver (bare `readlines`) is allowed for instance pattern
+            is_class_form = false;
         }
-        // nil receiver (bare `readlines`) is allowed for instance pattern
+
+        // Class form: only flag when outer call has NO arguments (matches RuboCop's
+        // readlines_on_class? pattern which uses `_` without `...`)
+        if is_class_form && outer_call.arguments().is_some() {
+            return;
+        }
 
         // Build message matching RuboCop format
         let outer_name = std::str::from_utf8(outer_method).unwrap_or("?");
