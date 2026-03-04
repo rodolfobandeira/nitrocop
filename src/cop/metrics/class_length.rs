@@ -1,6 +1,9 @@
 use ruby_prism::Visit;
 
-use crate::cop::node_type::{CLASS_NODE, MODULE_NODE, STATEMENTS_NODE};
+use crate::cop::node_type::{
+    CLASS_NODE, CONSTANT_OR_WRITE_NODE, CONSTANT_PATH_OR_WRITE_NODE, CONSTANT_PATH_WRITE_NODE,
+    CONSTANT_WRITE_NODE, MODULE_NODE, MULTI_WRITE_NODE, STATEMENTS_NODE,
+};
 use crate::cop::util::{
     collect_foldable_ranges, count_body_lines_ex, count_body_lines_full, inner_classlike_ranges,
 };
@@ -17,15 +20,19 @@ use crate::parse::source::SourceFile;
 /// Previous broad rewrite attempts regressed badly, so this implementation is
 /// intentionally incremental and validated against per-repo reruns:
 /// - `origin/main` implementation rerun: actual 14,382 vs expected 14,177.
-/// - This change rerun: actual 14,494 vs expected 14,177.
+/// - Singleton-class step rerun: actual 14,494 vs expected 14,177.
 /// - Delta vs `origin/main`: +112 offenses, decomposed into:
 ///   - ~109 recovered missing offenses (mostly singleton-class FNs)
 ///   - ~3 additional non-noise offenses (fastlane, sentry-ruby, mongoid)
 ///   - large `jruby` file-drop noise dominates aggregate counts in both runs.
+/// - Assignment-constructor step (`Class.new`/`Struct.new`) rerun:
+///   - actual 14,498 vs expected 14,177
+///   - net delta vs singleton-class step: +4 offenses, decomposed into:
+///     - +3 recovered missing offenses
+///     - +1 additional non-noise offense (community/community)
 ///
-/// Remaining known gap:
-/// - Struct/Class.new assignment forms (`Foo = Class.new do ... end`) are still
-///   not handled here and should be fixed in a follow-up change.
+/// Follow-up work should verify edge-cases around all assignment forms from the
+/// upstream spec matrix (e.g., constant-path writes and mixed multi-targets).
 pub struct ClassLength;
 
 fn check_classlike_length(
@@ -73,7 +80,7 @@ fn check_classlike_length(
     }
 }
 
-fn check_singleton_class_length(
+fn check_non_classlike_length(
     cop: &ClassLength,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
@@ -114,6 +121,69 @@ fn check_singleton_class_length(
     }
 }
 
+fn is_top_level_const_named(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
+    if let Some(read) = node.as_constant_read_node() {
+        return read.name().as_slice() == name;
+    }
+
+    if let Some(path) = node.as_constant_path_node() {
+        return path.parent().is_none()
+            && path.name().map(|n| n.as_slice() == name).unwrap_or(false);
+    }
+
+    false
+}
+
+fn is_class_or_struct_constructor(call: &ruby_prism::CallNode<'_>) -> bool {
+    if call.name().as_slice() != b"new" {
+        return false;
+    }
+
+    let receiver = match call.receiver() {
+        Some(r) => r,
+        None => return false,
+    };
+
+    is_top_level_const_named(&receiver, b"Class") || is_top_level_const_named(&receiver, b"Struct")
+}
+
+fn assignment_class_constructor_call<'pr>(
+    node: &ruby_prism::Node<'pr>,
+) -> Option<ruby_prism::CallNode<'pr>> {
+    let value = if let Some(n) = node.as_constant_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_constant_path_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_constant_or_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_constant_path_or_write_node() {
+        n.value()
+    } else if let Some(n) = node.as_multi_write_node() {
+        // `Foo, Bar = Struct.new(...) do ... end`
+        let has_constant_target = n.lefts().iter().any(|t| {
+            t.as_constant_target_node().is_some() || t.as_constant_path_target_node().is_some()
+        });
+        if !has_constant_target {
+            return None;
+        }
+        n.value()
+    } else {
+        return None;
+    };
+
+    let call = value.as_call_node()?;
+    if !is_class_or_struct_constructor(&call) {
+        return None;
+    }
+
+    let has_block = call.block().and_then(|b| b.as_block_node()).is_some();
+    if !has_block {
+        return None;
+    }
+
+    Some(call)
+}
+
 struct SingletonClassLengthVisitor<'a> {
     cop: &'a ClassLength,
     source: &'a SourceFile,
@@ -134,7 +204,7 @@ impl<'pr> Visit<'pr> for SingletonClassLengthVisitor<'_> {
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
         // Match RuboCop's on_sclass: skip singleton classes nested under class.
         if self.class_depth == 0 {
-            check_singleton_class_length(
+            check_non_classlike_length(
                 self.cop,
                 self.source,
                 self.diagnostics,
@@ -156,7 +226,16 @@ impl Cop for ClassLength {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CLASS_NODE, MODULE_NODE, STATEMENTS_NODE]
+        &[
+            CLASS_NODE,
+            CONSTANT_OR_WRITE_NODE,
+            CONSTANT_PATH_OR_WRITE_NODE,
+            CONSTANT_PATH_WRITE_NODE,
+            CONSTANT_WRITE_NODE,
+            MODULE_NODE,
+            MULTI_WRITE_NODE,
+            STATEMENTS_NODE,
+        ]
     }
 
     fn check_node(
@@ -172,22 +251,38 @@ impl Cop for ClassLength {
         let count_comments = config.get_bool("CountComments", false);
         let count_as_one = config.get_string_array("CountAsOne");
 
-        let class_node = if let Some(class_node) = node.as_class_node() {
-            class_node
-        } else {
+        if let Some(class_node) = node.as_class_node() {
+            check_classlike_length(
+                self,
+                source,
+                diagnostics,
+                max,
+                count_comments,
+                count_as_one.as_ref(),
+                class_node.class_keyword_loc().start_offset(),
+                class_node.end_keyword_loc().start_offset(),
+                class_node.body(),
+            );
+            return;
+        }
+
+        let Some(call_node) = assignment_class_constructor_call(node) else {
+            return;
+        };
+        let Some(block_node) = call_node.block().and_then(|b| b.as_block_node()) else {
             return;
         };
 
-        check_classlike_length(
+        check_non_classlike_length(
             self,
             source,
             diagnostics,
             max,
             count_comments,
             count_as_one.as_ref(),
-            class_node.class_keyword_loc().start_offset(),
-            class_node.end_keyword_loc().start_offset(),
-            class_node.body(),
+            call_node.location().start_offset(),
+            block_node.closing_loc().start_offset(),
+            block_node.body(),
         );
     }
 
