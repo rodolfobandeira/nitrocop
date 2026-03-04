@@ -179,14 +179,9 @@ pub fn inner_classlike_ranges(
             // Do NOT recurse — same as class above.
         }
 
-        fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
-            let loc = node.location();
-            let (start, _) = self.source.offset_to_line_col(loc.start_offset());
-            let end_off = loc.end_offset().saturating_sub(1).max(loc.start_offset());
-            let (end, _) = self.source.offset_to_line_col(end_off);
-            self.ranges.push((start, end));
-            // Do NOT recurse — same as class above.
-        }
+        // NOTE: visit_singleton_class_node (class << self) is intentionally NOT handled here.
+        // RuboCop's line_numbers_of_inner_nodes only excludes :module and :class, NOT :sclass.
+        // Singleton class lines count toward the enclosing module/class length.
     }
 
     let mut finder = ClasslikeFinder {

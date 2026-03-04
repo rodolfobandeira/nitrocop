@@ -119,6 +119,54 @@ mod tests {
     }
 
     #[test]
+    fn singleton_class_lines_counted() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(3.into()))]),
+            ..CopConfig::default()
+        };
+        // Module with class << self containing 3 methods = 5 body lines
+        // (class << self + 3 methods + end) but class << self should NOT be excluded
+        let source = b"module Foo\n  class << self\n    def a; end\n    def b; end\n    def c; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ModuleLength, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Should fire: class << self lines count toward module length"
+        );
+        assert!(
+            diags[0].message.contains("[5/3]"),
+            "Expected [5/3], got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn debug_spork_like_module() {
+        use crate::testutil::run_cop_full;
+
+        // Read actual spork.rb content
+        let content = std::fs::read("vendor/corpus/sporkrb__spork__224df49/lib/spork.rb")
+            .expect("spork.rb should exist in vendor/corpus");
+        let diags = run_cop_full(&ModuleLength, &content);
+        eprintln!(
+            "Spork ModuleLength diags: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        // RuboCop reports [103/100] for module Spork (lines 3-149)
+        assert!(
+            !diags.is_empty(),
+            "Should fire on module Spork (RuboCop reports 103/100)"
+        );
+        assert!(
+            diags[0].message.contains("[103/100]"),
+            "Expected [103/100], got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn config_count_as_one_array() {
         use crate::testutil::run_cop_full_with_config;
         use std::collections::HashMap;
