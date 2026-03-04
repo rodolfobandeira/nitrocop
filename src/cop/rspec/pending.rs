@@ -4,6 +4,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/Pending - detects pending specs via x-prefixed methods, `pending`/`skip` calls,
+/// examples without blocks, and `:skip`/`:pending` metadata symbols or keyword args.
+///
+/// **Fixed FP (302):** The metadata check (`:skip`/`:pending` symbols and `skip:`/`pending:`
+/// keyword args) was running on ALL call nodes, causing false positives on matcher arguments
+/// like `eq(:skip)` and factory calls like `create(:record, skip: true)`. Fix: restrict
+/// metadata checks to only RSpec example, example group, shared group, and hook methods.
 pub struct Pending;
 
 /// x-prefixed methods that indicate pending specs.
@@ -121,13 +128,17 @@ impl Cop for Pending {
         }
 
         // Check for :skip or :pending metadata, or skip: true/string, pending: true/string
-        if call.receiver().is_none() || {
-            if let Some(recv) = call.receiver() {
-                util::constant_name(&recv).is_some_and(|n| n == b"RSpec")
-            } else {
-                false
-            }
-        } {
+        // Only check metadata on RSpec example, example group, shared group, and hook methods
+        // to avoid false positives on arbitrary method calls like `eq(:skip)`.
+        let is_rspec_method = util::is_rspec_example(method_name)
+            || util::is_rspec_example_group(method_name)
+            || util::is_rspec_shared_group(method_name)
+            || util::is_rspec_hook(method_name);
+        let has_rspec_receiver = call.receiver().is_none()
+            || call
+                .receiver()
+                .is_some_and(|recv| util::constant_name(&recv).is_some_and(|n| n == b"RSpec"));
+        if is_rspec_method && has_rspec_receiver {
             if let Some(args) = call.arguments() {
                 for arg in args.arguments().iter() {
                     // Check for :skip or :pending symbol metadata
