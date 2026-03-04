@@ -56,3 +56,34 @@ describe Integration do
     it_should_behave_like 'a valid record'
   end
 end
+
+# example groups inside method definitions are ignored
+# (they receive content dynamically via instance_eval/yield)
+RSpec.describe Foo do
+  def self.with_setup(desc, &block)
+    context "when #{desc}" do
+      before { setup }
+      instance_eval(&block)
+    end
+  end
+
+  class << self
+    def without_setup(&block)
+      context 'without setup' do
+        module_exec(&block)
+      end
+    end
+  end
+
+  with_setup('ready') do
+    it { expect(subject).to be_ready }
+  end
+end
+
+# example groups inside examples are ignored
+RSpec.describe 'meta specs' do
+  it 'runs an example group' do
+    group = RSpec.describe { }
+    group.run
+  end
+end

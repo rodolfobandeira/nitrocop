@@ -1,6 +1,5 @@
 use ruby_prism::Visit;
 
-use crate::cop::node_type::{BLOCK_NODE, CALL_NODE};
 use crate::cop::util::{
     self, RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group, is_rspec_hook,
 };
@@ -8,6 +7,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/EmptyExampleGroup: Checks if an example group does not include any tests.
+///
+/// FP investigation (2026-03):
+/// - Example groups defined inside method definitions (`def`/`def self.`) are skipped,
+///   matching RuboCop's `return if node.each_ancestor(:any_def).any?`. These commonly
+///   use `instance_eval(&block)`, `class_eval(&block)`, `module_exec(&block)`, or
+///   `yield` to inject content dynamically from the caller.
+/// - Example groups nested inside example blocks (`it`, `specify`, etc.) are skipped,
+///   matching RuboCop's `return if node.each_ancestor(:block).any? { example?(block) }`.
+///   These are meta-spec patterns like `RSpec.describe { } .run` inside an `it` block.
 pub struct EmptyExampleGroup;
 
 impl Cop for EmptyExampleGroup {
@@ -23,69 +32,117 @@ impl Cop for EmptyExampleGroup {
         RSPEC_DEFAULT_INCLUDE
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
+        let mut visitor = EmptyGroupVisitor {
+            source,
+            cop: self,
+            diagnostics,
+            def_depth: 0,
+            example_depth: 0,
         };
+        visitor.visit(&parse_result.node());
+    }
+}
 
+struct EmptyGroupVisitor<'a> {
+    source: &'a SourceFile,
+    cop: &'a EmptyExampleGroup,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    /// Depth inside method definitions (def/defs). When > 0, skip flagging.
+    def_depth: u32,
+    /// Depth inside example blocks (it/specify/etc). When > 0, skip flagging.
+    example_depth: u32,
+}
+
+impl<'a> EmptyGroupVisitor<'a> {
+    fn is_example_group_call(&self, call: &ruby_prism::CallNode<'_>) -> bool {
         let method_name = call.name().as_slice();
-
-        // Check for example group calls (including RSpec.describe / ::RSpec.describe)
-        // Exclude shared groups (shared_examples, shared_context) — they define
-        // reusable code and are not checked for emptiness.
-        let is_example_group = if let Some(recv) = call.receiver() {
+        if let Some(recv) = call.receiver() {
             util::constant_name(&recv).is_some_and(|n| n == b"RSpec") && method_name == b"describe"
         } else {
             is_rspec_example_group(method_name)
                 && method_name != b"shared_examples"
                 && method_name != b"shared_examples_for"
                 && method_name != b"shared_context"
-        };
+        }
+    }
 
-        if !is_example_group {
+    fn is_example_call(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        call.receiver().is_none() && is_rspec_example(call.name().as_slice())
+    }
+}
+
+impl<'a, 'pr> Visit<'pr> for EmptyGroupVisitor<'a> {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        self.def_depth += 1;
+        ruby_prism::visit_def_node(self, node);
+        self.def_depth -= 1;
+    }
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // If inside a def, just continue visiting (don't flag anything)
+        if self.def_depth > 0 || self.example_depth > 0 {
+            ruby_prism::visit_call_node(self, node);
             return;
         }
 
-        let block = match call.block() {
-            Some(b) => match b.as_block_node() {
-                Some(bn) => bn,
-                None => return,
-            },
-            None => return,
-        };
+        // Check if this is an example group call with a block
+        if self.is_example_group_call(node) {
+            if let Some(block_arg) = node.block() {
+                if let Some(block) = block_arg.as_block_node() {
+                    // Check if the block body contains any examples
+                    let has_examples = if let Some(body) = block.body() {
+                        let mut finder = ExampleFinder { found: false };
+                        finder.visit(&body);
+                        finder.found
+                    } else {
+                        false
+                    };
 
-        // Check if the block body contains any examples
-        let has_examples = if let Some(body) = block.body() {
-            let mut finder = ExampleFinder { found: false };
-            finder.visit(&body);
-            finder.found
-        } else {
-            false
-        };
+                    if !has_examples {
+                        let loc = node.location();
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        self.diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Empty example group detected.".to_string(),
+                        ));
+                    }
 
-        if !has_examples {
-            let loc = node.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                "Empty example group detected.".to_string(),
-            ));
+                    // Visit inside the block to find nested example groups,
+                    // but DON'T increment example_depth since this is an example group, not an example
+                    if let Some(body) = block.body() {
+                        self.visit(&body);
+                    }
+                    return;
+                }
+            }
         }
+
+        // If this is an example call (it/specify/etc) with a block, track depth
+        if self.is_example_call(node) {
+            if let Some(block_arg) = node.block() {
+                if let Some(block) = block_arg.as_block_node() {
+                    self.example_depth += 1;
+                    if let Some(body) = block.body() {
+                        self.visit(&body);
+                    }
+                    self.example_depth -= 1;
+                    return;
+                }
+            }
+        }
+
+        ruby_prism::visit_call_node(self, node);
     }
 }
 
