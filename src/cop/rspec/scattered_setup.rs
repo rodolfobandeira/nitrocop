@@ -4,20 +4,91 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpec/ScatteredSetup flags multiple `before`/`after` hooks of the same type,
+/// scope, and metadata in the same example group.
+///
+/// ## Investigation notes
+/// - **FP root cause (48 FPs):** Hooks were grouped only by type + scope, ignoring
+///   metadata. `before(:each, :unix_only)` and `before(:each)` were incorrectly
+///   treated as the same hook. RuboCop groups by type + normalized scope + metadata.
+/// - **Scope normalization:** `:each` and `:example` are equivalent; `:all` and
+///   `:context` are equivalent. No scope arg defaults to `:each`.
+/// - **Metadata:** Additional symbol args (`:special_case`) and keyword hash args
+///   (`special_case: true`) form the metadata. Symbol `:foo` is equivalent to
+///   `foo: true` in RuboCop's normalization.
 pub struct ScatteredSetup;
 
-/// Extract the scope argument from a before/after hook call.
-/// Returns a key like b"each" (default), b"all", b"context", b"suite".
-fn extract_hook_scope(call: &ruby_prism::CallNode<'_>) -> Vec<u8> {
+/// Normalize scope: :each/:example/no-arg → "each", :all/:context → "all".
+fn normalize_scope(scope: &[u8]) -> &'static [u8] {
+    match scope {
+        b"each" | b"example" => b"each",
+        b"all" | b"context" => b"all",
+        b"suite" => b"suite",
+        _ => b"each",
+    }
+}
+
+/// Build a grouping key for a hook call: normalized scope + sorted metadata.
+/// Metadata consists of additional symbol args (beyond the scope) and keyword args.
+/// Symbol `:foo` is normalized to `foo:true`, matching RuboCop's behavior.
+fn build_hook_key(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -> Vec<u8> {
+    let mut scope: &[u8] = b"each";
+    let mut metadata_parts: Vec<Vec<u8>> = Vec::new();
+
     if let Some(args) = call.arguments() {
+        let mut found_scope = false;
         for arg in args.arguments().iter() {
             if let Some(sym) = arg.as_symbol_node() {
-                return sym.unescaped().to_vec();
+                let name = sym.unescaped();
+                // First symbol that looks like a scope keyword is the scope
+                if !found_scope
+                    && (name == b"each"
+                        || name == b"example"
+                        || name == b"all"
+                        || name == b"context"
+                        || name == b"suite")
+                {
+                    scope = normalize_scope(&name);
+                    found_scope = true;
+                } else {
+                    // Additional symbol args are metadata, equivalent to `name: true`
+                    let mut part = name.to_vec();
+                    part.extend_from_slice(b":true");
+                    metadata_parts.push(part);
+                }
+            } else if let Some(kw_hash) = arg.as_keyword_hash_node() {
+                // Keyword args like `special_case: true`
+                for element in kw_hash.elements().iter() {
+                    if let Some(assoc) = element.as_assoc_node() {
+                        let key_src = source.byte_slice(
+                            assoc.key().location().start_offset(),
+                            assoc.key().location().end_offset(),
+                            "",
+                        );
+                        let val_src = source.byte_slice(
+                            assoc.value().location().start_offset(),
+                            assoc.value().location().end_offset(),
+                            "",
+                        );
+                        let mut part = key_src.as_bytes().to_vec();
+                        part.push(b':');
+                        part.extend_from_slice(val_src.as_bytes());
+                        metadata_parts.push(part);
+                    }
+                }
             }
         }
     }
-    // No scope arg = :each (default)
-    b"each".to_vec()
+
+    metadata_parts.sort();
+
+    let mut key = Vec::new();
+    key.extend_from_slice(scope);
+    for part in &metadata_parts {
+        key.push(b'|');
+        key.extend_from_slice(part);
+    }
+    key
 }
 
 impl Cop for ScatteredSetup {
@@ -102,12 +173,12 @@ impl Cop for ScatteredSetup {
             let loc = stmt.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
 
-            let scope = extract_hook_scope(&c);
+            let key = build_hook_key(&c, source);
 
             if name == b"before" || name == b"prepend_before" || name == b"append_before" {
-                before_hooks.entry(scope).or_default().push((line, column));
+                before_hooks.entry(key).or_default().push((line, column));
             } else if name == b"after" || name == b"prepend_after" || name == b"append_after" {
-                after_hooks.entry(scope).or_default().push((line, column));
+                after_hooks.entry(key).or_default().push((line, column));
             }
         }
 

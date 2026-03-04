@@ -19,3 +19,21 @@ describe Baz do
   ^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredSetup: Do not define multiple `before` hooks in the same example group (also defined on line 12).
   it { expect(true).to be(true) }
 end
+
+# :each, :example, and no-arg are all equivalent scopes
+describe ScopeEquivalence do
+  after { bar }
+  ^^^^^^^^^^^^^ RSpec/ScatteredSetup: Do not define multiple `after` hooks in the same example group (also defined on lines 20, 21).
+  after(:each) { baz }
+  ^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredSetup: Do not define multiple `after` hooks in the same example group (also defined on lines 19, 21).
+  after(:example) { qux }
+  ^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredSetup: Do not define multiple `after` hooks in the same example group (also defined on lines 19, 20).
+end
+
+# Hooks with same metadata should still be flagged
+describe SameMetadata do
+  before(:each, :special_case) { foo }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredSetup: Do not define multiple `before` hooks in the same example group (also defined on line 26).
+  before(:example, :special_case) { bar }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredSetup: Do not define multiple `before` hooks in the same example group (also defined on line 25).
+end
