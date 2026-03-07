@@ -16,6 +16,22 @@
 /// Fix: Rewrote to listen on CALL_NODE, check if method is an Enumerable method,
 /// look at receiver for a `readlines` call, and match RuboCop's message format
 /// and offense range exactly.
+///
+/// ## Investigation (2026-03-07) — FP=30 fix
+///
+/// Two bugs causing 30 false positives across 23 repos:
+///
+/// Bug 1: `is_io_or_file_const()` matched both ConstantReadNode and ConstantPathNode,
+/// but RuboCop's class pattern `(const nil? {:IO :File})` only matches unqualified
+/// constants. So `::File.readlines(...)` and `Foo::File.readlines(...)` were incorrectly
+/// flagged. Fix: removed ConstantPathNode handling from `is_io_or_file_const`.
+///
+/// Bug 2: For the class pattern (IO/File receiver), we flagged all chained enumerable
+/// calls regardless of args. But RuboCop's pattern `$(send ... _)` has just `_` (method
+/// name only) — no extra children. So `File.readlines(x).map(&:chomp)` should NOT match
+/// because `&:chomp` is a BlockArgumentNode child of the outer send. The instance pattern
+/// uses `_ ...` which does allow args/block_pass. Fix: for class pattern, skip if outer
+/// call has arguments or a BlockArgumentNode block.
 use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -93,17 +109,13 @@ fn is_enumerable_method(name: &[u8]) -> bool {
     ENUMERABLE_METHODS.contains(&name)
 }
 
-/// Check if a node is an IO or File constant (handles both simple and qualified paths).
+/// Check if a node is an unqualified IO or File constant (ConstantReadNode only).
+/// RuboCop's class pattern uses `(const nil? {:IO :File})` which only matches
+/// simple unqualified constants, not `::File` or `Foo::File` (ConstantPathNode).
 fn is_io_or_file_const(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(cr) = node.as_constant_read_node() {
         let name = cr.name().as_slice();
         return name == b"IO" || name == b"File";
-    }
-    if let Some(cp) = node.as_constant_path_node() {
-        if let Some(child) = cp.name() {
-            let name = child.as_slice();
-            return name == b"IO" || name == b"File";
-        }
     }
     false
 }
@@ -159,29 +171,39 @@ impl Cop for IoReadlines {
 
         // RuboCop matches two patterns:
         // 1. Class call: (IO|File).readlines(...).method — receiver is IO/File constant
-        //    readlines_on_class? uses `_` (no `...`) for outer method → no arguments allowed
+        //    Only matches unqualified constants. Outer call must have NO args and NO block_pass.
         // 2. Instance call: expr.readlines(...).method — receiver is non-constant or nil
-        //    readlines_on_instance? uses `_ ...` → arguments allowed
-        // We accept both. If receiver is a constant but NOT IO/File, skip.
-        let is_class_form;
-        if let Some(recv) = readlines_call.receiver() {
-            if recv.as_constant_read_node().is_some() || recv.as_constant_path_node().is_some() {
-                if !is_io_or_file_const(&recv) {
-                    return;
-                }
-                is_class_form = true;
+        //    Allows args and block_pass on the outer call.
+        let is_class_pattern = if let Some(recv) = readlines_call.receiver() {
+            if is_io_or_file_const(&recv) {
+                true
+            } else if recv.as_constant_read_node().is_some()
+                || recv.as_constant_path_node().is_some()
+            {
+                // Constant receiver but not IO/File — skip entirely
+                return;
             } else {
-                is_class_form = false;
+                false // non-constant receiver → instance pattern
             }
         } else {
-            // nil receiver (bare `readlines`) is allowed for instance pattern
-            is_class_form = false;
-        }
+            false // nil receiver (bare `readlines`) → instance pattern
+        };
 
-        // Class form: only flag when outer call has NO arguments (matches RuboCop's
-        // readlines_on_class? pattern which uses `_` without `...`)
-        if is_class_form && outer_call.arguments().is_some() {
-            return;
+        // For the class pattern, RuboCop's NodePattern is:
+        //   $(send $(send (const nil? {:IO :File}) :readlines ...) _)
+        // The outer send has only `_` (method name) with no extra children,
+        // meaning no positional args and no block_pass.
+        // A regular block `each { }` wraps the send (not a child), so it's fine.
+        // A block_pass `map(&:chomp)` is a child of the send, so it must NOT match.
+        if is_class_pattern {
+            if outer_call.arguments().is_some() {
+                return;
+            }
+            if let Some(block) = outer_call.block() {
+                if block.as_block_argument_node().is_some() {
+                    return;
+                }
+            }
         }
 
         // Build message matching RuboCop format
