@@ -35,6 +35,17 @@ If the change is non-Rust only (for example `docs/`, fixtures under `tests/fixtu
 
 **Important:** Run `cargo fmt` on the specific Rust files you edited (not `cargo fmt` with no args, which formats everything). Run `cargo clippy` which leverages incremental compilation and is fast when few files changed. Do NOT use `git diff` to discover changed files — multiple agents may be working on main concurrently.
 
+### Fast Iteration (during development)
+
+For iterative cop development, use **debug tests with a filter** instead of `cargo test --release`:
+
+```
+cargo test --lib -- cop::style::while_until_modifier    # single cop, ~8s first run, <1s cached
+cargo test --lib -- cop::style::                        # all Style cops
+```
+
+`--lib` skips integration tests (avoids compiling a second test binary). Debug mode has much faster incremental compilation than release. Reserve `cargo test --release` for the final pre-commit check only.
+
 ## Performance Profiling
 
 `--debug` prints phase-level timing: bundler shell-outs, config loading, and per-phase linter breakdown (file I/O, Prism parse, CodeMap build, cop execution split into filter+config vs AST walk, disable filtering) using `AtomicU64` counters across rayon threads.
@@ -311,13 +322,14 @@ Use this when `investigate-cop.py --context` shows an FP/FN in a large file and 
 After fixing any cop, run the corpus check to verify no FP regression against the real-world repo corpus:
 
 ```
-python3 scripts/check-cop.py Department/CopName                    # aggregate check (re-runs nitrocop)
-python3 scripts/check-cop.py Department/CopName --verbose           # per-repo breakdown (uses cached data if available)
-python3 scripts/check-cop.py Department/CopName --verbose --rerun   # force re-execution after a fix
-python3 scripts/check-cop.py Department/CopName --input results.json # use local corpus-results.json
+python3 scripts/check-cop.py Department/CopName                              # aggregate check (re-runs nitrocop)
+python3 scripts/check-cop.py Department/CopName --verbose                     # per-repo breakdown (uses cached data if available)
+python3 scripts/check-cop.py Department/CopName --verbose --rerun             # force re-execution after a fix (uses batch mode)
+python3 scripts/check-cop.py Department/CopName --verbose --rerun --quick     # fast iteration: only repos with baseline activity
+python3 scripts/check-cop.py Department/CopName --input results.json          # use local corpus-results.json
 ```
 
-The script compares nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. `FAIL` means nitrocop produces more offenses than RuboCop (false positives). With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when available (instant). Pass `--rerun` to force re-execution of nitrocop after making code changes.
+The script compares nitrocop offense counts against the RuboCop baseline from the latest CI corpus oracle run. `FAIL` means nitrocop produces more offenses than RuboCop (false positives). With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when available (instant). Pass `--rerun` to force re-execution of nitrocop after making code changes. `--rerun` automatically uses batch `--corpus-check` mode (single process) when available, falling back to per-repo subprocesses. Add `--quick` to skip repos with zero baseline activity (3-10x faster, may miss new FPs on zero-baseline repos).
 
 ## Rules
 

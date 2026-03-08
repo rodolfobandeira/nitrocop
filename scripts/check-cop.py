@@ -13,6 +13,7 @@ changed cop needs re-execution. Use --rerun to force a fresh run.
 Usage:
     python3 scripts/check-cop.py Lint/Void              # quick aggregate check
     python3 scripts/check-cop.py Lint/Void --verbose     # per-repo breakdown
+    python3 scripts/check-cop.py Lint/Void --verbose --rerun --quick  # fast iteration
     python3 scripts/check-cop.py Lint/Void --threshold 5 # allow up to 5 excess
 """
 
@@ -179,6 +180,43 @@ def nitrocop_cmd(cop_name: str, target: str) -> list[str]:
     ]
 
 
+def run_nitrocop_batch(cop_name: str) -> dict[str, int] | None:
+    """Try batch corpus check via --corpus-check flag (single process).
+
+    Returns {repo_id: count} or None if the binary doesn't support --corpus-check.
+    """
+    cmd = [
+        str(NITROCOP_BIN), "--corpus-check", str(CORPUS_DIR),
+        "--only", cop_name, "--preview",
+        "--no-cache",
+        "--config", str(BASELINE_CONFIG),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+            env=corpus_env(str(CORPUS_DIR)),
+        )
+    except subprocess.TimeoutExpired:
+        print("  batch corpus-check timed out, falling back to per-repo", file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        # Binary might not support --corpus-check yet
+        if "corpus-check" in result.stderr.lower() or "unrecognized" in result.stderr.lower():
+            return None
+        print(f"  batch corpus-check failed (exit {result.returncode}), "
+              f"falling back to per-repo", file=sys.stderr)
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+        return {k: v for k, v in data.get("repos", {}).items()}
+    except json.JSONDecodeError:
+        print("  batch corpus-check returned invalid JSON, falling back to per-repo",
+              file=sys.stderr)
+        return None
+
+
 def count_deduplicated_offenses(json_data: dict) -> int:
     """Count offenses deduplicated by (path, line, cop_name).
 
@@ -252,11 +290,21 @@ def validate_corpus():
         sys.exit(1)
 
 
-def run_nitrocop_per_repo(cop_name: str) -> dict[str, int]:
-    """Run nitrocop --only on each corpus repo in parallel, return {repo_id: count}."""
+def run_nitrocop_per_repo(cop_name: str, relevant_repos: set[str] | None = None) -> dict[str, int]:
+    """Run nitrocop --only on each corpus repo in parallel, return {repo_id: count}.
+
+    When relevant_repos is set, only run those repos and assume 0 for the rest.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    repos = sorted(d for d in CORPUS_DIR.iterdir() if d.is_dir())
+    all_repos = sorted(d for d in CORPUS_DIR.iterdir() if d.is_dir())
+    repos = all_repos
+    if relevant_repos is not None:
+        repos = [r for r in all_repos if r.name in relevant_repos]
+        skipped = len(all_repos) - len(repos)
+        print(f"  --quick: running {len(repos)}/{len(all_repos)} repos "
+              f"(skipping {skipped} with zero baseline activity)", file=sys.stderr)
+
     total = len(repos)
     work = [(cop_name, str(r)) for r in repos]
 
@@ -272,6 +320,12 @@ def run_nitrocop_per_repo(cop_name: str) -> dict[str, int]:
             done += 1
             if done % 50 == 0:
                 print(f"  [{done}/{total}] {repo_id}...", file=sys.stderr)
+
+    # Fill in 0 for skipped repos
+    if relevant_repos is not None:
+        for r in all_repos:
+            if r.name not in counts:
+                counts[r.name] = 0
 
     return counts
 
@@ -298,6 +352,8 @@ def main():
                         help="Allowed excess offenses before FAIL (default: 0)")
     parser.add_argument("--rerun", action="store_true",
                         help="Force re-execution of nitrocop (ignore local cache)")
+    parser.add_argument("--quick", action="store_true",
+                        help="Only run repos with baseline activity (faster, may miss new FPs on zero-baseline repos)")
     args = parser.parse_args()
 
     # Load corpus results
@@ -388,8 +444,21 @@ def main():
         else:
             ensure_binary_fresh()
             clear_file_cache()
+            # Try batch mode first (single process, much faster)
             print("Running nitrocop per-repo...", file=sys.stderr)
-            per_repo = run_nitrocop_per_repo(args.cop)
+            per_repo = run_nitrocop_batch(args.cop)
+            if per_repo is not None:
+                print("  (used batch --corpus-check mode)", file=sys.stderr)
+            else:
+                # Fall back to per-repo subprocess mode
+                # --quick: only run repos where baseline has activity for this cop
+                relevant_repos = None
+                if args.quick and has_enriched:
+                    relevant_repos = set()
+                    for repo_id, cops in by_repo_cop.items():
+                        if args.cop in cops:
+                            relevant_repos.add(repo_id)
+                per_repo = run_nitrocop_per_repo(args.cop, relevant_repos=relevant_repos)
             save_cached_results(args.cop, per_repo)
 
         # Filter to only repos that were "ok" in the CI corpus oracle run.

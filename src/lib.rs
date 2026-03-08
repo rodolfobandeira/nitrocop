@@ -18,7 +18,7 @@ pub mod verify;
 #[cfg(test)]
 pub mod testutil;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
 use anyhow::Result;
@@ -81,6 +81,102 @@ fn print_strict_warning(scope: StrictScope, summary: &SkipSummary) {
     eprintln!(
         "warning: --strict={scope_name}: {total} skipped cops violate {scope_name} ({detail}).{hint}"
     );
+}
+
+/// Batch corpus check: lint each subdirectory of `corpus_dir` as a separate repo.
+/// Outputs JSON with per-repo offense counts (deduplicated by path+line+cop).
+fn run_corpus_check(
+    corpus_dir: &std::path::Path,
+    config: &config::ResolvedConfig,
+    registry: &cop::registry::CopRegistry,
+    args: &cli::Args,
+    tier_map: &cop::tiers::TierMap,
+    allowlist: &cop::autocorrect_allowlist::AutocorrectAllowlist,
+) -> Result<i32> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Initialize schema once (same config for all repos)
+    schema::init(config.config_dir());
+
+    // Precompute cop filters and configs once
+    let cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
+    let base_configs = config.precompute_cop_configs(registry);
+    let has_dir_overrides = config.has_dir_overrides();
+
+    // List subdirectories (each is a corpus repo)
+    let mut repos: Vec<_> = std::fs::read_dir(corpus_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    repos.sort();
+
+    let total = repos.len();
+    let done = AtomicUsize::new(0);
+
+    // Process repos in parallel
+    let results: Vec<(String, usize)> = repos
+        .par_iter()
+        .map(|repo_path| {
+            let repo_id = repo_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            // Discover .rb files in this repo
+            let discovered = match fs::discover_files(std::slice::from_ref(repo_path), config) {
+                Ok(d) => d,
+                Err(_) => return (repo_id, 0),
+            };
+
+            // Lint each file and collect diagnostics
+            let mut seen = HashSet::new();
+            for path in &discovered.files {
+                // Make path relative to repo dir so AllCops.Exclude patterns
+                // (e.g. vendor/**/*) match correctly instead of matching the
+                // corpus dir itself.
+                let rel_path = path.strip_prefix(repo_path).unwrap_or(path);
+                if cop_filters.is_globally_excluded(rel_path) {
+                    continue;
+                }
+                let source = match parse::source::SourceFile::from_path(path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let (diags, _, _) = linter::lint_source_inner(
+                    &source,
+                    config,
+                    registry,
+                    args,
+                    &cop_filters,
+                    &base_configs,
+                    has_dir_overrides,
+                    None,
+                    allowlist,
+                );
+                // Deduplicate by (path, line, cop_name) to match corpus oracle
+                for d in &diags {
+                    seen.insert((d.path.clone(), d.location.line, d.cop_name.clone()));
+                }
+            }
+
+            let count = seen.len();
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 100 == 0 {
+                eprintln!("  [{n}/{total}]...");
+            }
+            (repo_id, count)
+        })
+        .collect();
+
+    // Build JSON output
+    let repos_map: HashMap<String, usize> = results.into_iter().collect();
+    let output = serde_json::json!({ "repos": repos_map });
+    println!("{}", serde_json::to_string(&output)?);
+
+    Ok(0)
 }
 
 /// Run the linter. Returns the exit code: 0 = clean, 1 = offenses, 2 = strict failure, 3 = error.
@@ -280,6 +376,11 @@ pub fn run(args: Args) -> Result<i32> {
         } else {
             0
         });
+    }
+
+    // --corpus-check: batch lint each subdirectory as a separate repo
+    if let Some(ref corpus_dir) = args.corpus_check {
+        return run_corpus_check(corpus_dir, &config, &registry, &args, &tier_map, &allowlist);
     }
 
     if args.debug {

@@ -41,6 +41,9 @@ fancy-regex = "0.14"
 tempfile = "3"
 proptest = "1"
 
+[profile.dev]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 16

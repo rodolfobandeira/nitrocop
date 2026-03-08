@@ -511,6 +511,7 @@ mod tests {
             strict: None,
             verify: false,
             rubocop_cmd: "bundle exec rubocop".to_string(),
+            corpus_check: None,
         }
     }
 

@@ -163,6 +163,10 @@ pub struct Args {
     /// Override RuboCop command for --verify (default: "bundle exec rubocop")
     #[arg(long, value_name = "CMD", default_value = "bundle exec rubocop")]
     pub rubocop_cmd: String,
+
+    /// Batch corpus check: lint each subdirectory as a separate repo, output per-repo JSON
+    #[arg(long, value_name = "DIR")]
+    pub corpus_check: Option<PathBuf>,
 }
 
 impl Args {
@@ -231,6 +235,7 @@ mod tests {
             strict: val.map(|s| s.to_string()),
             verify: false,
             rubocop_cmd: "bundle exec rubocop".to_string(),
+            corpus_check: None,
         }
     }
 

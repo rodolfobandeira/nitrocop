@@ -19,7 +19,7 @@ use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
 /// Thread-safe phase timing counters (nanoseconds) for profiling.
-struct PhaseTimers {
+pub(crate) struct PhaseTimers {
     file_io_ns: AtomicU64,
     parse_ns: AtomicU64,
     codemap_ns: AtomicU64,
@@ -562,7 +562,7 @@ fn validate_corrected_bytes(
 /// Returns (diagnostics, corrected_bytes, corrected_count).
 /// corrected_count is the total number of offenses corrected across all iterations.
 #[allow(clippy::too_many_arguments)] // internal lint pipeline threading shared state
-fn lint_source_inner(
+pub(crate) fn lint_source_inner(
     source: &SourceFile,
     config: &ResolvedConfig,
     registry: &CopRegistry,
