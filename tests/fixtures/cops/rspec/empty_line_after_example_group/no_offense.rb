@@ -31,4 +31,13 @@ RSpec.describe Foo do
       end
     end
   end
+
+  # Whitespace-only separator lines should count as blank.
+  context 'with whitespace separator' do
+    it { expect(true).to be(true) }
+  end
+  
+  context 'after whitespace separator' do
+    it { expect(true).to be(true) }
+  end
 end

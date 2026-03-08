@@ -1,9 +1,23 @@
 use crate::cop::node_type::CALL_NODE;
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_blank_line, is_rspec_example_group, line_at};
+use crate::cop::util::{
+    RSPEC_DEFAULT_INCLUDE, is_blank_or_whitespace_line, is_rspec_example_group, line_at,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=484, FN=7.
+///
+/// FP root cause: separator lines containing only spaces/tabs were treated as
+/// non-blank by `is_blank_line`, so example groups followed by whitespace-only
+/// lines were flagged. RuboCop's separator logic treats whitespace-only lines
+/// as blank.
+///
+/// FN=7: this pass focuses on the high-volume FP regression only.
+///
+/// Fix: use whitespace-aware blank-line checks while scanning lines after group end.
 pub struct EmptyLineAfterExampleGroup;
 
 impl Cop for EmptyLineAfterExampleGroup {
@@ -64,7 +78,7 @@ impl Cop for EmptyLineAfterExampleGroup {
             }
             match line_at(source, check_line) {
                 Some(line) => {
-                    if is_blank_line(line) {
+                    if is_blank_or_whitespace_line(line) {
                         return; // Found blank line — OK
                     }
                     let trimmed_start = line.iter().position(|&b| b != b' ' && b != b'\t');
