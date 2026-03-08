@@ -21,6 +21,12 @@ if something
 else
   fallback
 end
+# Single-line conditionals with empty bodies (RuboCop skips same-line if/end)
+if true then ; end.should == nil
+if false then ; end.should == nil
+unless true; end.should == nil
+if 1;end
+if 1; end
 # Comment inside a complex predicate (begin..rescue..end in condition)
 if first_check
   do_something

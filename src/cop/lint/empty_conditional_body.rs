@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Lint/EmptyConditionalBody — flags if/unless/elsif with no body.
+///
+/// ## Investigation (2026-03-07)
+/// 8 FPs on single-line conditionals like `if true then ; end` and `if 1;end`.
+/// Root cause: RuboCop's `on_if` returns early when `same_line?(node.loc.begin, node.loc.end)`,
+/// i.e., the keyword and `end` are on the same line. We now replicate that check
+/// by comparing the line of the if/unless keyword with the line of the `end` keyword.
 pub struct EmptyConditionalBody;
 
 /// Check if there are any comments within a byte offset range.
@@ -52,6 +59,15 @@ impl Cop for EmptyConditionalBody {
                 None => return,
             };
 
+            // RuboCop skips single-line conditionals: `if x; end`
+            if let Some(end_kw) = if_node.end_keyword_loc() {
+                let kw_line = source.offset_to_line_col(kw_loc.start_offset()).0;
+                let end_line = source.offset_to_line_col(end_kw.start_offset()).0;
+                if kw_line == end_line {
+                    return;
+                }
+            }
+
             let body_empty = match if_node.statements() {
                 None => true,
                 Some(stmts) => stmts.body().is_empty(),
@@ -86,6 +102,17 @@ impl Cop for EmptyConditionalBody {
 
         // Check UnlessNode
         if let Some(unless_node) = node.as_unless_node() {
+            // RuboCop skips single-line conditionals: `unless x; end`
+            if let Some(end_kw) = unless_node.end_keyword_loc() {
+                let kw_line = source
+                    .offset_to_line_col(unless_node.keyword_loc().start_offset())
+                    .0;
+                let end_line = source.offset_to_line_col(end_kw.start_offset()).0;
+                if kw_line == end_line {
+                    return;
+                }
+            }
+
             let body_empty = match unless_node.statements() {
                 None => true,
                 Some(stmts) => stmts.body().is_empty(),
