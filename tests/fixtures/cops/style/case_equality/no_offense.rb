@@ -7,3 +7,8 @@ something.is_a?(Array)
 x == y
 
 x.equal?(y)
+
+# Non-module-name constants (ALL_CAPS) are always skipped regardless of AllowOnConstant
+NUMERIC_PATTERN === timezone
+NAME_PATTERN === value
+CONST_NAME === input

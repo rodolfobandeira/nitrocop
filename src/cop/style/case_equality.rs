@@ -6,7 +6,35 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/CaseEquality: Avoid the case equality operator `===`.
+///
+/// Investigation: RuboCop unconditionally skips `===` when the receiver is a
+/// non-module-name constant (ALL_CAPS like `NUMERIC_PATTERN`), regardless of
+/// `AllowOnConstant`. Only PascalCase constants (e.g., `String`, `Integer`)
+/// are subject to `AllowOnConstant`. This was causing 42 FPs across 27 repos
+/// on patterns like `NUMERIC_PATTERN === timezone`.
 pub struct CaseEquality;
+
+impl CaseEquality {
+    /// Extract the constant name from a receiver node (ConstantReadNode or ConstantPathNode).
+    fn receiver_constant_name(node: &ruby_prism::Node<'_>) -> Option<String> {
+        if let Some(c) = node.as_constant_read_node() {
+            return Some(String::from_utf8_lossy(c.name().as_slice()).into_owned());
+        }
+        if node.as_constant_path_node().is_some() {
+            // For qualified constants like Foo::Bar, treat as module name
+            // (RuboCop checks the full path, but qualified constants are always module-like)
+            return Some("QualifiedPath".to_string());
+        }
+        None
+    }
+
+    /// A "module name" constant has at least one lowercase ASCII letter (PascalCase).
+    /// ALL_CAPS_CONSTANTS like NUMERIC_PATTERN are not module names.
+    fn is_module_name(name: &str) -> bool {
+        name.bytes().any(|b| b.is_ascii_lowercase())
+    }
+}
 
 impl Cop for CaseEquality {
     fn name(&self) -> &'static str {
@@ -57,12 +85,16 @@ impl Cop for CaseEquality {
             return;
         }
 
-        // AllowOnConstant
-        if allow_on_constant
-            && (receiver.as_constant_read_node().is_some()
-                || receiver.as_constant_path_node().is_some())
-        {
-            return;
+        // RuboCop unconditionally skips constants that are not "module names"
+        // (i.e., ALL_CAPS like NUMERIC_PATTERN). Only PascalCase constants
+        // (like String, Integer) are subject to the AllowOnConstant setting.
+        if let Some(const_name) = Self::receiver_constant_name(&receiver) {
+            if !Self::is_module_name(&const_name) {
+                return;
+            }
+            if allow_on_constant {
+                return;
+            }
         }
 
         // AllowOnSelfClass: self.class === something
