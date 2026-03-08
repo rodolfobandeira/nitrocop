@@ -20,6 +20,23 @@ use crate::parse::source::SourceFile;
 /// Fix: Added `CallNode` handling in `check_node` for `define_method` and
 /// `define_singleton_method` calls with blocks. Extracts method name from first
 /// sym/str argument, then checks block body for `||=` or `defined?` memoization patterns.
+///
+/// ## Investigation (2026-03-08, second pass)
+/// FN=23 in corpus. All FNs were `@ivar ||= expr` inside conditional branches
+/// (if/else, unless modifier, case/when/else, ensure block, synchronize block, ternary).
+///
+/// Root cause: RuboCop uses `on_or_asgn` which fires for every `||=`, then checks
+/// `body.children.last == node`. Parser AST's `children.last` traverses one level
+/// into any node type: if → else branch, case → else clause, block → body,
+/// ensure → ensure body. Nitrocop only checked direct body and last statement.
+///
+/// Fix: Added `get_last_child_or_write()` which replicates Parser's `children.last`
+/// for single-statement method bodies. For multi-statement bodies, only the last
+/// statement is checked directly (matching Parser's `begin.children.last` behavior).
+///
+/// Remaining FN=2: 1 is from Parser's structural equality (two identical `||=`
+/// nodes in if/else branches compare as equal — a quirk we don't replicate),
+/// 1 may be from config resolution differences.
 pub struct MemoizedInstanceVariableName;
 
 impl MemoizedInstanceVariableName {
