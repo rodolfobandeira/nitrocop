@@ -10,3 +10,7 @@ items.each_with_object { |v, o| v; o }
 items.each_with_object do |v|
   v
 end
+items.each_with_object([]) { puts "hello" }
+# zero-argument blocks change `each_with_object` semantics and are not redundant
+items.each_with_object({}) { 42 }
+[1, 2, 3].each_with_object(23) { break 42 }

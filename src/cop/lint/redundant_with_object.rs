@@ -3,11 +3,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// Corpus conformance fix: `each_with_object` called without its required
-/// object argument (e.g., `ary.each_with_object { |v| v }`) is NOT flagged by
-/// RuboCop — only calls that actually pass an argument like `each_with_object([])`
-/// are candidates for the redundancy check.  The 2 corpus FPs (jruby spec,
-/// opal spec) were caused by missing this arguments-present guard.
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=2, FN=0.
+///
+/// FP=2: both mismatches used zero-parameter blocks (`{ 42 }`, `{ break 42 }`).
+/// RuboCop only flags one-argument blocks plus `_1`/`it` implicit parameter forms;
+/// zero-argument blocks can change `each_with_object` return semantics and must be
+/// left alone. The earlier arguments-present guard for missing `with_object` args
+/// remains covered by fixtures.
+/// FN=0: no missing detections were reported for this cop in the corpus run.
 pub struct RedundantWithObject;
 
 impl Cop for RedundantWithObject {
@@ -62,23 +67,7 @@ impl Cop for RedundantWithObject {
             None => return,
         };
 
-        let params = block_node.parameters();
-        let param_count = match &params {
-            Some(p) => {
-                if let Some(bp) = p.as_block_parameters_node() {
-                    if let Some(params_node) = bp.parameters() {
-                        params_node.requireds().len() + params_node.optionals().len()
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
-            }
-            None => 0,
-        };
-
-        if param_count < 2 {
+        if redundant_block_signature(&block_node) {
             let msg_loc = call.message_loc().unwrap_or(call.location());
             let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
             diagnostics.push(self.diagnostic(
@@ -89,6 +78,32 @@ impl Cop for RedundantWithObject {
             ));
         }
     }
+}
+
+fn redundant_block_signature(block: &ruby_prism::BlockNode<'_>) -> bool {
+    let Some(params) = block.parameters() else {
+        return false;
+    };
+
+    if let Some(block_params) = params.as_block_parameters_node() {
+        let Some(params_node) = block_params.parameters() else {
+            return false;
+        };
+
+        return params_node.requireds().len() == 1
+            && params_node.optionals().is_empty()
+            && params_node.rest().is_none()
+            && params_node.posts().is_empty()
+            && params_node.keywords().is_empty()
+            && params_node.keyword_rest().is_none()
+            && params_node.block().is_none();
+    }
+
+    if let Some(numbered) = params.as_numbered_parameters_node() {
+        return numbered.maximum() == 1;
+    }
+
+    params.as_it_parameters_node().is_some()
 }
 
 #[cfg(test)]

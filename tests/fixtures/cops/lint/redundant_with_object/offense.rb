@@ -6,5 +6,5 @@ items.each_with_object({}) do |item|
   puts item
 end
 
-items.each_with_object([]) { puts 'hello' }
+items.each_with_object([]) { _1 }
       ^^^^^^^^^^^^^^^^ Lint/RedundantWithObject: Redundant `with_object`.
