@@ -1,8 +1,11 @@
-x.equal?(x)
-^^^^^^^^^^^ Lint/IdentityComparison: Comparing an object to itself with `equal?`.
+foo.object_id == bar.object_id
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/IdentityComparison: Use `equal?` instead of `==` when comparing `object_id`.
 
-foo.equal?(foo)
-^^^^^^^^^^^^^^^ Lint/IdentityComparison: Comparing an object to itself with `equal?`.
+foo.object_id != bar.object_id
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/IdentityComparison: Use `!equal?` instead of `!=` when comparing `object_id`.
 
-@bar.equal?(@bar)
-^^^^^^^^^^^^^^^^^ Lint/IdentityComparison: Comparing an object to itself with `equal?`.
+x.object_id == y.object_id
+^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/IdentityComparison: Use `equal?` instead of `==` when comparing `object_id`.
+
+@foo.object_id != @bar.object_id
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/IdentityComparison: Use `!equal?` instead of `!=` when comparing `object_id`.
