@@ -41,71 +41,122 @@ use crate::parse::source::SourceFile;
 /// assignment instead of counting each target individually. RuboCop's
 /// `compound_assignment` method counts each non-setter child as a separate
 /// assignment. Fix: iterate over lefts/rest/rights targets.
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=87, FN=368.
+///
+/// Bug 1: KNOWN_ITERATING_METHODS was a custom list with wrong methods
+/// (`times`, `upto`, `downto`, `step`, `loop`, `tap`, `then`, `yield_self`)
+/// and missing many correct ones. Replaced with canonical RuboCop list from
+/// `vendor/rubocop/lib/rubocop/cop/metrics/utils/iterating_block.rb`.
+///
+/// Bug 2: `visit_rescue_node` counted +1 condition per rescue clause, but
+/// RuboCop has a single `:rescue` node wrapping all `:resbody` clauses.
+/// In Prism, rescue clauses chain via `subsequent`, causing over-counting.
+/// Fix: use `in_rescue_chain` flag to count only the first rescue clause.
+///
+/// Bug 3: Inline rescue (`expr rescue fallback`) as `RescueModifierNode`
+/// was not counted as a condition. In Parser AST, `:rescue` is in
+/// `CONDITION_NODES` which covers both block and inline rescue. Fix: added
+/// `RescueModifierNode` to the conditions arm of `count_node()`.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
-/// Matches the list in CyclomaticComplexity/PerceivedComplexity.
+/// Must match RuboCop's `Metrics::Utils::IteratingBlock::KNOWN_ITERATING_METHODS`
+/// (enumerable + enumerator + array + hash sets from iterating_block.rb).
 const KNOWN_ITERATING_METHODS: &[&[u8]] = &[
-    b"each",
-    b"each_with_index",
-    b"each_with_object",
-    b"each_pair",
-    b"each_key",
-    b"each_value",
-    b"each_slice",
-    b"each_cons",
-    b"each_line",
-    b"each_byte",
-    b"each_char",
-    b"each_codepoint",
-    b"map",
-    b"flat_map",
-    b"collect",
-    b"collect_concat",
-    b"select",
-    b"filter",
-    b"find_all",
-    b"reject",
-    b"filter_map",
-    b"detect",
-    b"find",
-    b"find_index",
-    b"rindex",
-    b"reduce",
-    b"inject",
-    b"any?",
+    // Enumerable
     b"all?",
-    b"none?",
-    b"one?",
-    b"count",
-    b"sum",
-    b"min",
-    b"max",
-    b"min_by",
-    b"max_by",
-    b"minmax",
-    b"minmax_by",
-    b"sort_by",
-    b"group_by",
-    b"partition",
-    b"zip",
-    b"take_while",
-    b"drop_while",
+    b"any?",
+    b"chain",
     b"chunk",
     b"chunk_while",
-    b"slice_before",
-    b"slice_after",
-    b"slice_when",
-    b"times",
-    b"upto",
-    b"downto",
-    b"step",
-    b"loop",
-    b"tap",
-    b"then",
-    b"yield_self",
-    b"each_index",
+    b"collect",
+    b"collect_concat",
+    b"count",
+    b"cycle",
+    b"detect",
+    b"drop",
+    b"drop_while",
+    b"each",
+    b"each_cons",
+    b"each_entry",
+    b"each_slice",
+    b"each_with_index",
+    b"each_with_object",
+    b"entries",
+    b"filter",
+    b"filter_map",
+    b"find",
+    b"find_all",
+    b"find_index",
+    b"flat_map",
+    b"grep",
+    b"grep_v",
+    b"group_by",
+    b"inject",
+    b"lazy",
+    b"map",
+    b"max",
+    b"max_by",
+    b"min",
+    b"min_by",
+    b"minmax",
+    b"minmax_by",
+    b"none?",
+    b"one?",
+    b"partition",
+    b"reduce",
+    b"reject",
     b"reverse_each",
+    b"select",
+    b"slice_after",
+    b"slice_before",
+    b"slice_when",
+    b"sort",
+    b"sort_by",
+    b"sum",
+    b"take",
+    b"take_while",
+    b"tally",
+    b"to_h",
+    b"uniq",
+    b"zip",
+    // Enumerator
+    b"with_index",
+    b"with_object",
+    // Array
+    b"bsearch",
+    b"bsearch_index",
+    b"collect!",
+    b"combination",
+    b"d_permutation",
+    b"delete_if",
+    b"each_index",
+    b"keep_if",
+    b"map!",
+    b"permutation",
+    b"product",
+    b"reject!",
+    b"repeat",
+    b"repeated_combination",
+    b"select!",
+    b"sort!",
+    b"sort_by",
+    // Hash
+    b"each_key",
+    b"each_pair",
+    b"each_value",
+    b"fetch",
+    b"fetch_values",
+    b"has_key?",
+    b"merge",
+    b"merge!",
+    b"transform_keys",
+    b"transform_keys!",
+    b"transform_values",
+    b"transform_values!",
 ];
 
 struct AbcCounter {
@@ -118,6 +169,9 @@ struct AbcCounter {
     /// RuboCop discounts repeated `&.` on the same variable — only the first counts
     /// as a condition. When the variable is reassigned, it is removed from the set.
     seen_csend_vars: std::collections::HashSet<Vec<u8>>,
+    /// Tracks whether we are inside a rescue chain to avoid counting
+    /// subsequent rescue clauses (Prism chains them via `subsequent`).
+    in_rescue_chain: bool,
 }
 
 impl AbcCounter {
@@ -129,6 +183,7 @@ impl AbcCounter {
             count_repeated_attributes,
             seen_attributes: std::collections::HashSet::new(),
             seen_csend_vars: std::collections::HashSet::new(),
+            in_rescue_chain: false,
         }
     }
 
@@ -433,13 +488,15 @@ impl AbcCounter {
             ruby_prism::Node::WhileNode { .. }
             | ruby_prism::Node::UntilNode { .. }
             | ruby_prism::Node::WhenNode { .. }
-            | ruby_prism::Node::RescueNode { .. }
             | ruby_prism::Node::AndNode { .. }
             | ruby_prism::Node::OrNode { .. }
-            | ruby_prism::Node::InNode { .. } => {
+            | ruby_prism::Node::InNode { .. }
+            | ruby_prism::Node::RescueModifierNode { .. } => {
                 self.conditions += 1;
             }
-
+            // Note: RescueNode is NOT counted here — it is handled in visit_rescue_node
+            // to ensure it counts as a single condition regardless of how many
+            // rescue clauses exist (Prism chains them via `subsequent`).
             _ => {}
         }
     }
@@ -466,10 +523,17 @@ impl<'pr> Visit<'pr> for AbcCounter {
     // these to ensure our counter sees all relevant nodes.
 
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
-        // Count rescue as a condition
-        self.conditions += 1;
-        // Delegate to default implementation to recurse into children
-        ruby_prism::visit_rescue_node(self, node);
+        // RuboCop counts `rescue` as a single condition for the entire chain.
+        // In Prism, rescue clauses are chained via `subsequent`, so visit_rescue_node
+        // is called once per clause. Only count +1 for the first rescue in the chain.
+        if !self.in_rescue_chain {
+            self.conditions += 1;
+            self.in_rescue_chain = true;
+            ruby_prism::visit_rescue_node(self, node);
+            self.in_rescue_chain = false;
+        } else {
+            ruby_prism::visit_rescue_node(self, node);
+        }
     }
 
     fn visit_else_node(&mut self, node: &ruby_prism::ElseNode<'pr>) {
@@ -847,6 +911,83 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "Should count block_pass iterating method as condition"
+        );
+    }
+
+    /// Bug 1: `times` is NOT in RuboCop's KNOWN_ITERATING_METHODS.
+    /// 5.times { ... } should NOT count as an iterating block condition.
+    /// A=1 (x), B=2 (times, puts), C=0 => sqrt(1+4) = 2.24
+    /// With Max:1, this fires. But if times wrongly adds C+1, score = sqrt(1+4+1) = 2.45.
+    /// The key check: conditions should be 0, not 1.
+    #[test]
+    fn times_not_iterating_method() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        // 5.times { puts "hi" } — times should NOT count as iterating
+        // A=0, B=2 (times, puts), C=0 => sqrt(0+4+0) = 2.0
+        // If times wrongly counted: C=1 => sqrt(0+4+1) = 2.24
+        let source = b"def foo\n  5.times { puts \"hi\" }\nend\n";
+        let diags = run_cop_full_with_config(&AbcSize, source, config.clone());
+        assert!(!diags.is_empty(), "Should fire with Max:1");
+        // Score should be [2.00/1] not [2.24/1]
+        assert!(
+            diags[0].message.contains("[2.00/1]"),
+            "times should NOT count as iterating condition, got: {}",
+            diags[0].message
+        );
+    }
+
+    /// Bug 2: Multiple rescue clauses should only count +1 condition total,
+    /// not +1 per clause. RuboCop has one :rescue node wrapping all :resbody clauses.
+    #[test]
+    fn rescue_chain_counts_once() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        // A=1 (x), B=1 (dangerous), C=1 (rescue chain = 1 condition)
+        // Score = sqrt(1+1+1) = 1.73
+        // If rescue over-counts: C=3 => sqrt(1+1+9) = 3.32
+        let source = b"def foo\n  x = dangerous\nrescue ArgumentError\n  nil\nrescue TypeError\n  nil\nrescue StandardError\n  nil\nend\n";
+        let diags = run_cop_full_with_config(&AbcSize, source, config);
+        assert!(!diags.is_empty(), "Should fire with Max:1");
+        assert!(
+            diags[0].message.contains("[1.73/1]"),
+            "Rescue chain should count as 1 condition, not 3. Got: {}",
+            diags[0].message
+        );
+    }
+
+    /// Bug 3: Inline rescue (`x rescue nil`) should count as +1 condition.
+    /// RuboCop's Parser AST has :rescue in CONDITION_NODES for this too.
+    #[test]
+    fn inline_rescue_counts_as_condition() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        // x = foo rescue nil
+        // A=1 (x), B=1 (foo), C=1 (rescue modifier)
+        // Score = sqrt(1+1+1) = 1.73
+        // Without rescue counting: C=0 => sqrt(1+1+0) = 1.41
+        let source = b"def bar\n  x = foo rescue nil\nend\n";
+        let diags = run_cop_full_with_config(&AbcSize, source, config);
+        assert!(!diags.is_empty(), "Should fire with Max:1");
+        assert!(
+            diags[0].message.contains("[1.73/1]"),
+            "Inline rescue should count as a condition. Got: {}",
+            diags[0].message
         );
     }
 
