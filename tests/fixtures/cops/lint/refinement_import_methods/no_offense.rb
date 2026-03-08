@@ -9,3 +9,13 @@ end
 module MyModule
   prepend Baz
 end
+
+# include inside a lambda within a refine block should not be flagged
+refine String do
+  -> { include SomeModule }.call
+end
+
+# include inside a proc within a refine block should not be flagged
+refine String do
+  proc { include SomeModule }.call
+end
