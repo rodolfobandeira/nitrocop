@@ -52,3 +52,12 @@ begin
 rescue StandardError => e1
   log(e, e1)
 end
+
+# Underscore-prefixed variable where preferred name `e` is read in the body
+# RuboCop's shadow check uses plain preferred name, not _e
+e = Object.new
+begin
+  e.process(data: "test")
+rescue => _ex
+  e.process(data: "test", fallback: true)
+end

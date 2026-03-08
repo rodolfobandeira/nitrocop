@@ -31,3 +31,27 @@ begin
 rescue => $error
           ^^^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `$error` for rescued exceptions.
 end
+
+# Writing to the preferred name in the body is NOT shadowing (only reads count)
+begin
+  do_something
+rescue RuntimeError => error
+                       ^^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `error` for rescued exceptions.
+  e = error
+end
+
+# ConstantPathTargetNode (qualified constant as rescue variable)
+module M
+end
+begin
+  raise 'foo'
+rescue => M::E
+          ^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `M::E` for rescued exceptions.
+end
+
+# Top-level ConstantPathTargetNode
+begin
+  raise 'foo'
+rescue => ::E2
+          ^^^^ Naming/RescuedExceptionsVariableName: Use `e` instead of `::E2` for rescued exceptions.
+end

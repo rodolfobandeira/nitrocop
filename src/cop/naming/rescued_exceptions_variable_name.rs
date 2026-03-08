@@ -65,13 +65,16 @@ impl<'a, 'src> RescuedVarVisitor<'a, 'src> {
                 // Accept both "e" and "_e" (underscore-prefixed preferred name)
                 let underscore_preferred = format!("_{}", self.preferred);
                 if var_str != self.preferred && var_str != underscore_preferred {
-                    // Skip if the preferred name is shadowed by a local variable in the body
+                    // Determine the preferred name for the diagnostic message
                     let preferred_for_var = if var_str.starts_with('_') {
                         &underscore_preferred
                     } else {
                         self.preferred
                     };
-                    if self.preferred_name_shadowed(rescue_node, preferred_for_var) {
+                    // Shadow check always uses the plain preferred name (e.g., "e"),
+                    // matching RuboCop's behavior where shadowed_variable_name? checks
+                    // lvar reads against the base preferred name regardless of underscore prefix.
+                    if self.preferred_name_shadowed(rescue_node, self.preferred) {
                         // Don't flag — renaming would shadow an existing variable
                     } else {
                         let (line, column) = self.source.offset_to_line_col(start_offset);
@@ -123,13 +126,21 @@ impl<'a, 'src> RescuedVarVisitor<'a, 'src> {
                 .unwrap_or("")
                 .to_string();
             Some((name, node.location().start_offset()))
+        } else if let Some(node) = reference.as_constant_path_target_node() {
+            // Qualified constant paths like M::E or ::E2
+            let name = std::str::from_utf8(node.location().as_slice())
+                .unwrap_or("")
+                .to_string();
+            Some((name, node.location().start_offset()))
         } else {
             None
         }
     }
 
-    /// Check if the preferred name appears as a local variable (read or write)
-    /// anywhere in the rescue body. This matches RuboCop's `shadowed_variable_name?`.
+    /// Check if the preferred name appears as a local variable READ
+    /// anywhere in the rescue body. This matches RuboCop's `shadowed_variable_name?`,
+    /// which only checks `:lvar` (read) nodes. Writes (`lvasgn`) do not count as
+    /// shadowing — e.g., `e = error` in the body should not prevent flagging.
     fn preferred_name_shadowed(
         &self,
         rescue_node: &ruby_prism::RescueNode<'_>,
@@ -150,7 +161,8 @@ impl<'a, 'src> RescuedVarVisitor<'a, 'src> {
 }
 
 /// Visitor that checks if a preferred variable name appears as a local variable
-/// (read, write, or rescue target) in the body of a rescue clause.
+/// READ in the body of a rescue clause. Matches RuboCop's `shadowed_variable_name?`
+/// which only checks `:lvar` (read) nodes, not `:lvasgn` (write) or target nodes.
 struct ShadowChecker<'a> {
     preferred: &'a [u8],
     found: bool,
@@ -158,23 +170,6 @@ struct ShadowChecker<'a> {
 
 impl<'pr> Visit<'pr> for ShadowChecker<'_> {
     fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
-        if node.name().as_slice() == self.preferred {
-            self.found = true;
-        }
-    }
-
-    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
-        if node.name().as_slice() == self.preferred {
-            self.found = true;
-        }
-        // Continue visiting children (the value expression may contain reads)
-        ruby_prism::visit_local_variable_write_node(self, node);
-    }
-
-    fn visit_local_variable_target_node(
-        &mut self,
-        node: &ruby_prism::LocalVariableTargetNode<'pr>,
-    ) {
         if node.name().as_slice() == self.preferred {
             self.found = true;
         }
