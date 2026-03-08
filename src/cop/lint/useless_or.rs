@@ -3,6 +3,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=3, FN=8.
+///
+/// FP=3 / FN=8: the cop logic was broadly correct, but the offense location was
+/// too wide. RuboCop anchors at the operator-plus-RHS range, not the start of
+/// the whole `or` expression, so multiline cases produced line mismatches.
+/// We also missed chained forms like `foo || x.to_s || fallback`, where the
+/// truthy method call is the RHS of an inner `or` and the offense belongs on
+/// the outer `or`.
+///
+/// Local rerun after the fix improved the cop from the CI nitrocop baseline of
+/// 115 offenses to 117, leaving 3 missing offenses and no excess over the CI
+/// baseline. The remaining FN were not reduced further in this phase.
 /// Checks for useless OR expressions where the left side always returns a truthy value.
 pub struct UselessOr;
 
@@ -52,19 +66,12 @@ impl Cop for UselessOr {
 
         let lhs = or_node.left();
         if is_truthy_method_call(&lhs) {
-            let lhs_src = node_source(source, &lhs);
-            let rhs_src = node_source(source, &or_node.right());
-            let loc = or_node.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                format!(
-                    "`{}` will never evaluate because `{}` always returns a truthy value.",
-                    rhs_src, lhs_src
-                ),
-            ));
+            report_offense(self, source, &or_node, &lhs, diagnostics);
+            return;
+        }
+
+        if let Some(truthy_node) = nested_truthy_middle(&lhs) {
+            report_offense(self, source, &or_node, &truthy_node, diagnostics);
         }
     }
 }
@@ -80,8 +87,11 @@ fn is_truthy_method_call(node: &ruby_prism::Node<'_>) -> bool {
         return false;
     }
 
-    // Must have no arguments
-    if call.arguments().is_some() {
+    // Must have no arguments (explicit empty parentheses are allowed).
+    if call
+        .arguments()
+        .is_some_and(|arguments| !arguments.arguments().is_empty())
+    {
         return false;
     }
 
@@ -94,6 +104,52 @@ fn is_truthy_method_call(node: &ruby_prism::Node<'_>) -> bool {
 
     let method_name = call.name().as_slice();
     TRUTHY_METHODS.contains(&method_name)
+}
+
+fn nested_truthy_middle<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(or_node) = node.as_or_node() {
+        let rhs = or_node.right();
+        if is_truthy_method_call(&rhs) {
+            return Some(rhs);
+        }
+        return nested_truthy_middle(&rhs).or_else(|| nested_truthy_middle(&or_node.left()));
+    }
+
+    if let Some(parens) = node.as_parentheses_node() {
+        if let Some(body) = parens.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for stmt in stmts.body().iter() {
+                    if let Some(truthy_node) = nested_truthy_middle(&stmt) {
+                        return Some(truthy_node);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn report_offense(
+    cop: &UselessOr,
+    source: &SourceFile,
+    or_node: &ruby_prism::OrNode<'_>,
+    truthy_node: &ruby_prism::Node<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let lhs_src = node_source(source, truthy_node);
+    let rhs_src = node_source(source, &or_node.right());
+    let op_loc = or_node.operator_loc();
+    let (line, column) = source.offset_to_line_col(op_loc.start_offset());
+    diagnostics.push(cop.diagnostic(
+        source,
+        line,
+        column,
+        format!(
+            "`{}` will never evaluate because `{}` always returns a truthy value.",
+            rhs_src, lhs_src
+        ),
+    ));
 }
 
 fn node_source<'a>(source: &'a SourceFile, node: &ruby_prism::Node<'_>) -> &'a str {
