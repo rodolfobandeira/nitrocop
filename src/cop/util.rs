@@ -560,9 +560,14 @@ pub fn has_trailing_comma(
 
 // ── Shared cop logic helpers ──────────────────────────────────────────
 
-/// Check if a line is blank (only whitespace).
+/// Check if a line is blank (completely empty, no content at all).
+///
+/// RuboCop considers a line blank only if it has zero content — lines with
+/// trailing whitespace (spaces/tabs) are NOT blank.  Those are handled by
+/// `Layout/TrailingWhitespace` instead.  Having two cops register offenses
+/// for the same whitespace-only line would cause havoc in autocorrection.
 pub fn is_blank_line(line: &[u8]) -> bool {
-    line.iter().all(|&b| b == b' ' || b == b'\t' || b == b'\r')
+    line.is_empty() || line == b"\r"
 }
 
 /// Check for extra empty lines at the beginning/end of a body.

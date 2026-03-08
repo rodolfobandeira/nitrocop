@@ -15,3 +15,15 @@ def corge
 
 ^ Layout/EmptyLinesAroundMethodBody: Extra empty line detected at method body end.
 end
+def some_method(
+  arg
+)
+
+^ Layout/EmptyLinesAroundMethodBody: Extra empty line detected at method body beginning.
+  do_something
+end
+def compute(value,
+  factor) =
+
+^ Layout/EmptyLinesAroundMethodBody: Extra empty line detected at method body beginning.
+  value * factor
