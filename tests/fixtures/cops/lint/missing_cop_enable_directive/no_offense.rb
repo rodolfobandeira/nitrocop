@@ -20,3 +20,27 @@ puts code
 # rubocop:disable Development/NoEvalCop This eval takes static inputs at load-time
 eval(source)
 # rubocop:enable Development/NoEvalCop
+
+# `enable all` should close individual cop disables
+# rubocop:disable Metrics/MethodLength
+def long_method
+  x = 1
+end
+# rubocop:enable all
+
+# `enable all` should close department-level disables
+# rubocop:disable Layout
+x =   0
+# rubocop:enable all
+
+# `enable all` should close multiple individual disables at once
+# rubocop:disable Metrics/MethodLength
+# rubocop:disable Style/FrozenStringLiteralComment
+x = 1
+y = 2
+# rubocop:enable all
+
+# `disable all` followed by `enable all`
+# rubocop:disable all
+x = 1
+# rubocop:enable all

@@ -7,19 +7,21 @@ use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-08)
 ///
-/// Corpus oracle reported FP=19, FN=2.
+/// **Round 1** — Corpus oracle reported FP=19, FN=2.
+/// The core range tracking was correct, but directive parsing was too literal.
+/// Real-world code uses both `rubocop:disable` and `rubocop: disable`, and
+/// disable comments often carry a trailing explanation. Our parser kept that
+/// explanatory text as part of the cop name, so later clean `rubocop:enable`
+/// directives did not match and we reported missing enables incorrectly.
+/// Fix improved the cop from 158 offenses to 146, leaving 5-6 excess FPs.
 ///
-/// FP=19 / FN=2: the core range tracking was correct, but directive parsing was
-/// too literal. Real-world code uses both `rubocop:disable` and
-/// `rubocop: disable`, and disable comments often carry a trailing explanation
-/// (`# rubocop:disable Rails/FindEach # reason`, `... NoEvalCop explanation`).
-/// Our parser kept that explanatory text as part of the cop name, so later
-/// clean `rubocop:enable` directives did not match and we reported missing
-/// enables incorrectly.
-///
-/// Local rerun after the parser fix improved the cop from the CI nitrocop
-/// baseline of 158 offenses to 146. That still leaves 5 excess offenses versus
-/// RuboCop, so additional directive-range semantics remain to be investigated.
+/// **Round 2** — FP=6, FN=0. Root cause: `# rubocop:enable all` was not
+/// recognized as closing all individually opened disables. RuboCop expands
+/// `enable all` to re-enable every currently-disabled cop. Our code treated
+/// "all" as a literal cop name and only removed the "all" key from
+/// `open_disables`, leaving individually disabled cops (e.g.
+/// `Metrics/MethodLength`, `Layout`) unclosed. Fix: when the enable directive
+/// contains "all", drain all open disables (checking MaximumRangeSize for each).
 pub struct MissingCopEnableDirective;
 
 impl Cop for MissingCopEnableDirective {
@@ -81,18 +83,38 @@ impl Cop for MissingCopEnableDirective {
                     }
                 }
                 "enable" => {
-                    for cop in &cops {
-                        if let Some((start_line, _)) = open_disables.remove(cop.as_str()) {
-                            // Check if range exceeds MaximumRangeSize
+                    // `rubocop:enable all` closes ALL open disables
+                    let is_enable_all = cops.iter().any(|c| c == "all");
+                    if is_enable_all {
+                        let all_open: Vec<(String, (usize, usize))> =
+                            open_disables.drain().collect();
+                        for (cop, (start_line, _)) in &all_open {
                             if max_range.is_finite() {
-                                let range_size = (i + 1) - start_line - 1; // lines between disable and enable
+                                let range_size = (i + 1) - start_line - 1;
                                 if range_size > max_range as usize {
                                     diagnostics.push(self.diagnostic(
                                         source,
-                                        start_line,
+                                        *start_line,
                                         0,
                                         format_message(cop, Some(max_range as usize)),
                                     ));
+                                }
+                            }
+                        }
+                    } else {
+                        for cop in &cops {
+                            if let Some((start_line, _)) = open_disables.remove(cop.as_str()) {
+                                // Check if range exceeds MaximumRangeSize
+                                if max_range.is_finite() {
+                                    let range_size = (i + 1) - start_line - 1; // lines between disable and enable
+                                    if range_size > max_range as usize {
+                                        diagnostics.push(self.diagnostic(
+                                            source,
+                                            start_line,
+                                            0,
+                                            format_message(cop, Some(max_range as usize)),
+                                        ));
+                                    }
                                 }
                             }
                         }
