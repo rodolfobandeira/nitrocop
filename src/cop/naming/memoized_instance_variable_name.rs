@@ -6,6 +6,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Naming/MemoizedInstanceVariableName — checks that memoized instance variables
+/// match the method name.
+///
+/// ## Investigation (2026-03-08)
+/// FN=27 in corpus. Root causes:
+/// 1. Missing `define_method`/`define_singleton_method` support: RuboCop checks
+///    memoization inside dynamically defined methods (`define_method(:foo) do @bar ||= ... end`).
+///    Nitrocop only handled `DefNode`.
+/// 2. Singleton methods (`def self.x`) were already handled since Prism represents them
+///    as `DefNode` with `receiver().is_some()` — no code change needed for those.
+///
+/// Fix: Added `CallNode` handling in `check_node` for `define_method` and
+/// `define_singleton_method` calls with blocks. Extracts method name from first
+/// sym/str argument, then checks block body for `||=` or `defined?` memoization patterns.
 pub struct MemoizedInstanceVariableName;
 
 impl MemoizedInstanceVariableName {
@@ -56,6 +70,113 @@ impl MemoizedInstanceVariableName {
         }
 
         Vec::new()
+    }
+
+    /// Handle `define_method(:name) do ... end` and `define_singleton_method(:name) do ... end`.
+    /// Extracts the method name from the first sym/str argument, then checks the block body
+    /// for memoization patterns (`||=` or `defined?`).
+    fn check_dynamic_method(
+        &self,
+        source: &SourceFile,
+        call_node: ruby_prism::CallNode<'_>,
+        enforced_style: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Extract method name from first argument (symbol or string)
+        let args = match call_node.arguments() {
+            Some(a) => a,
+            None => return,
+        };
+        let args_list: Vec<_> = args.arguments().iter().collect();
+        if args_list.is_empty() {
+            return;
+        }
+
+        let name_bytes = if let Some(sym) = args_list[0].as_symbol_node() {
+            sym.unescaped().to_vec()
+        } else if let Some(s) = args_list[0].as_string_node() {
+            s.unescaped().to_vec()
+        } else {
+            return;
+        };
+
+        let method_name_str = match std::str::from_utf8(&name_bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // RuboCop skips initialize methods
+        if matches!(
+            method_name_str,
+            "initialize" | "initialize_clone" | "initialize_copy" | "initialize_dup"
+        ) {
+            return;
+        }
+
+        let base_name = method_name_str.trim_end_matches(['?', '!', '=']);
+
+        // Get the block body
+        let block = match call_node.block() {
+            Some(b) => b,
+            None => return,
+        };
+        let block_node = match block.as_block_node() {
+            Some(b) => b,
+            None => return,
+        };
+        let body = match block_node.body() {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Check for bare ||= as the entire body
+        if let Some(or_write) = body.as_instance_variable_or_write_node() {
+            diagnostics.extend(self.check_or_write(
+                source,
+                or_write,
+                base_name,
+                method_name_str,
+                enforced_style,
+            ));
+            return;
+        }
+
+        let stmts = match body.as_statements_node() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let body_nodes: Vec<_> = stmts.body().iter().collect();
+        if body_nodes.is_empty() {
+            return;
+        }
+
+        // Check last statement for ||=
+        let last = &body_nodes[body_nodes.len() - 1];
+        if let Some(or_write) = last.as_instance_variable_or_write_node() {
+            diagnostics.extend(self.check_or_write(
+                source,
+                or_write,
+                base_name,
+                method_name_str,
+                enforced_style,
+            ));
+            return;
+        }
+
+        // Check defined? memoization pattern
+        if body_nodes.len() >= 2 {
+            if let Some(ivar_base) = extract_defined_memoized_ivar(&body_nodes) {
+                diagnostics.extend(self.check_defined_memoized(
+                    source,
+                    &body_nodes,
+                    &ivar_base,
+                    base_name,
+                    method_name_str,
+                    enforced_style,
+                ));
+            }
+        }
     }
 
     /// Check the `defined?` memoization pattern and emit offenses on each ivar reference.
@@ -263,6 +384,16 @@ impl Cop for MemoizedInstanceVariableName {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyleForLeadingUnderscores", "disallowed");
+
+        // Handle define_method/define_singleton_method calls with blocks
+        if let Some(call_node) = node.as_call_node() {
+            let method = call_node.name().as_slice();
+            let method_str = std::str::from_utf8(method).unwrap_or("");
+            if method_str == "define_method" || method_str == "define_singleton_method" {
+                self.check_dynamic_method(source, call_node, enforced_style, diagnostics);
+            }
+            return;
+        }
 
         let def_node = match node.as_def_node() {
             Some(d) => d,

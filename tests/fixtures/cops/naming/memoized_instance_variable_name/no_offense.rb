@@ -56,3 +56,23 @@ end
 def _strategies
   @strategies ||= build_strategies
 end
+
+# define_method with matching ivar name
+define_method(:values) do
+  @values ||= do_something
+end
+
+# define_singleton_method with matching ivar name
+define_singleton_method(:records) do
+  @records ||= fetch_records
+end
+
+# klass.define_method with matching ivar name
+klass.define_method(:items) do
+  @items ||= load_items
+end
+
+# singleton method (def self.x) with matching ivar
+def self.records
+  @records ||= fetch_records
+end
