@@ -10,20 +10,30 @@ use crate::parse::source::SourceFile;
 /// e.g. `it "should do something"` without a `do...end`. Fixed by checking
 /// `call.block().is_some()`.
 ///
-/// Current investigation: FP=28, FN=4.
+/// Round 2: FP=28, FN=4.
 ///
-/// FP root causes:
+/// FP root causes (all fixed):
 /// 1. Cop checked `fit`/`xit` in addition to `it`, but RuboCop's ExampleWording
 ///    only matches `(block (send _ :it ...))` — only the `it` method.
 /// 2. Cop emitted multiple offenses per description (e.g., both "should" and
 ///    DisallowedExamples), but RuboCop uses if/elsif so only one offense fires.
 /// 3. DisallowedExamples comparison didn't match RuboCop's `preprocess` logic
 ///    (strip + squeeze spaces + downcase).
+/// 4. `starts_with_should` accepted `desc[6] == b'n'` for "shouldn't" but
+///    also matched "shouldnt" (no apostrophe). RuboCop uses `\b` (word boundary).
+///    Fixed with proper `is_word_char` check. Same for `starts_with_will`.
+/// 5. `it 'desc', &(proc do...end)` — Prism sees the `&(proc do...end)` as a
+///    `BlockArgumentNode` on the `it` call, not a `BlockNode`. RuboCop's `on_block`
+///    only fires for `BlockNode`. Fixed by checking `block.as_block_node().is_some()`.
+/// 6. Cop rejected calls with a receiver (`call.receiver().is_some()`), but RuboCop's
+///    pattern uses `_` for receiver (matches anything). Fixed by removing the check.
 ///
-/// Fixed all three issues.
-///
-/// FN=4: Not addressed in this pass. Likely edge cases with multiline string
-/// descriptions or encoding differences.
+/// FN root causes (all fixed):
+/// - 3 FNs: "should," (comma after "should") not detected. Our check required
+///   specific chars after "should" instead of proper word boundary. Fixed with
+///   `is_word_char` check.
+/// - 1 FN: `group.it('works') { }` — receiver present. Fixed by removing
+///   receiver filter.
 pub struct ExampleWording;
 
 impl Cop for ExampleWording {
@@ -71,9 +81,8 @@ impl Cop for ExampleWording {
             None => return,
         };
 
-        if call.receiver().is_some() {
-            return;
-        }
+        // RuboCop's ExampleWording pattern uses `_` for receiver (matches anything
+        // including nil), so we do NOT filter out calls with a receiver.
 
         // RuboCop's ExampleWording only matches `it` blocks — not `fit`/`xit`/`specify` etc.
         let method_name = call.name().as_slice();
@@ -81,9 +90,12 @@ impl Cop for ExampleWording {
             return;
         }
 
-        // Pending examples (no block) are not checked by RuboCop
-        if call.block().is_none() {
-            return;
+        // RuboCop's on_block callback only fires for actual block nodes (do...end / { }).
+        // Skip if no block at all (pending examples) or if the "block" is actually a
+        // block argument (&expr), e.g. `it 'desc', &(proc do...end)`.
+        match call.block() {
+            Some(block) if block.as_block_node().is_some() => {}
+            _ => return,
         }
 
         // Get the first positional argument (the description string)
@@ -195,7 +207,13 @@ impl Cop for ExampleWording {
     }
 }
 
-/// Check if a byte slice starts with "should" (case-insensitive).
+/// Check if a byte is a word character (alphanumeric or underscore).
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Check if a byte slice starts with "should" (case-insensitive) at a word boundary.
+/// Matches RuboCop's `/\Ashould(?:n't|n\xe2\x80\x99t)?\b/i`.
 fn starts_with_should(desc: &[u8]) -> bool {
     if desc.len() < 6 {
         return false;
@@ -204,18 +222,51 @@ fn starts_with_should(desc: &[u8]) -> bool {
     if lower != b"should" {
         return false;
     }
-    // "should" alone or followed by space/word-boundary or "n't"/"n\xe2\x80\x99t"
-    desc.len() == 6 || desc[6] == b' ' || desc[6] == b'\'' || desc[6] == b'n'
+    // Check for shouldn\xe2\x80\x99t (Unicode right single quote)
+    if desc.len() >= 11
+        && desc[6].eq_ignore_ascii_case(&b'n')
+        && desc[7] == b'\xe2'
+        && desc[8] == b'\x80'
+        && desc[9] == b'\x99'
+        && desc[10].eq_ignore_ascii_case(&b't')
+    {
+        return desc.len() == 11 || !is_word_char(desc[11]);
+    }
+    // Check for shouldn't (ASCII apostrophe)
+    if desc.len() >= 9
+        && desc[6].eq_ignore_ascii_case(&b'n')
+        && desc[7] == b'\''
+        && desc[8].eq_ignore_ascii_case(&b't')
+    {
+        return desc.len() == 9 || !is_word_char(desc[9]);
+    }
+    // Plain "should" — word boundary: end of string or non-word char
+    desc.len() == 6 || !is_word_char(desc[6])
 }
 
-/// Return the length of the "should" prefix (6 for "should", 9 for "shouldn't", etc.)
+/// Return the length of the "should" prefix (6 for "should", 9 for "shouldn't",
+/// 11 for "shouldn\xe2\x80\x99t").
 fn should_prefix_len(desc: &[u8]) -> usize {
     if desc.len() >= 6 {
         let lower6: Vec<u8> = desc[..6].iter().map(|b| b.to_ascii_lowercase()).collect();
         if lower6 == b"should" {
-            // Check for "shouldn't" or "shouldn\xe2\x80\x99t"
-            if desc.len() >= 9 && desc[6] == b'n' && (desc[7] == b'\'' || desc[7] == b'\xe2') {
-                return 9; // shouldn't
+            // Check for "shouldn\xe2\x80\x99t" (Unicode right single quote)
+            if desc.len() >= 11
+                && desc[6].eq_ignore_ascii_case(&b'n')
+                && desc[7] == b'\xe2'
+                && desc[8] == b'\x80'
+                && desc[9] == b'\x99'
+                && desc[10].eq_ignore_ascii_case(&b't')
+            {
+                return 11;
+            }
+            // Check for "shouldn't" (ASCII apostrophe)
+            if desc.len() >= 9
+                && desc[6].eq_ignore_ascii_case(&b'n')
+                && desc[7] == b'\''
+                && desc[8].eq_ignore_ascii_case(&b't')
+            {
+                return 9;
             }
             return 6;
         }
@@ -223,18 +274,32 @@ fn should_prefix_len(desc: &[u8]) -> usize {
     0
 }
 
-/// Check if a byte slice starts with "will"/"won't" (case-insensitive).
+/// Check if a byte slice starts with "will"/"won't" (case-insensitive) at a word boundary.
+/// Matches RuboCop's `/\A(?:will|won't|won\xe2\x80\x99t)\b/i`.
 fn starts_with_will(desc: &[u8]) -> bool {
     if desc.len() >= 4 {
         let lower: Vec<u8> = desc[..4].iter().map(|b| b.to_ascii_lowercase()).collect();
         if lower == b"will" {
-            return desc.len() == 4 || desc[4] == b' ';
+            return desc.len() == 4 || !is_word_char(desc[4]);
         }
     }
+    // won't (ASCII apostrophe)
     if desc.len() >= 5 {
         let lower: Vec<u8> = desc[..5].iter().map(|b| b.to_ascii_lowercase()).collect();
-        if lower == b"won't" || lower == b"won\xe2\x80" {
-            return true;
+        if lower == b"won't" {
+            return desc.len() == 5 || !is_word_char(desc[5]);
+        }
+    }
+    // won\xe2\x80\x99t (Unicode right single quote)
+    if desc.len() >= 7 {
+        let lower3: Vec<u8> = desc[..3].iter().map(|b| b.to_ascii_lowercase()).collect();
+        if lower3 == b"won"
+            && desc[3] == b'\xe2'
+            && desc[4] == b'\x80'
+            && desc[5] == b'\x99'
+            && desc[6].eq_ignore_ascii_case(&b't')
+        {
+            return desc.len() == 7 || !is_word_char(desc[7]);
         }
     }
     false
@@ -317,6 +382,67 @@ mod tests {
             "CustomTransform should suggest 'is valid' replacement, got: {}",
             diags[0].message
         );
+    }
+
+    #[test]
+    fn block_arg_not_flagged() {
+        // it 'desc', &(proc do...end) — Prism sees this as a BlockArgumentNode,
+        // not a BlockNode. RuboCop's on_block pattern only matches actual blocks.
+        let source = b"it 'should convert', &(proc do\n  x\nend)\n";
+        let diags = crate::testutil::run_cop_full(&ExampleWording, source);
+        assert!(
+            diags.is_empty(),
+            "block argument should not be flagged, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn should_followed_by_comma() {
+        // "should, if ..." — comma is a word boundary, RuboCop flags this
+        let source = b"it 'should, if given, cache the file' do\nend\n";
+        let diags = crate::testutil::run_cop_full(&ExampleWording, source);
+        assert_eq!(diags.len(), 1, "should followed by comma should be flagged");
+    }
+
+    #[test]
+    fn shouldnt_without_apostrophe_not_flagged() {
+        // "shouldnt" (no apostrophe) — 'n' is a word char, no word boundary after "should"
+        let source = b"it 'shouldnt create a record' do\nend\n";
+        let diags = crate::testutil::run_cop_full(&ExampleWording, source);
+        assert!(
+            diags.is_empty(),
+            "shouldnt without apostrophe should not be flagged, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn receiver_it_is_checked() {
+        // RuboCop's pattern uses _ for receiver, matching group.it('works') { }
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "DisallowedExamples".into(),
+                serde_yml::Value::Sequence(vec![serde_yml::Value::String("works".into())]),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"group.it('works') { }\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExampleWording, source, config);
+        assert_eq!(diags.len(), 1, "group.it('works') should be flagged");
+    }
+
+    #[test]
+    fn xit_and_fit_not_flagged() {
+        // RuboCop's ExampleWording only matches :it, not :xit or :fit
+        let source = b"xit 'should do something' do\nend\n";
+        let diags = crate::testutil::run_cop_full(&ExampleWording, source);
+        assert!(diags.is_empty(), "xit should not be flagged");
+        let source2 = b"fit 'should do something' do\nend\n";
+        let diags2 = crate::testutil::run_cop_full(&ExampleWording, source2);
+        assert!(diags2.is_empty(), "fit should not be flagged");
     }
 
     #[test]

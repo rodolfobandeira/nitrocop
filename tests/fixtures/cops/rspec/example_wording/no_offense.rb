@@ -28,3 +28,15 @@ end
 xit 'should be valid' do
   expect(subject).to be_valid
 end
+# "shouldnt" without apostrophe — no word boundary after "should"
+it 'shouldnt create a record' do
+  expect(Record.count).to eq(0)
+end
+it 'shouldnt collide with other data' do
+  expect(true).to eq(true)
+end
+# &(proc do...end) — Prism binds do...end to outer `it`, but
+# RuboCop's Parser gem binds it to `proc`, so no offense fires
+it 'should convert the example', &(proc do
+  expect(true).to eq(true)
+end)

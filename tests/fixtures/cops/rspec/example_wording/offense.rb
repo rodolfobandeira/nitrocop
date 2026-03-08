@@ -16,3 +16,6 @@ end
 it "will do something" do
     ^^^^^^^^^^^^^^^^^^ RSpec/ExampleWording: Do not use the future tense when describing your tests.
 end
+it "should, if given as argument, cache that file" do
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ExampleWording: Do not use should when describing your tests.
+end
