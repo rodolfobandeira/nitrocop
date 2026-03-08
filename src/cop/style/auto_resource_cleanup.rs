@@ -4,6 +4,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/AutoResourceCleanup
+///
+/// Investigation: 19 FPs from qualified constant paths like `Zip::File.open(...)`.
+/// The `ConstantPathNode` branch extracted the last component name (e.g. "File" from
+/// `Zip::File`) which falsely matched the stdlib `File` check. Fix: only match
+/// `ConstantPathNode` when `parent()` is `None` (root-scoped `::File`/`::Tempfile`).
 pub struct AutoResourceCleanup;
 
 impl Cop for AutoResourceCleanup {
@@ -52,6 +58,11 @@ fn is_resource_open_without_block(call: &ruby_prism::CallNode<'_>) -> Option<Str
     let recv_name = if let Some(read) = receiver.as_constant_read_node() {
         std::str::from_utf8(read.name().as_slice()).unwrap_or("")
     } else if let Some(path) = receiver.as_constant_path_node() {
+        // Only match root-scoped ::File or ::Tempfile (parent is None).
+        // Skip qualified paths like Zip::File where parent is Some.
+        if path.parent().is_some() {
+            return None;
+        }
         std::str::from_utf8(path.name_loc().as_slice()).unwrap_or("")
     } else {
         return None;

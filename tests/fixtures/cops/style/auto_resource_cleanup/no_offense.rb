@@ -21,3 +21,7 @@ data = File.open("path") { |f| f.read }
 # Used as argument — not lvasgn
 YAML.load(File.open("path"))
 process(File.open("path"))
+
+# Qualified constant path — not stdlib File/Tempfile
+zf = Zip::File.open(filename)
+zf = ::Zip::File.open(filename)
