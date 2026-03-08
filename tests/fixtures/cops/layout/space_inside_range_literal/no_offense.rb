@@ -4,3 +4,7 @@ z = 'a'..'z'
 a = (1..10)
 b = 0...arr.length
 c = Date.today..Date.tomorrow
+multiline = 0..
+  10
+wrapped = (start_value...
+  end_value)

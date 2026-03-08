@@ -3,6 +3,24 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=6, FN=0.
+///
+/// FP=6 root cause: multiline range literals such as `0..\n  10` were treated
+/// as having spaces after the operator because the implementation counted the
+/// indentation on the following line. RuboCop normalizes an immediate line break
+/// after the operator before checking for interior spacing.
+///
+/// Fix: ignore a pure newline-plus-indentation gap immediately after the range
+/// operator, but still collapse that gap during autocorrect when another real
+/// spacing offense exists in the same range expression.
+///
+/// Rerun outcome: removed the target false positives from `markdownlint` (3),
+/// `ruby-lsp` (2), and one `natalie` case. Aggregate corpus totals remain noisy:
+/// `jruby` adds +33 offenses from RuboCop file-drop noise, and local reruns no
+/// longer reproduce two baseline offenses in `peritor`, which suggests corpus
+/// drift or repo-local execution differences rather than a confirmed new cop bug.
 pub struct SpaceInsideRangeLiteral;
 
 impl Cop for SpaceInsideRangeLiteral {
@@ -41,6 +59,7 @@ impl Cop for SpaceInsideRangeLiteral {
         let mut has_space = false;
         let mut space_before_range: Option<(usize, usize)> = None;
         let mut space_after_range: Option<(usize, usize)> = None;
+        let mut multiline_gap_after_range: Option<(usize, usize)> = None;
 
         // Check space before operator
         if let Some(left_node) = left {
@@ -59,7 +78,9 @@ impl Cop for SpaceInsideRangeLiteral {
             let right_start = right_node.location().start_offset();
             if right_start > op_end {
                 let between = &bytes[op_end..right_start];
-                if between.iter().any(|&b| b == b' ' || b == b'\t') {
+                if is_pure_multiline_gap(between) {
+                    multiline_gap_after_range = Some((op_end, right_start));
+                } else if between.iter().any(|&b| b == b' ' || b == b'\t') {
                     has_space = true;
                     space_after_range = Some((op_end, right_start));
                 }
@@ -89,11 +110,34 @@ impl Cop for SpaceInsideRangeLiteral {
                         cop_index: 0,
                     });
                 }
+                if let Some((start, end)) = multiline_gap_after_range
+                    .filter(|_| space_before_range.is_some() || space_after_range.is_some())
+                {
+                    corr.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                }
                 diag.corrected = true;
             }
             diagnostics.push(diag);
         }
     }
+}
+
+fn is_pure_multiline_gap(bytes: &[u8]) -> bool {
+    if let Some(rest) = bytes.strip_prefix(b"\r\n") {
+        return rest.iter().all(|&b| b == b' ' || b == b'\t');
+    }
+
+    if let Some(rest) = bytes.strip_prefix(b"\n") {
+        return rest.iter().all(|&b| b == b' ' || b == b'\t');
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -108,4 +152,9 @@ mod tests {
         SpaceInsideRangeLiteral,
         "cops/layout/space_inside_range_literal"
     );
+
+    #[test]
+    fn ignores_pure_multiline_gap_after_operator() {
+        crate::testutil::assert_cop_no_offenses_full(&SpaceInsideRangeLiteral, b"x = 0..\n  10\n");
+    }
 }
