@@ -1,6 +1,7 @@
 use crate::cop::node_type::{
-    CONSTANT_OR_WRITE_NODE, CONSTANT_PATH_OR_WRITE_NODE, CONSTANT_PATH_WRITE_NODE,
-    CONSTANT_WRITE_NODE, MULTI_WRITE_NODE,
+    CONSTANT_AND_WRITE_NODE, CONSTANT_OPERATOR_WRITE_NODE, CONSTANT_OR_WRITE_NODE,
+    CONSTANT_PATH_AND_WRITE_NODE, CONSTANT_PATH_OPERATOR_WRITE_NODE, CONSTANT_PATH_OR_WRITE_NODE,
+    CONSTANT_PATH_TARGET_NODE, CONSTANT_PATH_WRITE_NODE, CONSTANT_TARGET_NODE, CONSTANT_WRITE_NODE,
 };
 use crate::cop::util::is_screaming_snake_case;
 use crate::cop::{Cop, CopConfig};
@@ -27,6 +28,13 @@ use crate::parse::source::SourceFile;
 /// `# rubocop:disable Style/ConstantName`. RuboCop still suppresses
 /// `Naming/ConstantName` for that moved legacy name because the short name
 /// stayed `ConstantName`. Fixed centrally in `parse/directives.rs`.
+///
+/// Follow-up (2026-03-08): FN=64 from missing compound assignment node types.
+/// Added `ConstantAndWriteNode` (`&&=`), `ConstantOperatorWriteNode` (`+=`),
+/// `ConstantPathAndWriteNode` (`Foo::Bar &&=`), `ConstantPathOperatorWriteNode`
+/// (`Foo::Bar +=`). Also switched from `MultiWriteNode` parent traversal to
+/// direct `ConstantTargetNode`/`ConstantPathTargetNode` dispatch, which also
+/// picks up rescue-clause constant targets (`rescue => CapturedError`).
 pub struct ConstantName;
 
 impl Cop for ConstantName {
@@ -36,11 +44,16 @@ impl Cop for ConstantName {
 
     fn interested_node_types(&self) -> &'static [u8] {
         &[
-            CONSTANT_PATH_WRITE_NODE,
             CONSTANT_WRITE_NODE,
+            CONSTANT_PATH_WRITE_NODE,
             CONSTANT_OR_WRITE_NODE,
             CONSTANT_PATH_OR_WRITE_NODE,
-            MULTI_WRITE_NODE,
+            CONSTANT_AND_WRITE_NODE,
+            CONSTANT_PATH_AND_WRITE_NODE,
+            CONSTANT_OPERATOR_WRITE_NODE,
+            CONSTANT_PATH_OPERATOR_WRITE_NODE,
+            CONSTANT_TARGET_NODE,
+            CONSTANT_PATH_TARGET_NODE,
         ]
     }
 
@@ -83,37 +96,65 @@ impl Cop for ConstantName {
             diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
         }
 
-        // Multi-assignment: A, B = 1, 2
-        // ConstantTargetNode / ConstantPathTargetNode appear as children of MultiWriteNode.
-        // No valid_rhs check — the value is shared across all targets.
-        if let Some(mw) = node.as_multi_write_node() {
-            for target in mw.lefts().iter() {
-                if let Some(ct) = target.as_constant_target_node() {
-                    let const_name = ct.name().as_slice();
-                    if !is_screaming_snake_case(const_name) {
-                        let (line, column) =
-                            source.offset_to_line_col(ct.location().start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
-                        ));
-                    }
-                }
-                if let Some(cpt) = target.as_constant_path_target_node() {
-                    let name_loc = cpt.name_loc();
-                    let const_name = cpt.name().map(|n| n.as_slice()).unwrap_or(b"");
-                    if !is_screaming_snake_case(const_name) {
-                        let (line, column) = source.offset_to_line_col(name_loc.start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
-                        ));
-                    }
-                }
+        // Foo &&= value
+        if let Some(caw) = node.as_constant_and_write_node() {
+            let const_name = caw.name().as_slice();
+            let value = caw.value();
+            diagnostics.extend(self.check_constant(source, const_name, &caw.name_loc(), &value));
+        }
+
+        // Mod::Setting &&= value
+        if let Some(cpaw) = node.as_constant_path_and_write_node() {
+            let target = cpaw.target();
+            let name_loc = target.name_loc();
+            let const_name = target.name().map(|n| n.as_slice()).unwrap_or(b"");
+            let value = cpaw.value();
+            diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
+        }
+
+        // Foo += value
+        if let Some(cow) = node.as_constant_operator_write_node() {
+            let const_name = cow.name().as_slice();
+            let value = cow.value();
+            diagnostics.extend(self.check_constant(source, const_name, &cow.name_loc(), &value));
+        }
+
+        // Mod::Setting += value
+        if let Some(cpow) = node.as_constant_path_operator_write_node() {
+            let target = cpow.target();
+            let name_loc = target.name_loc();
+            let const_name = target.name().map(|n| n.as_slice()).unwrap_or(b"");
+            let value = cpow.value();
+            diagnostics.extend(self.check_constant(source, const_name, &name_loc, &value));
+        }
+
+        // ConstantTargetNode — appears in multi-assignment (A, B = 1, 2) and
+        // rescue clauses (rescue => CapturedError). No valid_rhs check.
+        if let Some(ct) = node.as_constant_target_node() {
+            let const_name = ct.name().as_slice();
+            if !is_screaming_snake_case(const_name) {
+                let (line, column) = source.offset_to_line_col(ct.location().start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
+                ));
+            }
+        }
+
+        // ConstantPathTargetNode — appears in multi-assignment (Mod::A, Mod::B = 1, 2)
+        if let Some(cpt) = node.as_constant_path_target_node() {
+            let name_loc = cpt.name_loc();
+            let const_name = cpt.name().map(|n| n.as_slice()).unwrap_or(b"");
+            if !is_screaming_snake_case(const_name) {
+                let (line, column) = source.offset_to_line_col(name_loc.start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Use SCREAMING_SNAKE_CASE for constants.".to_string(),
+                ));
             }
         }
     }

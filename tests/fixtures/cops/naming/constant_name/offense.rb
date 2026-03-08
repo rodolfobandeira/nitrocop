@@ -49,3 +49,26 @@ MyStr = "hello #{world}".freeze
 TopCase, Test2 = 5, 6
 ^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
          ^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Constant and-assignment (&&=)
+OpAndLocal &&= 1
+^^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Constant operator-assignment (+=)
+OpAddLocal += 2
+^^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Constant path and-assignment (Mod::Const &&=)
+ConstSpecs::OpAndPath &&= 1
+            ^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Constant path operator-assignment (Mod::Const +=)
+ConstSpecs::OpAddPath += 2
+            ^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+
+# Rescue constant target
+begin
+  something
+rescue => CapturedErr
+          ^^^^^^^^^^^ Naming/ConstantName: Use SCREAMING_SNAKE_CASE for constants.
+end

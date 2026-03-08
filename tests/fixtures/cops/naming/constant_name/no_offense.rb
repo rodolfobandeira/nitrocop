@@ -21,3 +21,15 @@ MyProc = proc { do_something }
 # .freeze on range literal — ranges are NOT literals in RuboCop,
 # so this is a method call with non-literal receiver (allowed)
 MyRange = (1..5).freeze
+
+# Compound assignment with SCREAMING_SNAKE_CASE (allowed)
+COUNTER &&= 1
+TOTAL += 10
+Mod::LIMIT &&= 5
+Mod::OFFSET += 1
+
+# Rescue with SCREAMING_SNAKE_CASE constant target
+begin
+  something
+rescue => LAST_ERROR
+end
