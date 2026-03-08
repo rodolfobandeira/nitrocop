@@ -10,6 +10,7 @@ use crate::parse::source::SourceFile;
 /// 2. Extended-mode (`/x`) comments containing parentheses — `# comment (example)`
 ///    was parsed as containing a numbered capture (8 FPs: dependabot, kamal, dotenv,
 ///    huginn, ruby-git, rdoc, roadie).
+///
 /// Fix: skip conditional backreference conditions after `(?(`, and strip `#`-comments
 /// in extended mode before scanning.
 pub struct MixedRegexpCaptureTypes;

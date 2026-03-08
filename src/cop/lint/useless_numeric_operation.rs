@@ -10,6 +10,7 @@ use crate::parse::source::SourceFile;
 /// 2. Instance/class/global variable op-assigns (`@index += 0`, `@@count -= 0`,
 ///    `$counter += 0`): RuboCop's `useless_abbreviated_assignment?` pattern uses
 ///    `(op-asgn (lvasgn $_) ...)` which only matches local variable assignments.
+///
 /// Fix: removed float literal checks from `is_zero`/`is_one`, and removed
 /// ivar/cvar/gvar operator write node handling.
 pub struct UselessNumericOperation;
