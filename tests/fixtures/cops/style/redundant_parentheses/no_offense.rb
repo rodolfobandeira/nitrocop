@@ -50,3 +50,112 @@ ranges + [(line..line)]
 foo((1..10))
 x = (0..10)
 process((start..length), path, file)
+# not/while/until — plausible (RuboCop doesn't flag these)
+(not x)
+(a until b)
+(a while b)
+# Operator with unparenthesized call arg
+foo + (bar baz)
+# Negative numeric base in exponentiation
+(-2)**2
+(-2.1)**2
+# Unary on method call starting with integer literal
+-(1.foo)
++(1.foo)
+-(1.foo.bar)
++(1.foo.bar)
+# Splat/kwsplat with operator expression
+foo(*(bar & baz))
+foo(*(bar + baz))
+foo(**(bar + baz))
+# Assignment in conditional — parens disambiguate = from ==
+if (var = 42); end
+unless (var = 42); end
+while (var = 42); end
+until (var = 42); end
+# Unparenthesized method call with args used in boolean expression
+(a 1, 2) && (1 + 1)
+# rescue in method arg
+foo((bar rescue baz))
+# Multiple expressions in non-begin parent
+x = (foo; bar)
+x += (foo; bar)
+x + (foo; bar)
+x((foo; bar))
+# Empty parens
+()
+# Chained unary
+(!x).y
+# Comparison in non-top-level context
+x && (y == z)
+(x == y).zero?
+# Match regex against parenthesized expression
+/regexp/ =~ (b || c)
+regexp =~ (b || c)
+# rescue expression is plausible in certain contexts
+foo((bar rescue baz))
+# Parens around one-line rescue in array/hash/ternary
+[(foo rescue bar)]
+{ key: (foo rescue bar) }
+cond ? (foo rescue bar) : 42
+# post-condition loops with adjacent parens
+begin
+  do_something
+end while(bar)
+begin
+  do_something
+end until(bar)
+# Parens touching keyword
+if x; y else(1) end
+if x; y else (1)end
+# rescue keyword parens
+begin
+  some_method
+rescue(StandardError)
+end
+# when keyword parens
+case foo
+when(Const)
+  bar
+end
+# super/yield with hash arg
+super ({
+  foo: bar,
+})
+yield ({
+  foo: bar,
+})
+# super/yield with multiline style argument
+super (
+  42
+)
+yield (
+  42
+)
+# return with multiline style argument
+return (
+  42
+)
+# Unary operation (!x) in a chained boolean context — parens required for syntax
+foo && (!x arg)
+foo && (!x.m arg)
+foo && (!super arg)
+foo && (!yield arg)
+foo && (!defined? arg)
+# Unary operation (!x) when not sole expression and would change semantics
+(!x arg) && foo
+(!x.m arg) && foo
+(!super arg) && foo
+(!yield arg) && foo
+(!defined? arg) && foo
+# Non-parenthesized call with block — parens act as method arg grouping
+method (:arg) { blah }
+# method argument parentheses
+method (arg)
+# Keyword-form logical in parent context (and/or)
+(1 and 2) and (3 or 4)
+(1 or 2) or (3 and 4)
+var = (foo or bar)
+var = (foo and bar)
+# Arithmetic operator parent for logical
+x - (y || z)
