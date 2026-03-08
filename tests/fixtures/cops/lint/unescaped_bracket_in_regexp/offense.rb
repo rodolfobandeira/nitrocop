@@ -5,3 +5,5 @@
 /abc]123]/
     ^ Lint/UnescapedBracketInRegexp: Regular expression has `]` without escape.
         ^ Lint/UnescapedBracketInRegexp: Regular expression has `]` without escape.
+/^\[|:]#{Regexp.escape(char)}/
+      ^ Lint/UnescapedBracketInRegexp: Regular expression has `]` without escape.

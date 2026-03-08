@@ -22,3 +22,7 @@ charset = "a-z"
 
 word_chars = "\\p{Word}"
 /(^|[^#{word_chars};:}])text/
+
+# Extended mode comments are not part of the regexp body.
+/abc # comment with ]
+/x

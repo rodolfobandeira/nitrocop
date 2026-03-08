@@ -5,6 +5,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=1, FN=1.
+///
+/// FP=1: the old scanner treated `/x` comments as if they were part of the
+/// regexp body, so a `]` inside a comment produced a false positive.
+/// FN=1: we skipped interpolated regexps entirely, but RuboCop still flags
+/// static `]` characters that appear in literal segments around interpolation.
+/// The fix is a stateful raw-source scanner that preserves character-class
+/// state across interpolated string segments while ignoring extended-mode
+/// comments and whitespace outside character classes.
 pub struct UnescapedBracketInRegexp;
 
 impl Cop for UnescapedBracketInRegexp {
@@ -37,119 +48,162 @@ impl Cop for UnescapedBracketInRegexp {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Check RegularExpressionNode
         if let Some(regexp) = node.as_regular_expression_node() {
-            let content = regexp.unescaped();
-            let content_str = match std::str::from_utf8(content) {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-
-            // Check for interpolation — skip
-            let raw_src = &source.as_bytes()
-                [regexp.location().start_offset()..regexp.location().end_offset()];
-            if raw_src.windows(2).any(|w| w == b"#{") {
-                return;
-            }
-
-            // The offset of the regexp content within the source (after the opening /)
-            let content_start = regexp.content_loc().start_offset();
-
-            diagnostics.extend(find_unescaped_brackets(
+            let content_loc = regexp.content_loc();
+            let content = &source.as_bytes()[content_loc.start_offset()..content_loc.end_offset()];
+            let mut state = RegexScanState::default();
+            scan_regex_segment(
                 self,
                 source,
-                content_str,
-                content_start,
-            ));
+                content,
+                content_loc.start_offset(),
+                is_extended_regex(regexp.closing_loc().as_slice()),
+                &mut state,
+                diagnostics,
+            );
             return;
         }
 
-        // Check InterpolatedRegularExpressionNode
-        if node.as_interpolated_regular_expression_node().is_some() {
-            // Scanning interpolated regex parts independently creates false positives when
-            // a character class starts before interpolation and closes after it.
+        if let Some(regexp) = node.as_interpolated_regular_expression_node() {
+            let mut state = RegexScanState::default();
+            let extended = is_extended_regex(regexp.closing_loc().as_slice());
+
+            for part in regexp.parts().iter() {
+                if let Some(string) = part.as_string_node() {
+                    let content_loc = string.content_loc();
+                    let content =
+                        &source.as_bytes()[content_loc.start_offset()..content_loc.end_offset()];
+                    scan_regex_segment(
+                        self,
+                        source,
+                        content,
+                        content_loc.start_offset(),
+                        extended,
+                        &mut state,
+                        diagnostics,
+                    );
+                } else {
+                    // Interpolation can change what an escaped character would bind to, but
+                    // character-class and comment state still continue across boundaries.
+                    state.escaped = false;
+                }
+            }
         }
     }
 }
 
-/// Skip a character class starting at `bytes[pos]` == b'['.
-/// Returns the position after the closing `]`.
-/// Handles nested character classes `[a[b]]` and POSIX classes `[[:alpha:]]`.
-fn skip_char_class(bytes: &[u8], start: usize) -> usize {
-    let len = bytes.len();
-    let mut i = start + 1; // past the opening [
-
-    // Handle ^ (negation)
-    if i < len && bytes[i] == b'^' {
-        i += 1;
-    }
-    // `]` as first char in class is literal
-    if i < len && bytes[i] == b']' {
-        i += 1;
-    }
-
-    while i < len {
-        if bytes[i] == b'\\' {
-            i += 2; // skip escaped char
-        } else if bytes[i] == b'[' {
-            // Nested character class or POSIX class — recurse
-            i = skip_char_class(bytes, i);
-        } else if bytes[i] == b']' {
-            return i + 1; // past the closing ]
-        } else {
-            i += 1;
-        }
-    }
-
-    i // unterminated class — return end
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CharClassState {
+    Start,
+    AfterCaret,
+    Normal,
 }
 
-fn find_unescaped_brackets(
+#[derive(Default)]
+struct RegexScanState {
+    escaped: bool,
+    in_comment: bool,
+    class_stack: Vec<CharClassState>,
+    saw_token: bool,
+}
+
+fn is_extended_regex(closing_loc: &[u8]) -> bool {
+    closing_loc.contains(&b'x')
+}
+
+fn scan_regex_segment(
     cop: &UnescapedBracketInRegexp,
     source: &SourceFile,
-    content: &str,
+    content: &[u8],
     content_start: usize,
-) -> Vec<Diagnostic> {
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut diagnostics = Vec::new();
-    let mut is_first_char = true;
-
-    while i < len {
-        if bytes[i] == b'\\' {
-            i += 2; // skip escaped char
-            is_first_char = false;
+    extended: bool,
+    state: &mut RegexScanState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (i, byte) in content.iter().copied().enumerate() {
+        if state.in_comment {
+            if byte == b'\n' {
+                state.in_comment = false;
+            }
             continue;
         }
 
-        // Skip character classes `[...]`, including nested classes and POSIX classes
-        if bytes[i] == b'[' {
-            is_first_char = false;
-            i = skip_char_class(bytes, i);
+        if state.escaped {
+            state.escaped = false;
+            if let Some(top) = state.class_stack.last_mut() {
+                *top = CharClassState::Normal;
+            } else {
+                state.saw_token = true;
+            }
             continue;
         }
 
-        if bytes[i] == b']' {
-            // `]` as the very first character of the regexp is not an offense
-            // (Ruby doesn't warn about it)
-            if !is_first_char {
-                let offset = content_start + i;
-                let (line, column) = source.offset_to_line_col(offset);
-                diagnostics.push(cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Regular expression has `]` without escape.".to_string(),
-                ));
+        if let Some(top) = state.class_stack.last_mut() {
+            match byte {
+                b'\\' => {
+                    state.escaped = true;
+                    *top = CharClassState::Normal;
+                }
+                b'[' => {
+                    *top = CharClassState::Normal;
+                    state.class_stack.push(CharClassState::Start);
+                }
+                b']' => match *top {
+                    CharClassState::Start | CharClassState::AfterCaret => {
+                        *top = CharClassState::Normal;
+                    }
+                    CharClassState::Normal => {
+                        state.class_stack.pop();
+                    }
+                },
+                b'^' if *top == CharClassState::Start => {
+                    *top = CharClassState::AfterCaret;
+                }
+                _ => {
+                    *top = CharClassState::Normal;
+                }
+            }
+            continue;
+        }
+
+        if extended {
+            match byte {
+                b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => continue,
+                b'#' => {
+                    state.in_comment = true;
+                    continue;
+                }
+                _ => {}
             }
         }
 
-        is_first_char = false;
-        i += 1;
+        match byte {
+            b'\\' => {
+                state.escaped = true;
+                state.saw_token = true;
+            }
+            b'[' => {
+                state.class_stack.push(CharClassState::Start);
+                state.saw_token = true;
+            }
+            b']' => {
+                if state.saw_token {
+                    let offset = content_start + i;
+                    let (line, column) = source.offset_to_line_col(offset);
+                    diagnostics.push(cop.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Regular expression has `]` without escape.".to_string(),
+                    ));
+                }
+                state.saw_token = true;
+            }
+            _ => {
+                state.saw_token = true;
+            }
+        }
     }
-
-    diagnostics
 }
 
 #[cfg(test)]
