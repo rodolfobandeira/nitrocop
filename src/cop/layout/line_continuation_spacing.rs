@@ -3,6 +3,15 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-08):
+/// 6 FPs in samg__timetrap (DelimScanner.rb), all from `"text"\` pattern where
+/// a closing string delimiter is immediately followed by a backslash line
+/// continuation with no space. RuboCop ignores these because the Parser gem
+/// parses `"text" \<newline> "more"` as a single dstr node whose expression
+/// range spans both lines (encompassing the backslash). In Prism the strings
+/// are separate nodes, so the backslash is classified as code. Fix: skip
+/// offenses when the non-whitespace character before `\` is a closing string
+/// delimiter (`"` or `'`) that is inside a string range per the CodeMap.
 pub struct LineContinuationSpacing;
 
 impl Cop for LineContinuationSpacing {
@@ -53,6 +62,27 @@ impl Cop for LineContinuationSpacing {
             let backslash_offset = line_starts[i] + backslash_pos;
             if !code_map.is_code(backslash_offset) {
                 continue;
+            }
+
+            // Skip backslash line continuations immediately after a closing string
+            // delimiter (e.g., "text"\). RuboCop ignores these because the AST
+            // represents implicit string concatenation as a dstr node whose
+            // expression range spans both lines, encompassing the backslash.
+            if backslash_pos > 0 {
+                // Find the last non-whitespace character before the backslash
+                let mut check_pos = backslash_pos - 1;
+                while check_pos > 0
+                    && (trimmed_end[check_pos] == b' ' || trimmed_end[check_pos] == b'\t')
+                {
+                    check_pos -= 1;
+                }
+                let before_char = trimmed_end[check_pos];
+                if before_char == b'"' || before_char == b'\'' {
+                    let char_offset = line_starts[i] + check_pos;
+                    if !code_map.is_code(char_offset) {
+                        continue;
+                    }
+                }
             }
 
             match style {
