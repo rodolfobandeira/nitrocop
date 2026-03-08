@@ -23,3 +23,8 @@ all.delete_all
 all.destroy_all
 User.all()
 User.all().do_something
+all.where(active: true)
+all.order(:name)
+all.first
+all.find_by(name: name)
+all.includes(:articles)

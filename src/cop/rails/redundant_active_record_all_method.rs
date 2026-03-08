@@ -13,13 +13,18 @@ use crate::parse::source::SourceFile;
 /// 1. **FN=194**: The method list (`REDUNDANT_AFTER_ALL`) had only 18 methods vs vendor's
 ///    100+ from `ActiveRecord::Querying::QUERYING_METHODS`. Expanded to match vendor.
 ///
-/// 2. **FP=419**: Multiple causes:
+/// 2. **FP=419→24→0**: Multiple causes fixed in stages:
 ///    - Offense location was reported at the outer call node (full chain start) instead
 ///      of at the `all` method name position. Fixed to use `inner_call.message_loc()`.
 ///    - Message included extra "Remove `all` from the chain." text not in vendor.
 ///    - Missing check to skip `all` called with arguments (e.g., `page.all(:param)`).
 ///    - Missing `sensitive_association_method?` logic: `delete_all`/`destroy_all` should
 ///      only be flagged when receiver of `all` is a constant (model), not an association.
+///    - **Remaining 24 FPs**: Bare `all` calls without a receiver in non-AR classes,
+///      modules, and concerns (e.g., ActiveGraph nodes, ActiveHash, Mongoid, Sidekiq).
+///      RuboCop uses `inherit_active_record_base?` to check class hierarchy for no-receiver
+///      cases. Since nitrocop lacks class-hierarchy analysis, we skip all no-receiver `all`
+///      calls. This is conservative but eliminates FPs with zero FN impact (corpus FN=0).
 pub struct RedundantActiveRecordAllMethod;
 
 /// ActiveRecord::Querying::QUERYING_METHODS (from activerecord 7.1.0)
@@ -178,6 +183,16 @@ impl Cop for RedundantActiveRecordAllMethod {
         // Skip if `all` is called with arguments (e.g., `page.all(:parameter)`)
         // — that's not ActiveRecord's `all`.
         if chain.inner_call.arguments().is_some() {
+            return;
+        }
+
+        // Skip if `all` has no receiver (bare `all.where(...)` call).
+        // RuboCop only flags no-receiver `all` inside classes inheriting from
+        // ActiveRecord::Base (via `inherit_active_record_base?`). Since nitrocop
+        // cannot perform class-hierarchy analysis, we conservatively skip all
+        // no-receiver cases to avoid false positives on non-AR classes, modules,
+        // and concerns that define their own `all` method.
+        if chain.inner_call.receiver().is_none() {
             return;
         }
 
