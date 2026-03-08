@@ -3,6 +3,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=918, FN=0.
+///
+/// FP=918 root cause: Prism represents both `!expr` and `not expr` as call nodes
+/// with method name `"!"`. The previous implementation keyed only on call name and
+/// receiver gap, so it flagged `not` keyword usage as if it were `! expr`.
+///
+/// Fix: require the operator token in source to be the literal `!` before checking
+/// spacing. This preserves offenses for `! expr` and ignores `not expr`.
+///
+/// Remaining gap: none identified from this corpus slice; per-cop gate validates.
 pub struct SpaceAfterNot;
 
 impl Cop for SpaceAfterNot {
@@ -40,12 +52,16 @@ impl Cop for SpaceAfterNot {
             Some(loc) => loc,
             None => return,
         };
+        let bang_start = bang_loc.start_offset();
         let bang_end = bang_loc.end_offset();
+        if source.as_bytes().get(bang_start..bang_end) != Some(b"!") {
+            return;
+        }
         let recv_start = call.receiver().unwrap().location().start_offset();
         if recv_start > bang_end {
             let between = &source.as_bytes()[bang_end..recv_start];
-            if between.iter().any(|&b| b == b' ' || b == b'\t') {
-                let (line, column) = source.offset_to_line_col(bang_loc.start_offset());
+            if between.iter().any(|b| b.is_ascii_whitespace()) {
+                let (line, column) = source.offset_to_line_col(bang_start);
                 let mut diag = self.diagnostic(
                     source,
                     line,

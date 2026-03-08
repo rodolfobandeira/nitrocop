@@ -4,3 +4,7 @@ z = !foo.bar?
 a = !nil
 b = !true
 c = !!value
+
+if not ready and not done
+  process
+end
