@@ -1,10 +1,13 @@
-use crate::cop::node_type::{
-    CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, INTERPOLATED_STRING_NODE, STRING_NODE,
-};
+use crate::cop::node_type::{CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus conformance fix: RuboCop's NodePattern for format/sprintf is
+/// `(send nil? :format _ _ ...)` — the `nil?` means it only matches bare calls
+/// with no receiver. Previously nitrocop also matched `Kernel.format(...)` and
+/// `Kernel.sprintf(...)` via `is_kernel_constant()`, causing 13 FPs in jruby and
+/// natalie corpus repos. Fixed by requiring `receiver().is_none()` for format/sprintf.
 pub struct FormatString;
 
 impl Cop for FormatString {
@@ -13,13 +16,7 @@ impl Cop for FormatString {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            CALL_NODE,
-            CONSTANT_PATH_NODE,
-            CONSTANT_READ_NODE,
-            INTERPOLATED_STRING_NODE,
-            STRING_NODE,
-        ]
+        &[CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE]
     }
 
     fn check_node(
@@ -88,13 +85,11 @@ impl Cop for FormatString {
                 if style == "format" {
                     return;
                 }
-                // Only flag top-level or Kernel.format / ::Kernel.format
-                if let Some(recv) = call.receiver() {
-                    if !is_kernel_constant(&recv) {
-                        return;
-                    }
+                // RuboCop pattern: (send nil? :format _ _ ...) — only bare calls
+                if call.receiver().is_some() {
+                    return;
                 }
-                // RuboCop requires at least 2 arguments: (send nil? :format _ _ ...)
+                // RuboCop requires at least 2 arguments
                 let arg_count = call
                     .arguments()
                     .map(|a| a.arguments().iter().count())
@@ -122,13 +117,11 @@ impl Cop for FormatString {
                 if style == "sprintf" {
                     return;
                 }
-                // Only flag top-level or Kernel.sprintf / ::Kernel.sprintf
-                if let Some(recv) = call.receiver() {
-                    if !is_kernel_constant(&recv) {
-                        return;
-                    }
+                // RuboCop pattern: (send nil? :sprintf _ _ ...) — only bare calls
+                if call.receiver().is_some() {
+                    return;
                 }
-                // RuboCop requires at least 2 arguments: (send nil? :sprintf _ _ ...)
+                // RuboCop requires at least 2 arguments
                 let arg_count = call
                     .arguments()
                     .map(|a| a.arguments().iter().count())
@@ -155,22 +148,6 @@ impl Cop for FormatString {
             _ => {}
         }
     }
-}
-
-/// Check if a node is the `Kernel` constant (simple or qualified via constant_path_node).
-fn is_kernel_constant(node: &ruby_prism::Node<'_>) -> bool {
-    if node
-        .as_constant_read_node()
-        .is_some_and(|c| c.name().as_slice() == b"Kernel")
-    {
-        return true;
-    }
-    if let Some(cp) = node.as_constant_path_node() {
-        if cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"Kernel") {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
