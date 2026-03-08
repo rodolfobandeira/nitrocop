@@ -44,4 +44,7 @@ Gem::Specification.new do |spec|
   # Version inside || fallback is not a direct str arg
   spec.add_dependency 'http', ENV['HTTP_VERSION'] || '>= 1.10.0'
        ^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
+  # Version-like string in comparison before ternary is not a version arg
+  spec.add_dependency 'nokogiri', RUBY_VERSION < '2.1.0' ? '~> 1.6.0' : '~> 1'
+       ^^^^^^^^^^^^^^ Gemspec/DependencyVersion: Dependency version is required.
 end

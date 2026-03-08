@@ -54,9 +54,15 @@ use crate::parse::source::SourceFile;
 ///
 /// Result: FP=0, FN≈53. Of these, ~52 are file-discovery issues (gemspecs under
 /// vendor/cache/ or vendor/gems/ paths not scanned by the local corpus runner).
-/// Only 1 remaining cop-logic FN: `RUBY_VERSION < '2.1.0' ? ...` where `'2.1.0'`
-/// in the comparison matches as a version-like string before the ternary operator.
-/// This is indistinguishable from a real version arg without AST parsing.
+///
+/// ## Corpus investigation (2026-03-07)
+///
+/// Corpus oracle reported FP=0, FN=1.
+///
+/// FN=1: Fixed by detecting comparison operators (`<`, `>`, `=`) before string
+/// literals and skipping them. The pattern `RUBY_VERSION < '2.1.0' ? ...` had
+/// `'2.1.0'` falsely matching as a version arg. The `preceded_by_comparison_op`
+/// check now skips strings preceded by comparison operators.
 pub struct DependencyVersion;
 
 const DEP_METHODS: &[&str] = &[
@@ -281,7 +287,12 @@ fn has_any_version_string(s: &str) -> bool {
                 }
                 if end < bytes.len() {
                     // Only consider strings that are direct args (not inside brackets or nested parens)
-                    if bracket_depth == 0 && paren_depth == 0 {
+                    // Also skip strings preceded by comparison operators (<, >, =) — these are
+                    // comparison operands (e.g., `RUBY_VERSION < '2.1.0'`), not method arguments.
+                    if bracket_depth == 0
+                        && paren_depth == 0
+                        && !preceded_by_comparison_op(bytes, pos)
+                    {
                         let content = &s[start..end];
                         if is_version_content(content) {
                             return true;
@@ -346,6 +357,22 @@ fn truncate_at_statement_modifier(s: &str) -> &str {
         }
     }
     s
+}
+
+/// Check if the character immediately before position `pos` (skipping whitespace)
+/// is a Ruby comparison operator (`<`, `>`, `=`). This detects strings that are
+/// operands in comparison expressions (e.g., `RUBY_VERSION < '2.1.0'`) rather than
+/// direct method arguments.
+fn preceded_by_comparison_op(bytes: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    // Skip whitespace backwards
+    while i > 0 && bytes[i - 1] == b' ' {
+        i -= 1;
+    }
+    if i == 0 {
+        return false;
+    }
+    matches!(bytes[i - 1], b'<' | b'>' | b'=')
 }
 
 /// Strip trailing Ruby comments from a line, respecting quoted strings.
@@ -577,6 +604,19 @@ mod tests {
         assert!(!has_any_version_string(
             "\"support\", RUBY_ENGINE == \"jruby\" ? \"~> 7.0.0\" : \"~> 8.1\""
         ));
+    }
+
+    #[test]
+    fn version_in_comparison_not_counted() {
+        // Version-like string as comparison operand — not a version arg
+        assert!(!has_any_version_string(
+            "'nokogiri', RUBY_VERSION < '2.1.0' ? '~> 1.6.0' : '~> 1'"
+        ));
+        assert!(!has_any_version_string(
+            "'foo', RUBY_VERSION >= '3.0.0' ? '~> 2.0' : '~> 1.0'"
+        ));
+        // But a real version arg after comma should still be detected
+        assert!(has_any_version_string("'bar', '~> 1.0'"));
     }
 
     #[test]
