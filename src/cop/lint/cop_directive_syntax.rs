@@ -3,6 +3,25 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// Checks that `# rubocop:` directives are strictly formatted.
+///
+/// ## Investigation findings (2026-03-08)
+///
+/// **Root cause of 277 FPs:** Two bugs:
+///
+/// 1. **Space after colon** (`# rubocop: disable`): RuboCop's `DIRECTIVE_MARKER_REGEXP` uses
+///    `#\s*rubocop\s*:\s*` which allows optional whitespace around the colon. Our code
+///    used `strip_prefix("rubocop:")` and then extracted the mode from `after_rubocop_colon`
+///    without trimming leading whitespace. When `after_rubocop_colon` was `" disable ..."`,
+///    `mode_end` was 0 (first char is space), making `mode` an empty string that didn't
+///    match any valid mode. Fixed by trimming `after_rubocop_colon` before mode extraction.
+///
+/// 2. **push/pop without cop names**: RuboCop's `missing_cop_name?` explicitly returns false
+///    for push/pop modes. Our code flagged them as "missing cop name". Fixed by skipping
+///    the cop name check for push/pop modes.
+///
+/// Also added support for `rubocop\s*:` (space before colon) to match RuboCop's regex,
+/// though this is extremely rare in practice.
 pub struct CopDirectiveSyntax;
 
 impl Cop for CopDirectiveSyntax {
@@ -55,9 +74,12 @@ impl Cop for CopDirectiveSyntax {
             let after_hash = directive_text[1..].trim_start();
 
             // Must start with `rubocop:` (not `"rubocop:` or `# rubocop:`)
-            if let Some(after_rubocop_colon) = after_hash.strip_prefix("rubocop:") {
+            if let Some(after_rubocop_colon) = strip_rubocop_prefix(after_hash) {
+                // Trim leading whitespace (RuboCop allows `# rubocop: disable` with space after colon)
+                let after_rubocop_colon = after_rubocop_colon.trim_start();
+
                 // Check if mode name is missing
-                if after_rubocop_colon.is_empty() || after_rubocop_colon.trim().is_empty() {
+                if after_rubocop_colon.is_empty() {
                     diagnostics.push(
                         self.diagnostic(
                             source,
@@ -86,15 +108,18 @@ impl Cop for CopDirectiveSyntax {
                         // After the mode, extract the rest (cop names + optional comment)
                         let after_mode = &after_rubocop_colon[mode_end..].trim_start();
 
-                        // Check if cop name is missing
-                        if after_mode.is_empty() {
+                        // push/pop without cop names is valid (RuboCop allows bare push/pop)
+                        let is_push_pop = matches!(mode, "push" | "pop");
+
+                        // Check if cop name is missing (except for push/pop)
+                        if after_mode.is_empty() && !is_push_pop {
                             diagnostics.push(self.diagnostic(
                                 source,
                                 i + 1,
                                 hash_pos,
                                 "Malformed directive comment detected. The cop name is missing.".to_string(),
                             ));
-                        } else if is_malformed_cop_list(after_mode) {
+                        } else if !after_mode.is_empty() && is_malformed_cop_list(after_mode) {
                             diagnostics.push(self.diagnostic(
                                 source,
                                 i + 1,
@@ -125,7 +150,7 @@ fn find_directive_start(line: &str) -> Option<usize> {
 
         let after_hash = &rest[hash_pos + 1..].trim_start();
 
-        if after_hash.starts_with("rubocop:") {
+        if strip_rubocop_prefix(after_hash).is_some() {
             // Check it's not a commented-out directive (another # before this one on the same effective comment)
             // If there's a `#` before this position in a comment context, skip
             let before = &line[..abs_pos];
@@ -157,6 +182,16 @@ fn find_directive_start(line: &str) -> Option<usize> {
 
         search_from = abs_pos + 1;
     }
+}
+
+/// Strip the `rubocop:` prefix from a string, allowing optional whitespace before the colon.
+/// This matches RuboCop's `DIRECTIVE_MARKER_REGEXP` which uses `rubocop\s*:\s*`.
+/// Returns the remainder after `rubocop:` (may have leading whitespace).
+fn strip_rubocop_prefix(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("rubocop")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':')?;
+    Some(rest)
 }
 
 /// Check if the cop list portion is malformed.

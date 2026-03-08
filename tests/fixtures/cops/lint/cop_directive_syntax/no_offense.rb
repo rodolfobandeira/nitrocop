@@ -9,6 +9,18 @@
 # rubocop:disable Layout/LineLength -- This is a good comment.
 a = 1 # rubocop:disable Layout/LineLength -- This is a good comment.
 
+# Space after colon is valid (rubocop allows optional whitespace around colon)
+# rubocop: disable Layout/LineLength
+# rubocop: enable Layout/LineLength
+# rubocop: disable Layout/LineLength, Style/Encoding
+# rubocop: todo Layout/LineLength
+# rubocop: disable all
+a = 1 # rubocop: disable Layout/LineLength -- comment here
+
+# push/pop without cop names is valid
+# rubocop:push
+# rubocop:pop
+
 # Directives inside heredocs should not be detected
 code = <<~RUBY
   # rubocop:
