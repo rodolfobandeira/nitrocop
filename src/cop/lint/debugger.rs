@@ -6,6 +6,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-07):
+/// - 3 FPs from seeing_is_believing where `debugger` was used as a variable/method name
+///   on RHS of assignment (`x = debugger`) or as keyword arg value (`debugger: debugger`).
+/// - Fix: added `=` and `:` to the previous-byte check in `is_assumed_usage_context()`.
 pub struct Debugger;
 
 /// Default debugger methods when no config is provided.
@@ -92,7 +96,7 @@ fn is_assumed_usage_context(call: &ruby_prism::CallNode<'_>, source_bytes: &[u8]
     // list or array literal, not a standalone statement.
     let start = call.location().start_offset();
     if let Some(prev) = prev_non_space(source_bytes, start) {
-        if prev == b'(' || prev == b',' || prev == b'[' {
+        if prev == b'(' || prev == b',' || prev == b'[' || prev == b'=' || prev == b':' {
             return true;
         }
     }

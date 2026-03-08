@@ -22,3 +22,8 @@ code.pry
 code.remote_byebug
 code.irb
 code.save_and_open_page
+# debugger on RHS of assignment (not a standalone debugger call)
+x = debugger
+self.lib_options.debugger = debugger
+# debugger as keyword argument value
+invoke "1", debugger: debugger
