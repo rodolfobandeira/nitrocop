@@ -3,6 +3,21 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/Present cop — suggests using `present?` instead of `!blank?`, `unless blank?`,
+/// or `!nil? && !empty?`.
+///
+/// ## Investigation (2026-03-08)
+///
+/// **FP root cause (84 FP):** `check_unless_blank` flagged `unless foo.blank? ... else ... end`.
+/// RuboCop skips these when `Style/UnlessElse` is enabled (default), because the `unless/else`
+/// form should be rewritten by `Style/UnlessElse` first. Fix: skip when `else_clause` is present.
+///
+/// **FN root cause (19 FN):** `check_not_nil_and_not_empty` only matched `!foo.nil?` and bare
+/// `foo` on the left side. RuboCop's `exists_and_not_empty?` also matches:
+/// - `foo != nil && !foo.empty?` (inequality nil check)
+/// - `!!foo && !foo.empty?` (double negation)
+///
+/// Fix: added patterns 3 and 4 for these forms.
 pub struct Present;
 
 impl Cop for Present {
@@ -86,12 +101,20 @@ impl Cop for Present {
 
 impl Present {
     /// Check for `unless foo.blank?` pattern.
+    /// Skips `unless foo.blank? ... else ... end` — RuboCop defers to Style/UnlessElse for those.
     fn check_unless_blank(
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
     ) -> Option<Diagnostic> {
         let unless_node = node.as_unless_node()?;
+
+        // RuboCop skips unless/else when Style/UnlessElse is enabled (default).
+        // Conservative: always skip when else clause is present.
+        if unless_node.else_clause().is_some() {
+            return None;
+        }
+
         // Predicate should be `foo.blank?`
         let predicate = unless_node.predicate();
         let pred_call = predicate.as_call_node()?;
@@ -160,6 +183,46 @@ impl Present {
                 let right_recv_src =
                     &source.as_bytes()[rr.location().start_offset()..rr.location().end_offset()];
                 left_src == right_recv_src
+            } else {
+                false
+            }
+        };
+
+        // Pattern 3: Left is foo != nil (inequality nil check)
+        let matches = matches || {
+            if let Some(left_call) = left.as_call_node() {
+                if left_call.name().as_slice() == b"!=" {
+                    if let Some(args) = left_call.arguments() {
+                        let arg_list = args.arguments();
+                        arg_list.len() == 1
+                            && arg_list.first().is_some_and(|a| a.as_nil_node().is_some())
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        // Pattern 4: Left is !!foo (double negation)
+        let matches = matches || {
+            if let Some(outer_not) = left.as_call_node() {
+                if outer_not.name().as_slice() == b"!" {
+                    if let Some(inner) = outer_not.receiver() {
+                        if let Some(inner_not) = inner.as_call_node() {
+                            inner_not.name().as_slice() == b"!"
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             } else {
                 false
             }

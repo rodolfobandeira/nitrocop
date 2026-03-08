@@ -15,3 +15,12 @@ data && !data.empty?
 
 obj.value && !obj.value.empty?
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Present: Use `present?` instead of `!nil? && !empty?`.
+
+foo != nil && !foo.empty?
+^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Present: Use `present?` instead of `!nil? && !empty?`.
+
+record != nil && !record.empty?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Present: Use `present?` instead of `!nil? && !empty?`.
+
+!!foo && !foo.empty?
+^^^^^^^^^^^^^^^^^^^^ Rails/Present: Use `present?` instead of `!nil? && !empty?`.
