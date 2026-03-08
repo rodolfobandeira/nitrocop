@@ -1,9 +1,14 @@
 use crate::cop::node_type::CALL_NODE;
-use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-07)
+///
+/// FP=13, FN=0. All FPs from `Pagy::I18n.translate(...)` — a qualified constant path.
+/// `util::constant_name` returns the last segment, so `Pagy::I18n` matched `I18n`.
+/// RuboCop's pattern is `(const {nil? cbase} :I18n)` — only unqualified `I18n` or `::I18n`.
+/// Fixed by checking ConstantReadNode/ConstantPathNode directly instead of constant_name.
 pub struct ShortI18n;
 
 impl Cop for ShortI18n {
@@ -46,9 +51,21 @@ impl Cop for ShortI18n {
 
         match call.receiver() {
             Some(recv) => {
-                // Receiver must be I18n
-                // Handle both ConstantReadNode (I18n) and ConstantPathNode (::I18n)
-                if util::constant_name(&recv) != Some(b"I18n") {
+                // Receiver must be unqualified I18n or root-qualified ::I18n.
+                // RuboCop: (const {nil? cbase} :I18n) — NOT Pagy::I18n etc.
+                if let Some(cr) = recv.as_constant_read_node() {
+                    if cr.name().as_slice() != b"I18n" {
+                        return;
+                    }
+                } else if let Some(cp) = recv.as_constant_path_node() {
+                    // ::I18n — parent must be None (cbase) and name must be I18n
+                    if cp.parent().is_some() {
+                        return;
+                    }
+                    if cp.name().map(|n| n.as_slice()) != Some(b"I18n") {
+                        return;
+                    }
+                } else {
                     return;
                 }
             }
