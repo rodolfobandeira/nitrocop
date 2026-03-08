@@ -15,3 +15,14 @@ name.nil? || name.empty?
 
 foo == nil || foo.empty?
 ^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `foo.blank?` instead of `foo == nil || foo.empty?`.
+
+something unless foo.present?
+          ^^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `if foo.blank?` instead of `unless foo.present?`.
+
+something unless present?
+          ^^^^^^^^^^^^^^^ Rails/Blank: Use `if blank?` instead of `unless present?`.
+
+unless foo.present?
+^^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `if foo.blank?` instead of `unless foo.present?`.
+  something
+end

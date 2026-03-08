@@ -6,3 +6,13 @@ name.present? && name.length > 0
 x.nil? || y.empty?
 x.nil? && x.empty?
 x.nil? || x.zero?
+something if foo.present?
+something unless foo.blank?
+def blank?
+  !present?
+end
+unless foo.present?
+  something
+else
+  something_else
+end
