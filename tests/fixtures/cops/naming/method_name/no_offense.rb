@@ -49,3 +49,39 @@ module Foo
     new(*args)
   end
 end
+
+# attr_reader with snake_case is fine
+attr_reader :my_method
+attr_accessor :my_method
+attr_writer :my_method
+
+# define_method with snake_case is fine
+define_method :foo_bar do
+end
+
+# define_method with operator is fine
+define_method :== do
+end
+
+define_method :[] do
+end
+
+# define_method without arguments is fine
+define_method do
+end
+
+# define_method with variable (not literal) is fine
+define_method foo do
+end
+
+# alias with snake_case is fine
+alias foo_bar baz
+
+# alias_method with snake_case is fine
+alias_method :foo_bar, :baz
+
+# alias_method with non-symbol first arg is fine
+alias_method foo, :bar
+
+# alias_method with wrong arity is fine
+alias_method :fooBar, :bar, :baz
