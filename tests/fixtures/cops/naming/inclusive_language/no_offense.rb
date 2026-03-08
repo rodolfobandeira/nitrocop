@@ -35,6 +35,20 @@ NAMES = %w[
 blacklisted?
 whitelist!
 _makara_blacklist!
+# tFID tokens in method definitions are also not checked (tFID, not tIDENTIFIER)
+def self.blacklisted?(type_name); end
+def self.whitelisted?(url); end
+def self.is_blacklisted?(value); end
+def whitelisted?
+  true
+end
+def blacklisted?
+  false
+end
+# Quoted symbols are treated as string content by RuboCop's parser (tSTRING_CONTENT)
+# so they follow CheckStrings (false by default), not CheckSymbols
+x = :"errors.messages.content_type_whitelist_error"
+y = :'content_type_blacklist_error'
 validate_config(
   whitelisted_emails: [],
   blacklisted_domains: [],

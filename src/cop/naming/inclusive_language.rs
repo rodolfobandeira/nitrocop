@@ -23,6 +23,25 @@ use crate::parse::source::SourceFile;
 /// This implementation now uses parse-derived symbol ranges to distinguish real
 /// symbol literals from string content, and keeps `?`/`!` skipping only for
 /// non-definition contexts.
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=12, FN=0.
+///
+/// **Root cause 1 (6 FPs): fid_token exception too narrow.**
+/// `should_flag_code_token` skipped tFID tokens (identifiers ending in `?`/`!`)
+/// only when NOT in a method definition. But RuboCop's `preprocess_check_config`
+/// does not include `tFID` at all — ALL tFID tokens are skipped regardless of
+/// context (method defs, standalone calls, etc.). Fixed by removing the
+/// `!is_method_definition_name` exception.
+///
+/// **Root cause 2 (6 FPs): quoted symbols treated as CheckSymbols.**
+/// Symbols like `:"errors.messages.content_type_whitelist_error"` have their
+/// content tokenized as `tSTRING_CONTENT` in RuboCop's parser gem, so they
+/// follow `CheckStrings` (false by default). nitrocop's `collect_symbol_ranges`
+/// was including all symbols with `:` opening, including quoted forms `:"..."`
+/// and `:'...'`. Fixed by excluding quoted symbols from symbol ranges — only
+/// bare symbols (`:foo`) are now classified under CheckSymbols.
 pub struct InclusiveLanguage;
 
 /// Global cache of compiled flagged terms, keyed by CopConfig pointer.
@@ -402,9 +421,7 @@ fn should_flag_code_token(
     match_len: usize,
     should_check_code: bool,
 ) -> bool {
-    if is_hash_label(line, line_pos, match_len)
-        || (is_fid_token(line, line_pos) && !is_method_definition_name(line, line_pos))
-    {
+    if is_hash_label(line, line_pos, match_len) || is_fid_token(line, line_pos) {
         false
     } else {
         should_check_code
@@ -458,18 +475,6 @@ fn is_fid_token(line: &[u8], pos: usize) -> bool {
     false
 }
 
-fn is_method_definition_name(line: &[u8], pos: usize) -> bool {
-    let mut start = pos;
-    while start > 0 && (line[start - 1].is_ascii_alphanumeric() || line[start - 1] == b'_') {
-        start -= 1;
-    }
-
-    let prefix = std::str::from_utf8(&line[..start])
-        .unwrap_or("")
-        .trim_start();
-    prefix.starts_with("def ")
-}
-
 fn collect_symbol_ranges(parse_result: &ruby_prism::ParseResult<'_>) -> Vec<(usize, usize)> {
     struct SymbolRangeCollector {
         ranges: Vec<(usize, usize)>,
@@ -477,12 +482,18 @@ fn collect_symbol_ranges(parse_result: &ruby_prism::ParseResult<'_>) -> Vec<(usi
 
     impl<'pr> Visit<'pr> for SymbolRangeCollector {
         fn visit_symbol_node(&mut self, node: &ruby_prism::SymbolNode<'pr>) {
-            if node
-                .opening_loc()
-                .is_some_and(|open| open.as_slice().starts_with(b":"))
-            {
-                let loc = node.location();
-                self.ranges.push((loc.start_offset(), loc.end_offset()));
+            if let Some(open) = node.opening_loc() {
+                let slice = open.as_slice();
+                // Only include bare symbols (`:foo`), not quoted symbols (`:"foo"`, `:'foo'`).
+                // RuboCop's parser tokenizes quoted symbol content as tSTRING_CONTENT,
+                // which follows CheckStrings (false by default), not CheckSymbols.
+                if slice.starts_with(b":")
+                    && !slice.starts_with(b":\"")
+                    && !slice.starts_with(b":'")
+                {
+                    let loc = node.location();
+                    self.ranges.push((loc.start_offset(), loc.end_offset()));
+                }
             }
         }
 
@@ -490,12 +501,16 @@ fn collect_symbol_ranges(parse_result: &ruby_prism::ParseResult<'_>) -> Vec<(usi
             &mut self,
             node: &ruby_prism::InterpolatedSymbolNode<'pr>,
         ) {
-            if node
-                .opening_loc()
-                .is_some_and(|open| open.as_slice().starts_with(b":"))
-            {
-                let loc = node.location();
-                self.ranges.push((loc.start_offset(), loc.end_offset()));
+            if let Some(open) = node.opening_loc() {
+                let slice = open.as_slice();
+                // Same logic: skip quoted symbols (`:"..."` uses tSTRING_CONTENT in parser gem)
+                if slice.starts_with(b":")
+                    && !slice.starts_with(b":\"")
+                    && !slice.starts_with(b":'")
+                {
+                    let loc = node.location();
+                    self.ranges.push((loc.start_offset(), loc.end_offset()));
+                }
             }
             ruby_prism::visit_interpolated_symbol_node(self, node);
         }

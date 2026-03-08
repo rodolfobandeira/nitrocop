@@ -14,16 +14,6 @@ msg = "connected to #{slave_host}"
 config[:whitelist] = []
         ^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `whitelist`. Suggested alternatives: `allowlist`, `permit`.
 
-def whitelisted?
-    ^^^^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `whitelist`. Suggested alternatives: `allowlist`, `permit`.
-  true
-end
-
-def blacklisted?
-    ^^^^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `blacklist`. Suggested alternatives: `denylist`, `block`.
-  false
-end
-
 alias allowlist= whitelist=
                  ^^^^^^^^^ Naming/InclusiveLanguage: Use inclusive language instead of `whitelist`. Suggested alternatives: `allowlist`, `permit`.
 
