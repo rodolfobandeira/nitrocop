@@ -64,6 +64,28 @@ use crate::parse::source::SourceFile;
 /// The function `inner_content_end_line` recursively digs into CallNode blocks
 /// and StatementsNode wrappers to find the innermost content line, matching
 /// RuboCop's descendant-based line range.
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// FP=38, FN=151. Root cause: `inner_content_end_line` was recursively digging
+/// into ALL nested block bodies (including deeply nested ones), excluding their
+/// `end` keywords. But in Parser AST, `body.each_descendant` only excludes the
+/// root body node itself — nested block nodes ARE descendants whose `last_line`
+/// includes their `end` keywords.
+///
+/// Key Parser/Prism structural mismatch:
+/// - Parser single-statement: body = statement (block/send). `each_descendant`
+///   yields statement's children, excluding the statement itself.
+/// - Parser multi-statement: body = (begin stmts). `each_descendant` yields
+///   all children, including block nodes with their `end`.
+/// - Prism always wraps in StatementsNode, even for single statements.
+///
+/// Fix: `inner_content_end_line` now only unwraps one level of StatementsNode.
+/// For single-child bodies, `descendants_max_end_line` visits the child's
+/// immediate children (for CallNode with block: block body children; for
+/// CallNode without block: args end line). For multi-child bodies, uses
+/// `end_line_of` for each child. This includes nested block `end` keywords
+/// while excluding the outermost body, matching `each_descendant` semantics.
 pub struct MethodLength;
 
 /// Parsed config values for MethodLength.
@@ -479,14 +501,22 @@ fn max_descendant_end_line(source: &SourceFile, body: &ruby_prism::Node<'_>) -> 
     last_stmt_line.max(max_heredoc_line)
 }
 
-/// Get the max end line among body's inner content, matching RuboCop's
-/// `each_descendant` behavior where container `end` keywords are excluded.
+/// Get the max end line among body's descendants, matching RuboCop's
+/// `body.each_descendant` behavior for `source_from_node_with_heredoc`.
 ///
-/// RuboCop calls `body.each_descendant` which yields all descendants but
-/// NOT the body itself. For a block body like `in_tmpdir do...end`, the
-/// block's `end` keyword is only in the block node's source range. The
-/// descendants (send node, begin/statements body) have ranges that exclude
-/// the block `end`.
+/// In Parser AST, `extract_body` returns the method's body node.
+/// Single statement: body = the statement itself (block, send, etc.).
+/// Multiple statements: body = (begin stmt1 stmt2 ...).
+/// `body.each_descendant` yields all descendants but NOT body itself.
+///
+/// In Prism, body is always a StatementsNode (or BeginNode for rescue/ensure).
+/// We unwrap the body's StatementsNode to find the equivalent Parser body,
+/// then collect end_line_of for all its descendants.
+///
+/// This function does NOT recurse into nested blocks. It unwraps the body
+/// exactly once (matching Parser's body extraction) and then uses end_line_of
+/// for all children found. This ensures nested block `end` keywords are
+/// included (as they would be in Parser's `each_descendant`).
 fn inner_content_end_line(source: &SourceFile, body: &ruby_prism::Node<'_>) -> usize {
     let end_line_of = |node: &ruby_prism::Node<'_>| -> usize {
         let off = node
@@ -497,13 +527,18 @@ fn inner_content_end_line(source: &SourceFile, body: &ruby_prism::Node<'_>) -> u
         source.offset_to_line_col(off).0
     };
 
+    // Unwrap Prism's StatementsNode/BeginNode to find the equivalent Parser body.
+    // Then collect children of that body using end_line_of.
     if let Some(stmts) = body.as_statements_node() {
-        stmts
-            .body()
-            .iter()
-            .map(|n| inner_content_end_line(source, &n))
-            .max()
-            .unwrap_or(0)
+        let children: Vec<_> = stmts.body().iter().collect();
+        if children.len() == 1 {
+            // Single child: Parser would have body = this child.
+            // each_descendant yields children of THIS node, not the node itself.
+            return descendants_max_end_line(source, &children[0]);
+        }
+        // Multiple children: Parser would have body = (begin children...).
+        // each_descendant yields all children (they ARE descendants of begin).
+        children.iter().map(&end_line_of).max().unwrap_or(0)
     } else if let Some(begin) = body.as_begin_node() {
         let mut max = 0usize;
         if let Some(ensure_clause) = begin.ensure_clause() {
@@ -515,26 +550,78 @@ fn inner_content_end_line(source: &SourceFile, body: &ruby_prism::Node<'_>) -> u
             max = max.max(source.offset_to_line_col(off).0);
         }
         if let Some(stmts) = begin.statements() {
-            if let Some(last) = stmts.body().iter().last() {
-                max = max.max(end_line_of(&last));
-            }
-        }
-        max
-    } else if let Some(call) = body.as_call_node() {
-        // For a CallNode with block (e.g., `in_tmpdir do...end`), dig into
-        // the block body. RuboCop's each_descendant would yield the send,
-        // the block's begin/statements body, but NOT the block's `end`.
-        if let Some(block_wrapper) = call.block() {
-            if let Some(block) = block_wrapper.as_block_node() {
-                if let Some(inner_body) = block.body() {
-                    return inner_content_end_line(source, &inner_body);
+            let children: Vec<_> = stmts.body().iter().collect();
+            if children.len() == 1 {
+                max = max.max(descendants_max_end_line(source, &children[0]));
+            } else {
+                for child in &children {
+                    max = max.max(end_line_of(child));
                 }
             }
         }
-        end_line_of(body)
+        max
     } else {
-        end_line_of(body)
+        // Body is a single expression — get max of its descendants
+        descendants_max_end_line(source, body)
     }
+}
+
+/// Get the max end line among the descendants of a node, matching
+/// Parser's `node.each_descendant` behavior where the node itself is
+/// excluded. For a CallNode with block, the block corresponds to Parser's
+/// body, so we visit the block's body children (not the block itself).
+fn descendants_max_end_line(source: &SourceFile, node: &ruby_prism::Node<'_>) -> usize {
+    let end_line_of = |n: &ruby_prism::Node<'_>| -> usize {
+        let off = n
+            .location()
+            .end_offset()
+            .saturating_sub(1)
+            .max(n.location().start_offset());
+        source.offset_to_line_col(off).0
+    };
+
+    if let Some(call) = node.as_call_node() {
+        if let Some(block_wrapper) = call.block() {
+            if let Some(block) = block_wrapper.as_block_node() {
+                // In Parser, for a single-statement body that is a block call,
+                // body = block_node. `body.each_descendant` yields the block's
+                // children: send, args, and body. The block's `end` keyword is
+                // excluded (it's on the body node itself).
+                //
+                // In Prism, the block body is a StatementsNode. Its children
+                // are the block's inner statements. We use end_line_of for each
+                // child — nested blocks inside WILL include their `end` keywords
+                // (they are descendants, not the root body).
+                let mut max = 0usize;
+                // Include the send part (method name, receiver, args before block)
+                // which is on the opening line
+                let send_line = source.offset_to_line_col(call.location().start_offset()).0;
+                max = max.max(send_line);
+                if let Some(inner_body) = block.body() {
+                    if let Some(stmts) = inner_body.as_statements_node() {
+                        for child in stmts.body().iter() {
+                            max = max.max(end_line_of(&child));
+                        }
+                    } else {
+                        max = max.max(end_line_of(&inner_body));
+                    }
+                }
+                return max;
+            }
+        }
+        // CallNode without block: use args end line (not call's own `)`)
+        let mut max = 0usize;
+        if let Some(recv) = call.receiver() {
+            max = max.max(end_line_of(&recv));
+        }
+        if let Some(args) = call.arguments() {
+            max = max.max(end_line_of(&args.as_node()));
+        }
+        return max;
+    }
+
+    // For other node types, use their end line directly.
+    end_line_of(node)
 }
 
 fn is_single_heredoc_expression(source: &SourceFile, body: &ruby_prism::Node<'_>) -> bool {
@@ -820,6 +907,67 @@ mod tests {
         assert!(
             diags.is_empty(),
             "10 body lines with ensure should NOT fire (Max:10)"
+        );
+    }
+
+    #[test]
+    fn heredoc_multi_stmt_body_should_fire() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(5.into()))]),
+            ..CopConfig::default()
+        };
+        // Multi-statement body with heredoc: x = 1, then block call.
+        // In Parser, body = begin(lvasgn, block), each_descendant yields block
+        // whose last_line includes `end`. Prism must use child's full end line.
+        let source = b"def test_method\n  x = 1\n  with_checker do\n    parse_ruby(<<-EOF)\nfoo\n    EOF\n    do_something\n  end\nend\n";
+        // Lines: x=1(2), with_checker do(3), parse_ruby(4), foo(5), EOF(6), do_something(7), end(8)
+        // = 7 body lines > Max:5
+        let diags = run_cop_full_with_config(&MethodLength, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Multi-statement body with heredoc should fire (7 lines > Max:5)"
+        );
+    }
+
+    #[test]
+    fn heredoc_single_block_call_should_fire() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(10.into()))]),
+            ..CopConfig::default()
+        };
+        // Single-statement body: one block call wrapping heredoc and multiple stmts.
+        // Matches steep test pattern. RuboCop: body = block, each_descendant yields
+        // block's inner stmts. Inner block `end` keywords ARE included as descendants.
+        let source = b"def test_method\n  with_checker do |checker|\n    source = parse_ruby(<<-EOF)\nfoo\nbar\n    EOF\n    with_construction(checker, source) do |c, t|\n      c.synthesize(source.node)\n      assert_equal 2, t.errors.size\n      assert_all t.errors do |error|\n        error.is_a?(SomeError)\n      end\n    end\n  end\nend\n";
+        // Body lines 2-14: with_checker(2), source=parse(3), foo(4), bar(5), EOF(6),
+        // with_construction(7), synthesize(8), assert_equal(9), assert_all(10),
+        // is_a(11), end(12), end(13), end(14). end_line computed = line of inner
+        // with_construction end (13). Non-blank lines 2-13 = 12. > Max:10 → fires.
+        let diags = run_cop_full_with_config(&MethodLength, source, config);
+        assert!(
+            !diags.is_empty(),
+            "Single block call body with heredoc should fire (>10 lines per RuboCop)"
+        );
+    }
+
+    #[test]
+    fn heredoc_call_without_block_no_fp() {
+        use crate::testutil::run_cop_full;
+        // Single call without block that has a heredoc argument. RuboCop uses
+        // source_from_node_with_heredoc, max descendant last_line excludes the
+        // call's own `)`. Only args contribute. 10 body lines → no offense.
+        let source = b"def test_method\n  assert_parse_only(\n    [\n      ['a', 'b', 'c'],\n      ['d', 'e', 'f'],\n      ['g', 'h', 'i']\n    ], <<EOY\nrow1\nrow2\nrow3\nEOY\n  )\nend\n";
+        // Lines: assert(2), [(3), a(4), d(5), g(6), ](7), <<EOY → heredoc(8-11=EOY).
+        // RuboCop max descendant = EOY on line 11. Range: 2-11 = 10 lines.
+        // Non-blank: 10 → no offense at Max:10.
+        let diags = run_cop_full(&MethodLength, source);
+        assert!(
+            diags.is_empty(),
+            "Call without block + heredoc: should not fire at 10 body lines (Max:10)"
         );
     }
 
