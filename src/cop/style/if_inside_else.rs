@@ -3,6 +3,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/IfInsideElse
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=23, FN=0.
+///
+/// FP=23: Fixed. The cop did not skip ternary outer nodes. In Prism, ternary
+/// `a ? b : c` is an `IfNode` with `if_keyword_loc() == None`. When the
+/// ternary's else branch contained a regular `if` expression (e.g.,
+/// `a ? b : if c then d end`), the cop would incorrectly flag it.
+/// RuboCop skips ternaries via `return if node.ternary?`. Fix: added an
+/// early return when the outer `IfNode` has no `if_keyword_loc`.
 pub struct IfInsideElse;
 
 impl Cop for IfInsideElse {
@@ -27,6 +39,12 @@ impl Cop for IfInsideElse {
             Some(n) => n,
             None => return,
         };
+
+        // Skip ternary expressions (a ? b : c) — RuboCop's `return if node.ternary?`
+        // In Prism, ternaries are IfNode with no if_keyword_loc.
+        if if_node.if_keyword_loc().is_none() {
+            return;
+        }
 
         let _allow_if_modifier = config.get_bool("AllowIfModifier", false);
 

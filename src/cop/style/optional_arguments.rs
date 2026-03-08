@@ -4,6 +4,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/OptionalArguments: flags optional args not at the end of the arg list.
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=23, FN=0.
+///
+/// FP=23: Fixed by skipping class methods (def self.xxx). RuboCop only defines
+/// `on_def` (not `on_defs`), so it never checks class methods. In Prism, both
+/// instance and class methods produce `DefNode` — class methods have a non-None
+/// `receiver()`. Fixed by skipping DefNodes with a receiver.
 pub struct OptionalArguments;
 
 impl Cop for OptionalArguments {
@@ -38,6 +48,17 @@ struct OptionalArgumentsVisitor<'a> {
 
 impl<'pr> Visit<'pr> for OptionalArgumentsVisitor<'_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        // RuboCop only defines on_def (not on_defs), so class methods like
+        // `def self.foo(a=1, b)` are not checked. In Prism, class methods
+        // have a receiver — skip those.
+        if node.receiver().is_some() {
+            // Still visit the body for nested defs
+            if let Some(body) = node.body() {
+                self.visit(&body);
+            }
+            return;
+        }
+
         if let Some(params) = node.parameters() {
             let optionals: Vec<_> = params.optionals().iter().collect();
             // Filter posts to only RequiredParameterNode — destructured params

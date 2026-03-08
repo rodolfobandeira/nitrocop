@@ -3,6 +3,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Flags `**receiver.merge(...)` patterns in keyword arguments, suggesting
+/// to provide additional keyword arguments directly.
+///
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=28, FN=0.
+///
+/// FP=28: Fixed. RuboCop's NodePattern requires the keyword hash to be the
+/// LAST child of the outer `send` node. When a `&block` argument follows the
+/// keyword splat (e.g., `foo(**opts.merge(k: v), &block)`), the `block_pass`
+/// child comes after the hash in the Parser AST, so the pattern does not match
+/// and RuboCop does not flag it. Fix: skip when the outer CallNode has a
+/// `block()` that is a `BlockArgumentNode`.
+///
+/// Affected repos: shoulda-matchers (12), capybara (7), trestle (4),
+/// hanami, vernier, natalie, omniauth, test-prof (1 each).
 pub struct KeywordArgumentsMerging;
 
 impl KeywordArgumentsMerging {
@@ -39,6 +55,16 @@ impl Cop for KeywordArgumentsMerging {
             Some(c) => c,
             None => return,
         };
+
+        // RuboCop's NodePattern requires the keyword hash to be the last
+        // child of the send node. When an explicit block argument (&block)
+        // follows the keyword hash, the block_pass child comes after the hash
+        // in the Parser AST, so the pattern does not match. Skip these cases.
+        if let Some(block) = call.block() {
+            if block.as_block_argument_node().is_some() {
+                return;
+            }
+        }
 
         let args = match call.arguments() {
             Some(a) => a,

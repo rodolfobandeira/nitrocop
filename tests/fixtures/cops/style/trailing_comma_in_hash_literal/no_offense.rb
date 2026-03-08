@@ -13,3 +13,23 @@
   'name' => 'hello'
   # No language, should default
 }
+
+# Heredoc value whose body contains a comma — not a trailing comma
+{
+  key: <<RUBY
+hello, world
+RUBY
+}
+
+# Heredoc in array value with comma in body
+{
+  key: [method(<<RUBY)]
+foo(a, b)
+RUBY
+}
+
+# Heredoc with delete(',') pattern — comma in string, not trailing
+{
+  foo: 'foo',
+  bar: 'bar'.delete(',')
+}
