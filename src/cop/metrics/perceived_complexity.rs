@@ -146,6 +146,9 @@ struct PerceivedCounter {
     /// RuboCop discounts repeated `&.` on the same variable — only the first counts.
     /// When the variable is reassigned, it is removed from the set (reset).
     seen_csend_vars: std::collections::HashSet<Vec<u8>>,
+    /// Set when visiting an InNode's pattern to suppress counting guard
+    /// IfNode/UnlessNode as separate decision points.
+    in_pattern_guard: bool,
 }
 
 impl PerceivedCounter {
@@ -153,27 +156,34 @@ impl PerceivedCounter {
         match node {
             // if with else (not elsif) counts as 2, otherwise 1
             // Ternary (x ? y : z) has no if_keyword_loc and counts as 1 (not 2).
+            // Skip when in_pattern_guard — Prism wraps `in :x if guard` as
+            // InNode(pattern=IfNode), and RuboCop's if_guard/unless_guard are not
+            // in COUNTED_NODES, so the guard should not count separately.
             ruby_prism::Node::IfNode { .. } => {
-                if let Some(if_node) = node.as_if_node() {
-                    let is_ternary = if_node.if_keyword_loc().is_none();
-                    if !is_ternary
-                        && if_node
-                            .subsequent()
-                            .is_some_and(|s| s.as_else_node().is_some())
-                    {
-                        self.complexity += 2;
-                    } else {
-                        self.complexity += 1;
+                if !self.in_pattern_guard {
+                    if let Some(if_node) = node.as_if_node() {
+                        let is_ternary = if_node.if_keyword_loc().is_none();
+                        if !is_ternary
+                            && if_node
+                                .subsequent()
+                                .is_some_and(|s| s.as_else_node().is_some())
+                        {
+                            self.complexity += 2;
+                        } else {
+                            self.complexity += 1;
+                        }
                     }
                 }
             }
             // unless is a separate node type in Prism
             ruby_prism::Node::UnlessNode { .. } => {
-                if let Some(unless_node) = node.as_unless_node() {
-                    if unless_node.else_clause().is_some() {
-                        self.complexity += 2;
-                    } else {
-                        self.complexity += 1;
+                if !self.in_pattern_guard {
+                    if let Some(unless_node) = node.as_unless_node() {
+                        if unless_node.else_clause().is_some() {
+                            self.complexity += 2;
+                        } else {
+                            self.complexity += 1;
+                        }
                     }
                 }
             }
@@ -183,10 +193,10 @@ impl PerceivedCounter {
             | ruby_prism::Node::ForNode { .. }
             | ruby_prism::Node::AndNode { .. }
             | ruby_prism::Node::OrNode { .. }
-            | ruby_prism::Node::InNode { .. }
             | ruby_prism::Node::RescueModifierNode { .. } => {
                 self.complexity += 1;
             }
+            // InNode is handled in visit_in_node to manage guard suppression.
             // Note: RescueNode is NOT counted here — it is handled in visit_rescue_node
             // to ensure it counts as a single decision point regardless of how many
             // rescue clauses exist (Prism chains them via `subsequent`).
@@ -303,6 +313,23 @@ impl<'pr> Visit<'pr> for PerceivedCounter {
 
     fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
         self.count_node(&node);
+    }
+
+    // InNode: count +1 for the `in` clause, then visit children with guard
+    // suppression. In Prism, `in :x if guard` wraps the pattern as IfNode
+    // inside InNode, which would be double-counted without suppression.
+    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
+        self.complexity += 1;
+        // Visit the pattern with guard suppression active so that any
+        // IfNode/UnlessNode guard is not counted as a separate decision point.
+        self.in_pattern_guard = true;
+        let pattern = node.pattern();
+        self.visit(&pattern);
+        self.in_pattern_guard = false;
+        // Visit the body normally
+        if let Some(stmts) = node.statements() {
+            self.visit(&stmts.as_node());
+        }
     }
 
     // When a local variable is reassigned, reset the csend tracking for it.

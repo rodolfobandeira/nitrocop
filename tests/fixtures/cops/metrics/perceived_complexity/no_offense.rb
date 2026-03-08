@@ -150,6 +150,23 @@ def method_with_non_iterating_each_line(data)
   end
 end
 
+# Pattern matching guards (in :x if guard) should NOT double-count.
+# The `in` clause counts as +1, but the `if` guard inside the InNode
+# pattern should be suppressed (RuboCop uses if_guard/unless_guard types
+# which are not in COUNTED_NODES).
+# Base 1 + 3 in-clauses = 4. Under Max:8.
+# If guards were counted: 1 + 3 in + 3 guards = 7 (still under but validates).
+def method_with_pattern_guard(value)
+  case value
+  in Integer if value > 0
+    :pos
+  in Integer if value < 0
+    :neg
+  in String unless value.empty?
+    :str
+  end
+end
+
 # case/in pattern matching should not double-count.
 # RuboCop counts each `in` branch as +1 individually (no CaseMatchNode formula).
 # With Max:8 (default), base 1 + 3 ifs + 3 in-branches = 7 <= 8.
