@@ -1,4 +1,6 @@
-use crate::cop::node_type::{INTERPOLATED_STRING_NODE, STRING_NODE};
+use crate::cop::node_type::{
+    INTERPOLATED_STRING_NODE, INTERPOLATED_X_STRING_NODE, STRING_NODE, X_STRING_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -13,8 +15,21 @@ use crate::parse::source::SourceFile;
 /// at large scale. This implementation now reports at `closing_loc()` and also
 /// handles non-word delimiters (for example `<<-'+'`) as offenses.
 ///
-/// Remaining gaps (if any after rerun) are expected to come from edge-case
-/// delimiter regex compatibility and not from opening-vs-closing location.
+/// ## Corpus investigation (2026-03-08)
+///
+/// Corpus oracle reported FP=162, FN=14.
+///
+/// FP=162: `is_word_delimiter()` required ALL chars to be word chars, but
+/// RuboCop's check is `/\w/.match?(delimiters)` which only requires at least
+/// ONE word character. Delimiters like `MY.SQL`, `END-BLOCK`, `my_template.html`
+/// were falsely flagged because they contain dots/hyphens. Fixed by changing to
+/// `contains_word_char()` which uses `.any()` instead of `.all()`.
+///
+/// FN=14: backtick heredocs (`<<~`CMD``) use `InterpolatedXStringNode` /
+/// `XStringNode` which were not handled. Added these node types.
+///
+/// Also fixed: plain string patterns in ForbiddenDelimiters (e.g., `END` without
+/// `/` delimiters) are now treated as regex via `Regexp.new()` matching RuboCop.
 pub struct HeredocDelimiterNaming;
 
 // Default forbidden patterns: EO followed by one uppercase letter, or END.
@@ -30,11 +45,15 @@ fn is_default_forbidden_delimiter(delimiter: &str) -> bool {
     false
 }
 
-fn is_word_delimiter(delimiter: &str) -> bool {
+/// Returns true if delimiter contains at least one word character (\w).
+/// Matches RuboCop's `/\w/.match?(delimiters)` check — a delimiter is
+/// considered "wordy" if it has ANY word character, not if ALL chars are
+/// word characters.
+fn contains_word_char(delimiter: &str) -> bool {
     delimiter
         .as_bytes()
         .iter()
-        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .any(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 fn delimiter_matches_pattern(delimiter: &str, raw_pattern: &str) -> bool {
@@ -44,6 +63,7 @@ fn delimiter_matches_pattern(delimiter: &str, raw_pattern: &str) -> bool {
     }
 
     // RuboCop config stores regexes as strings like `/.../i`.
+    // Plain strings are also treated as regex via Regexp.new() in RuboCop.
     let (regex_body, flags) = if let Some(stripped) = pattern.strip_prefix('/') {
         if let Some(last_slash) = stripped.rfind('/') {
             (&stripped[..last_slash], &stripped[last_slash + 1..])
@@ -51,6 +71,7 @@ fn delimiter_matches_pattern(delimiter: &str, raw_pattern: &str) -> bool {
             (stripped, "")
         }
     } else {
+        // Plain string: RuboCop wraps in Regexp.new(), so treat as regex body
         (pattern, "")
     };
 
@@ -65,6 +86,7 @@ fn delimiter_matches_pattern(delimiter: &str, raw_pattern: &str) -> bool {
         }
     }
 
+    // Fallback: exact case-insensitive match (if regex compilation fails)
     delimiter.eq_ignore_ascii_case(pattern)
 }
 
@@ -87,7 +109,12 @@ impl Cop for HeredocDelimiterNaming {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[INTERPOLATED_STRING_NODE, STRING_NODE]
+        &[
+            INTERPOLATED_STRING_NODE,
+            STRING_NODE,
+            INTERPOLATED_X_STRING_NODE,
+            X_STRING_NODE,
+        ]
     }
 
     fn check_node(
@@ -101,7 +128,7 @@ impl Cop for HeredocDelimiterNaming {
     ) {
         let forbidden_delimiters = config.get_string_array("ForbiddenDelimiters");
 
-        // Check InterpolatedStringNode and StringNode for heredoc openings.
+        // Check string and xstring nodes for heredoc openings.
         let (opening_loc, closing_start) = if let Some(interp) = node.as_interpolated_string_node()
         {
             (
@@ -113,6 +140,10 @@ impl Cop for HeredocDelimiterNaming {
                 s.opening_loc(),
                 s.closing_loc().map(|loc| loc.start_offset()),
             )
+        } else if let Some(x) = node.as_interpolated_x_string_node() {
+            (Some(x.opening_loc()), Some(x.closing_loc().start_offset()))
+        } else if let Some(x) = node.as_x_string_node() {
+            (Some(x.opening_loc()), Some(x.closing_loc().start_offset()))
         } else {
             return;
         };
@@ -165,7 +196,7 @@ impl Cop for HeredocDelimiterNaming {
         }
 
         // RuboCop flags the closing delimiter token.
-        if !is_word_delimiter(delimiter_str)
+        if !contains_word_char(delimiter_str)
             || is_forbidden_delimiter(delimiter_str, forbidden_delimiters.as_ref())
         {
             let offense_offset = closing_start.unwrap_or(opening_loc.start_offset() + 2);

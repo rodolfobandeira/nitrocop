@@ -14,3 +14,7 @@ q = <<-'+'
   content
 +
 ^ Naming/HeredocDelimiterNaming: Use meaningful heredoc delimiters.
+r = <<~`END`
+  echo hello
+END
+^^^ Naming/HeredocDelimiterNaming: Use meaningful heredoc delimiters.
