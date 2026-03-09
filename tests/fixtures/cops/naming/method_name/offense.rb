@@ -62,3 +62,13 @@ def self.Dimension(*args)
          ^^^^^^^^^ Naming/MethodName: Use snake_case for method names.
   new(*args)
 end
+
+# Non-letter Unicode singleton method names are not valid snake_case
+def ❤
+    ^ Naming/MethodName: Use snake_case for method names.
+  true
+end
+
+# Non-letter Unicode alias names are also invalid
+alias_method :☠, :exit
+             ^ Naming/MethodName: Use snake_case for method names.

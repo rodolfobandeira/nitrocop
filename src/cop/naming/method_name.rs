@@ -1,8 +1,8 @@
 use crate::cop::node_type::{ALIAS_METHOD_NODE, CALL_NODE, DEF_NODE};
-use crate::cop::util::is_snake_case;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Naming/MethodName cop — checks that method names use the configured naming style.
 ///
@@ -30,6 +30,19 @@ use crate::parse::source::SourceFile;
 ///
 /// FP=2: Separate issues (discourse report.rb, jekyll-seo-tag json_ld_drop.rb).
 /// Not investigated yet — likely alias_method or config resolution differences.
+///
+/// ## Corpus investigation (2026-03-09)
+///
+/// Corpus oracle reported FP=15, FN=21.
+///
+/// FP=15: class-emitter methods like `def self.ImageQuality` and
+/// `def base.Start` should be allowed when the current lexical scope defines a
+/// matching class/module. nitrocop was treating them as ordinary CamelCase
+/// method names and flagging them.
+///
+/// FN=21: non-letter Unicode names like `def ❤` and `alias_method :☠, :exit`
+/// were incorrectly treated as operator methods because the old helper only
+/// checked for ASCII letters. RuboCop uses an explicit operator-name allowlist.
 pub struct MethodName;
 
 /// Bundles config values needed for method name checking.
@@ -51,9 +64,42 @@ impl MethodNameConfig {
     }
 }
 
-/// Returns true if the name consists entirely of non-alphabetic characters (operator methods).
+/// Returns true for Ruby's built-in operator method names.
 fn is_operator_method(name: &[u8]) -> bool {
-    !name.iter().any(|b| b.is_ascii_alphabetic())
+    matches!(
+        std::str::from_utf8(name).ok(),
+        Some(
+            "|" | "^"
+                | "&"
+                | "<=>"
+                | "=="
+                | "==="
+                | "=~"
+                | ">"
+                | ">="
+                | "<"
+                | "<="
+                | "<<"
+                | ">>"
+                | "+"
+                | "-"
+                | "*"
+                | "/"
+                | "%"
+                | "**"
+                | "~"
+                | "+@"
+                | "-@"
+                | "!@"
+                | "~@"
+                | "[]"
+                | "[]="
+                | "!"
+                | "!="
+                | "!~"
+                | "`"
+        )
+    )
 }
 
 /// Check if a method name matches AllowedPatterns using regex matching.
@@ -91,9 +137,13 @@ fn is_forbidden_name(name: &str, cfg: &MethodNameConfig) -> bool {
 
 /// Check naming style compliance.
 fn style_ok(name: &[u8], enforced_style: &str) -> bool {
+    let Ok(name) = std::str::from_utf8(name) else {
+        return false;
+    };
+
     match enforced_style {
         "camelCase" => is_lower_camel_case(name),
-        _ => is_snake_case(name),
+        _ => is_method_snake_case(name),
     }
 }
 
@@ -129,7 +179,7 @@ impl Cop for MethodName {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -137,7 +187,7 @@ impl Cop for MethodName {
         let cfg = MethodNameConfig::from_cop_config(config);
 
         if let Some(def_node) = node.as_def_node() {
-            check_def_node(self, source, &def_node, &cfg, diagnostics);
+            check_def_node(self, source, &def_node, parse_result, &cfg, diagnostics);
         } else if let Some(call_node) = node.as_call_node() {
             check_call_node(self, source, &call_node, &cfg, diagnostics);
         } else if let Some(alias_node) = node.as_alias_method_node() {
@@ -146,10 +196,72 @@ impl Cop for MethodName {
     }
 }
 
+struct ScopeInfo {
+    emitter_names: Vec<Vec<u8>>,
+}
+
+struct ClassEmitterScopeFinder<'a> {
+    target_offset: usize,
+    target_name: &'a [u8],
+    found: bool,
+    scope_stack: Vec<ScopeInfo>,
+}
+
+impl<'pr> Visit<'pr> for ClassEmitterScopeFinder<'_> {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        self.scope_stack.push(ScopeInfo {
+            emitter_names: collect_direct_child_emitters(node.body()),
+        });
+        ruby_prism::visit_class_node(self, node);
+        self.scope_stack.pop();
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.scope_stack.push(ScopeInfo {
+            emitter_names: collect_direct_child_emitters(node.body()),
+        });
+        ruby_prism::visit_module_node(self, node);
+        self.scope_stack.pop();
+    }
+
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if self.found {
+            return;
+        }
+
+        if node.location().start_offset() == self.target_offset {
+            self.found = self.scope_stack.last().is_some_and(|scope| {
+                scope
+                    .emitter_names
+                    .iter()
+                    .any(|candidate| candidate.as_slice() == self.target_name)
+            });
+            return;
+        }
+
+        ruby_prism::visit_def_node(self, node);
+    }
+}
+
+fn has_class_emitter_in_scope(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    def_node: &ruby_prism::DefNode<'_>,
+) -> bool {
+    let mut finder = ClassEmitterScopeFinder {
+        target_offset: def_node.location().start_offset(),
+        target_name: def_node.name().as_slice(),
+        found: false,
+        scope_stack: Vec::new(),
+    };
+    finder.visit(&parse_result.node());
+    finder.found
+}
+
 fn check_def_node(
     cop: &MethodName,
     source: &SourceFile,
     def_node: &ruby_prism::DefNode<'_>,
+    parse_result: &ruby_prism::ParseResult<'_>,
     cfg: &MethodNameConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -157,6 +269,13 @@ fn check_def_node(
     let method_name_str = std::str::from_utf8(method_name).unwrap_or("");
 
     if is_operator_method(method_name) {
+        return;
+    }
+
+    if def_node.receiver().is_some()
+        && starts_with_uppercase(method_name_str)
+        && has_class_emitter_in_scope(parse_result, def_node)
+    {
         return;
     }
 
@@ -467,28 +586,93 @@ fn is_const_named(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
     false
 }
 
-/// Returns true if the name is lowerCamelCase (starts lowercase, no underscores, has uppercase).
-fn is_lower_camel_case(name: &[u8]) -> bool {
-    if name.is_empty() {
-        return true;
-    }
-    if name[0].is_ascii_uppercase() {
+/// Returns true if the name is lowerCamelCase.
+fn is_lower_camel_case(name: &str) -> bool {
+    let core = strip_method_suffix(name);
+    if core.is_empty() {
         return false;
     }
-    let name_without_leading = name
-        .iter()
-        .skip_while(|&&b| b == b'_')
-        .copied()
-        .collect::<Vec<_>>();
-    for &b in &name_without_leading {
-        if b == b'_' {
-            return false;
+
+    let mut chars = core.chars();
+    let first = chars.next().unwrap();
+    let lead = if first == '_' {
+        match chars.next() {
+            Some(ch) => ch,
+            None => return false,
         }
-        if !(b.is_ascii_alphanumeric() || b == b'?' || b == b'!' || b == b'=') {
-            return false;
+    } else {
+        first
+    };
+
+    if !lead.is_lowercase() {
+        return false;
+    }
+
+    chars.all(|ch| ch.is_lowercase() || ch.is_uppercase() || ch.is_ascii_digit())
+}
+
+fn is_method_snake_case(name: &str) -> bool {
+    let core = strip_method_suffix(name);
+    if core.is_empty() {
+        return false;
+    }
+
+    core.chars()
+        .all(|ch| ch == '_' || ch.is_lowercase() || ch.is_ascii_digit())
+}
+
+fn strip_method_suffix(name: &str) -> &str {
+    match name.chars().next_back() {
+        Some('!') | Some('?') | Some('=') => {
+            &name[..name.len() - name.chars().next_back().unwrap().len_utf8()]
+        }
+        _ => name,
+    }
+}
+
+fn starts_with_uppercase(name: &str) -> bool {
+    name.chars().next().is_some_and(|ch| ch.is_uppercase())
+}
+
+fn collect_direct_child_emitters(body: Option<ruby_prism::Node<'_>>) -> Vec<Vec<u8>> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+
+    let mut emitters = Vec::new();
+    if let Some(stmts) = body.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_emitter_name(stmt, &mut emitters);
+        }
+    } else {
+        collect_emitter_name(body, &mut emitters);
+    }
+    emitters
+}
+
+fn collect_emitter_name(node: ruby_prism::Node<'_>, emitters: &mut Vec<Vec<u8>>) {
+    if let Some(class_node) = node.as_class_node() {
+        emitters
+            .push(last_constant_segment(class_node.constant_path().location().as_slice()).to_vec());
+    } else if let Some(module_node) = node.as_module_node() {
+        emitters.push(
+            last_constant_segment(module_node.constant_path().location().as_slice()).to_vec(),
+        );
+    }
+}
+
+fn last_constant_segment(path: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut i = 0;
+    while i + 1 < path.len() {
+        if path[i] == b':' && path[i + 1] == b':' {
+            start = i + 2;
+            i += 2;
+        } else {
+            i += 1;
         }
     }
-    true
+    &path[start..]
 }
 
 #[cfg(test)]

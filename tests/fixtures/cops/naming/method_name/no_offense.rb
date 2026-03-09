@@ -74,3 +74,23 @@ alias_method foo, :bar
 
 # alias_method with wrong arity is fine
 alias_method :fooBar, :bar, :baz
+
+# Class emitter methods are allowed when a matching class exists in scope
+module Container
+  def self.Widget
+  end
+
+  class Widget
+  end
+end
+
+# The same exemption applies to singleton methods defined on another receiver
+module Outer
+  class Item
+  end
+
+  def self.included(base)
+    def base.Item(arg)
+    end
+  end
+end
