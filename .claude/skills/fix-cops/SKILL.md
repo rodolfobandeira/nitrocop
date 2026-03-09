@@ -97,11 +97,15 @@ directly on main.
 
 2. **Understand the FP pattern** from the examples provided in your prompt.
    If needed, read the actual source files from `vendor/corpus/<repo_id>/<path>` to see more context.
-   **DO NOT run nitrocop or rubocop directly on corpus repos** — they require special
-   env vars (BUNDLE_GEMFILE, BUNDLE_PATH, GIT_CEILING_DIRECTORIES) that only `check-cop.py`
-   sets up correctly. If you need to verify corpus behavior, use `check-cop.py --rerun`
-   for the cop you modified; use `check-cop.py --verbose` for untouched cops when the
-   latest corpus oracle run is current.
+   **DO NOT run nitrocop or rubocop directly** — not on corpus repos, not on ad-hoc
+   files in `/tmp/`, not anywhere outside the test fixtures. Running `nitrocop` on
+   arbitrary paths fails ("No lockfile found") and wastes tokens. The ONLY ways to
+   verify cop behavior are:
+   - **Unit tests**: add patterns to `offense.rb` / `no_offense.rb` fixtures and run
+     `cargo test --lib -- <cop_name_snake>` — this is fast, reliable, and self-documenting.
+   - **Corpus validation**: `check-cop.py --rerun` for cops you modified; `check-cop.py
+     --verbose` for untouched cops when the latest corpus oracle run is current.
+   Never create test Ruby files outside the fixture directories.
 
 3. **Add test cases (TDD)**:
    - Add the FP pattern to `tests/fixtures/cops/<dept>/<cop_name>/no_offense.rb`
