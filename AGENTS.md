@@ -262,6 +262,17 @@ cargo run --release --bin bench_nitrocop -- bench --private           # timing o
 
 Results go to `bench/private_results.md` and `bench/private_conform.json` (both gitignored), separate from public results.
 
+### Synthetic Corpus
+
+The synthetic corpus at `bench/synthetic/` exercises 55 cops that have zero activity in the 1,000-repo corpus oracle. It contains handcrafted Ruby files in a Rails-like project layout designed to trigger each cop, then compares nitrocop vs RuboCop output.
+
+```
+python3 bench/synthetic/run_synthetic.py           # summary
+python3 bench/synthetic/run_synthetic.py --verbose  # per-cop breakdown
+```
+
+See [`bench/synthetic/README.md`](bench/synthetic/README.md) for full details, including research findings on `railties` gem requirements, Include pattern path matching, and Ruby version gates.
+
 ## RubyGem Distribution
 
 See [docs/rubygem.md](docs/rubygem.md) for the gem build/release pipeline, platform variants, and build scripts.
