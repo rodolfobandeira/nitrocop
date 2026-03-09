@@ -126,7 +126,8 @@ def get_registry_cops() -> set[str]:
 
 
 def build_gem_stats(by_cop: list[dict], registry_cops: set[str] | None = None,
-                    fixed_cops: set[str] | None = None) -> dict[str, dict]:
+                    fixed_cops: set[str] | None = None,
+                    synthetic: dict[str, dict] | None = None) -> dict[str, dict]:
     """Aggregate per-cop data into per-gem stats.
 
     If registry_cops is provided, also tracks cops that exist in the registry
@@ -134,9 +135,12 @@ def build_gem_stats(by_cop: list[dict], registry_cops: set[str] | None = None,
     If fixed_cops is provided, cops listed there are moved from diverging to
     "fixed (pending confirmation)" — they still show in the data but don't count
     as diverging.
+    If synthetic is provided, cops with no corpus data are reclassified using
+    their synthetic status (perfect_match or diverging).
     """
     corpus_cop_names = {c["cop"] for c in by_cop}
     fixed = fixed_cops or set()
+    synthetic = synthetic or {}
 
     gems = {}
     for gem_name in GEM_DEPARTMENTS:
@@ -166,6 +170,9 @@ def build_gem_stats(by_cop: list[dict], registry_cops: set[str] | None = None,
                 continue
             gems[gem]["total_in_registry"] += 1
             if cop not in corpus_cop_names:
+                # If synthetic data covers this cop, don't count as untested
+                if cop in synthetic:
+                    continue
                 gems[gem]["untested"] += 1
                 gems[gem]["untested_cops"].append(cop)
 
@@ -343,7 +350,8 @@ def print_summary(gems: dict[str, dict], run_date: str, summary: dict, has_regis
         print(f"  Quick wins: {best['fp_only']} FP-only cops (fix first, no risk of introducing FNs)")
 
 
-def print_gem_detail(gem_name: str, gems: dict[str, dict], run_date: str):
+def print_gem_detail(gem_name: str, gems: dict[str, dict], run_date: str,
+                     synthetic: dict[str, dict] | None = None):
     """Print deep-dive for a specific gem."""
     if gem_name not in gems:
         print(f"Unknown gem: {gem_name}", file=sys.stderr)
@@ -454,6 +462,30 @@ def print_gem_detail(gem_name: str, gems: dict[str, dict], run_date: str):
             print(f"  {cop}")
         print()
 
+    # Synthetic-only divergence (cops with 0 corpus activity but FP/FN in synthetic)
+    if synthetic:
+        gem_depts = set(GEM_DEPARTMENTS.get(gem_name, []))
+        syn_diverging = []
+        for c in cops:
+            if c["matches"] == 0 and c["fp"] == 0 and c["fn"] == 0:
+                # Zero corpus activity — check synthetic
+                syn = synthetic.get(c["cop"])
+                if syn and syn.get("diverging"):
+                    syn_diverging.append(syn)
+        if syn_diverging:
+            syn_diverging.sort(key=lambda s: s.get("fp", 0) + s.get("fn", 0), reverse=True)
+            print(f"Synthetic-only divergence ({len(syn_diverging)} — no corpus activity, but diverge on synthetic tests):")
+            cop_w = max(len(s["cop"]) for s in syn_diverging)
+            for s in syn_diverging:
+                parts = []
+                if s.get("fp", 0) > 0:
+                    parts.append(f"FP={s['fp']}")
+                if s.get("fn", 0) > 0:
+                    parts.append(f"FN={s['fn']}")
+                print(f"  {s['cop']:<{cop_w}}  {' '.join(parts)}")
+            print(f"  (Investigate via bench/synthetic/synthetic-results.json, source at bench/synthetic/project/)")
+            print()
+
     # Strategy recommendation
     if g["diverging"] > 0 or g["untested"] > 0:
         print("Strategy:")
@@ -493,6 +525,8 @@ def main():
                         help="Deep-dive into a specific gem (e.g., rubocop-performance)")
     parser.add_argument("--exclude-cops-file", type=Path,
                         help="(deprecated, use git-based detection) File with cop names to treat as fixed")
+    parser.add_argument("--synthetic", type=Path, default=None,
+                        help="Path to synthetic-results.json (reclassifies untested cops)")
     parser.add_argument("--no-git-exclude", action="store_true",
                         help="Disable automatic git-based exclusion of already-fixed cops")
     args = parser.parse_args()
@@ -537,7 +571,15 @@ def main():
     if fixed_cops:
         print(f"Treating {len(fixed_cops)} cops as fixed (pending corpus confirmation)", file=sys.stderr)
 
-    gems = build_gem_stats(by_cop, registry_cops if has_registry else None, fixed_cops)
+    # Load synthetic results if provided
+    synthetic = None
+    syn_path = args.synthetic or Path("bench/synthetic/synthetic-results.json")
+    if syn_path.exists():
+        syn_data = json.loads(syn_path.read_text())
+        synthetic = {entry["cop"]: entry for entry in syn_data.get("by_cop", [])}
+        print(f"Loaded {len(synthetic)} synthetic results from {syn_path}", file=sys.stderr)
+
+    gems = build_gem_stats(by_cop, registry_cops if has_registry else None, fixed_cops, synthetic)
 
     if args.summary:
         print_summary(gems, run_date, summary, has_registry)
@@ -547,7 +589,7 @@ def main():
             print()
             print("=" * 80)
             print()
-        print_gem_detail(args.gem, gems, run_date)
+        print_gem_detail(args.gem, gems, run_date, synthetic)
 
 
 if __name__ == "__main__":

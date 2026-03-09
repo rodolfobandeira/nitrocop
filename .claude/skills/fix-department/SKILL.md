@@ -53,7 +53,20 @@ python3 scripts/investigate-cop.py Department/CopName --context --fp-only --limi
 python3 scripts/investigate-cop.py Department/CopName --context --fn-only --limit 10
 ```
 
-**Run the delta reducer** on up to 3 examples per cop (mix of FP and FN) to get minimal reproductions:
+**Synthetic-only cops** (zero corpus activity): If `investigate-cop.py` shows no results, the cop
+only has data in the synthetic corpus. Investigate using:
+```bash
+# Read synthetic results for the cop
+python3 -c "import json; d=json.loads(open('bench/synthetic/synthetic-results.json').read()); [print(c) for c in d['by_cop'] if c['cop']=='Department/CopName']"
+# Read the synthetic source files directly (paths from fp_examples/fn_examples)
+# Source files are at bench/synthetic/project/<path>
+```
+The synthetic corpus files at `bench/synthetic/project/` are handcrafted trigger patterns — read
+the relevant source file to understand the expected behavior. Run `python3 bench/synthetic/run_synthetic.py --verbose`
+to re-verify after fixing.
+
+**Run the delta reducer** on up to 3 examples per cop (mix of FP and FN) to get minimal reproductions
+(corpus cops only — not applicable to synthetic-only cops):
 ```bash
 python3 scripts/reduce-mismatch.py Department/CopName repo_id filepath:line            # FP
 python3 scripts/reduce-mismatch.py Department/CopName repo_id filepath:line --type fn   # FN
