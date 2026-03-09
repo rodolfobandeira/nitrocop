@@ -261,12 +261,14 @@ jobs:
         run: |
           python3 bench/corpus/gen_tiers.py \
             --input corpus-results.json \
+            --synthetic bench/synthetic/synthetic-results.json \
             --output tiers.json
 
       - name: Update README conformance
         run: |
           python3 bench/corpus/update_readme.py \
             --input corpus-results.json \
+            --synthetic bench/synthetic/synthetic-results.json \
             --manifest bench/corpus/manifest.jsonl \
             --readme README.md
 

@@ -11,9 +11,16 @@ Usage:
         --manifest bench/corpus/manifest.jsonl \
         --readme README.md
 
+    # Include synthetic corpus results (fills in cops with no corpus data)
+    python3 bench/corpus/update_readme.py \
+        --input corpus-results.json \
+        --synthetic bench/synthetic/synthetic-results.json
+
     # Dry run (print changes to stderr, don't write)
     python3 bench/corpus/update_readme.py --input corpus-results.json --dry-run
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -94,6 +101,15 @@ def load_manifest_stars(path: Path) -> dict[str, tuple[str, int]]:
     return repos
 
 
+def load_synthetic_results(path: Path) -> dict[str, dict]:
+    """Load synthetic results and return a dict keyed by cop name.
+
+    Returns dict mapping cop name to its synthetic entry (matches, fp, fn, etc).
+    """
+    data = json.loads(path.read_text())
+    return {entry["cop"]: entry for entry in data.get("by_cop", [])}
+
+
 def format_files(n: int) -> str:
     """Format file count: 163000 -> '163k'."""
     return f"{n // 1000}k"
@@ -122,11 +138,16 @@ def format_exact_match_pct(exact: int, total: int) -> str:
     return f"✓ {pct}" if exact == total else pct
 
 
-def build_department_stats(data: dict) -> dict[str, dict]:
-    """Build per-department cop counts for the generated README Cops section."""
+def build_department_stats(data: dict, synthetic: dict[str, dict] | None = None) -> dict[str, dict]:
+    """Build per-department cop counts for the generated README Cops section.
+
+    When synthetic results are provided, cops with no corpus data are reclassified
+    using their synthetic status (exact match or diverging).
+    """
     derived: dict[str, dict] = {}
     for cop in data.get("by_cop", []):
-        dept = cop["cop"].split("/")[0]
+        cop_name = cop["cop"]
+        dept = cop_name.split("/")[0]
         stats = derived.setdefault(dept, {
             "department": dept,
             "cops": 0,
@@ -153,6 +174,15 @@ def build_department_stats(data: dict) -> dict[str, dict]:
             stats["diverging_cops"] += 1
         elif seen:
             stats["perfect_cops"] += 1
+        elif synthetic and cop_name in synthetic:
+            # Cop had no corpus data but was exercised synthetically
+            syn = synthetic[cop_name]
+            if syn.get("perfect_match"):
+                stats["perfect_cops"] += 1
+            elif syn.get("diverging"):
+                stats["diverging_cops"] += 1
+            else:
+                stats["no_data_cops"] += 1
         else:
             stats["no_data_cops"] += 1
 
@@ -164,9 +194,9 @@ def build_department_stats(data: dict) -> dict[str, dict]:
             "department": dept,
             "cops": entry.get("cops", derived_entry.get("cops", 0)),
             "seen_cops": entry.get("seen_cops", entry.get("exercised_cops", derived_entry.get("seen_cops", 0))),
-            "perfect_cops": entry.get("perfect_cops", derived_entry.get("perfect_cops", 0)),
-            "diverging_cops": entry.get("diverging_cops", derived_entry.get("diverging_cops", 0)),
-            "no_data_cops": entry.get("no_data_cops", entry.get("inactive_cops", derived_entry.get("no_data_cops", 0))),
+            "perfect_cops": derived_entry.get("perfect_cops", 0),
+            "diverging_cops": derived_entry.get("diverging_cops", 0),
+            "no_data_cops": derived_entry.get("no_data_cops", 0),
             "matches": entry.get("matches", derived_entry.get("matches", 0)),
             "fp": entry.get("fp", derived_entry.get("fp", 0)),
             "fn": entry.get("fn", derived_entry.get("fn", 0)),
@@ -192,26 +222,30 @@ def build_department_stats(data: dict) -> dict[str, dict]:
     return stats_by_department
 
 
-def build_cops_section(data: dict) -> str:
+def build_cops_section(data: dict, synthetic: dict[str, dict] | None = None) -> str:
     """Build the generated README Cops section."""
     summary = data.get("summary", {})
     baseline = data.get("baseline", {})
-    by_department = build_department_stats(data)
+    by_department = build_department_stats(data, synthetic)
 
     total_cops = summary.get("registered_cops", sum(d["cops"] for d in by_department.values()))
-    perfect_cops = summary.get("perfect_cops", sum(d["perfect_cops"] for d in by_department.values()))
-    diverging_cops = summary.get("diverging_cops", sum(d["diverging_cops"] for d in by_department.values()))
-    no_data_cops = summary.get("no_data_cops", summary.get("inactive_cops", sum(d["no_data_cops"] for d in by_department.values())))
+    perfect_cops = sum(d["perfect_cops"] for d in by_department.values())
+    diverging_cops = sum(d["diverging_cops"] for d in by_department.values())
+    no_data_cops = sum(d["no_data_cops"] for d in by_department.values())
 
     lines = []
     lines.append(f"nitrocop supports {total_cops:,} cops from {len(GEMS)} RuboCop gems.")
     lines.append("")
-    lines.append(
-        f"Current corpus status: {perfect_cops:,} cops match RuboCop exactly on the corpus, "
-        f"{diverging_cops:,} diverge, and {no_data_cops:,} have no corpus data."
-    )
-    lines.append("")
-    lines.append("No corpus data means the cop never appeared in the corpus, so it has not been compared yet.")
+    if no_data_cops > 0:
+        lines.append(
+            f"Current corpus status: {perfect_cops:,} cops match RuboCop exactly on the corpus, "
+            f"{diverging_cops:,} diverge, and {no_data_cops:,} have no corpus data."
+        )
+    else:
+        lines.append(
+            f"Current corpus status: {perfect_cops:,} cops match RuboCop exactly, "
+            f"{diverging_cops:,} diverge."
+        )
     lines.append("")
 
     for gem in GEMS:
@@ -223,23 +257,37 @@ def build_cops_section(data: dict) -> str:
         version = baseline.get(gem["key"], "?")
         lines.append(f"**[{gem['key']}]({gem['url']})** `{version}` ({total:,} cops)")
         lines.append("")
-        lines.append("| Department | Total cops | Exact match | Diverging | No corpus data | Exact match % |")
-        lines.append("|------------|-----------:|------------:|----------:|---------------:|--------------:|")
-        for row in rows:
-            lines.append(
-                f"| {row['department']} | {row['cops']:,} | "
-                f"{row['perfect_cops']:,} | {row['diverging_cops']:,} | {row['no_data_cops']:,} | "
-                f"{format_exact_match_pct(row['perfect_cops'], row['cops'])} |"
-            )
-        if len(rows) > 1:
-            lines.append(
-                f"| **Total** | **{total:,}** | **{perfect:,}** | "
-                f"**{diverging:,}** | **{no_data:,}** | "
-                f"**{format_exact_match_pct(perfect, total)}** |"
-            )
-            lines.append("")
+        if no_data > 0:
+            lines.append("| Department | Total cops | Exact match | Diverging | No corpus data | Exact match % |")
+            lines.append("|------------|-----------:|------------:|----------:|---------------:|--------------:|")
+            for row in rows:
+                lines.append(
+                    f"| {row['department']} | {row['cops']:,} | "
+                    f"{row['perfect_cops']:,} | {row['diverging_cops']:,} | {row['no_data_cops']:,} | "
+                    f"{format_exact_match_pct(row['perfect_cops'], row['cops'])} |"
+                )
+            if len(rows) > 1:
+                lines.append(
+                    f"| **Total** | **{total:,}** | **{perfect:,}** | "
+                    f"**{diverging:,}** | **{no_data:,}** | "
+                    f"**{format_exact_match_pct(perfect, total)}** |"
+                )
         else:
-            lines.append("")
+            lines.append("| Department | Total cops | Exact match | Diverging | Exact match % |")
+            lines.append("|------------|-----------:|------------:|----------:|--------------:|")
+            for row in rows:
+                lines.append(
+                    f"| {row['department']} | {row['cops']:,} | "
+                    f"{row['perfect_cops']:,} | {row['diverging_cops']:,} | "
+                    f"{format_exact_match_pct(row['perfect_cops'], row['cops'])} |"
+                )
+            if len(rows) > 1:
+                lines.append(
+                    f"| **Total** | **{total:,}** | **{perfect:,}** | "
+                    f"**{diverging:,}** | "
+                    f"**{format_exact_match_pct(perfect, total)}** |"
+                )
+        lines.append("")
 
     return "\n".join(lines).rstrip()
 
@@ -319,7 +367,8 @@ def build_summary_table(summary: dict) -> str:
     return "\n".join(lines)
 
 
-def update_readme(readme_text: str, data: dict, manifest: dict[str, tuple[str, int]]) -> str:
+def update_readme(readme_text: str, data: dict, manifest: dict[str, tuple[str, int]],
+                  synthetic: dict[str, dict] | None = None) -> str:
     """Replace conformance data in README text."""
     summary = data["summary"]
     by_repo = data["by_repo"]
@@ -339,10 +388,17 @@ def update_readme(readme_text: str, data: dict, manifest: dict[str, tuple[str, i
         readme_text,
         COPS_SECTION_START,
         COPS_SECTION_END,
-        build_cops_section(data),
+        build_cops_section(data, synthetic),
     )
 
-    # 1. Features bullet: **XX.X% conformance**
+    # 1. Features bullet: **N cops** and **XX.X% conformance**
+    total_cops = summary.get("registered_cops", 0)
+    if total_cops > 0:
+        readme_text = re.sub(
+            r"\*\*[\d,]+ cops\*\*",
+            f"**{total_cops:,} cops**",
+            readme_text,
+        )
     readme_text = re.sub(
         r"\*\*[\d.]+% conformance\*\*",
         f"**{rate_str} conformance**",
@@ -390,14 +446,17 @@ def main():
                         help="Path to manifest.jsonl")
     parser.add_argument("--readme", type=Path, default=Path("README.md"),
                         help="Path to README.md")
+    parser.add_argument("--synthetic", type=Path, default=None,
+                        help="Path to synthetic-results.json (fills in cops with no corpus data)")
     parser.add_argument("--dry-run", action="store_true", help="Print diff to stderr without writing")
     args = parser.parse_args()
 
     data = json.loads(args.input.read_text())
     manifest = load_manifest_stars(args.manifest)
+    synthetic = load_synthetic_results(args.synthetic) if args.synthetic else None
 
     readme_text = args.readme.read_text()
-    updated = update_readme(readme_text, data, manifest)
+    updated = update_readme(readme_text, data, manifest, synthetic)
 
     if updated == readme_text:
         print("No changes needed", file=sys.stderr)
