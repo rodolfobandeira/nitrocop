@@ -20,6 +20,18 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Cops that exist in nitrocop's registry but cannot be triggered under
+# our corpus config (Ruby 4.0 / Rails 8.0 target). They are excluded from
+# registered_cops counts so they don't inflate "no corpus data" numbers.
+UNSUPPORTED_COPS = frozenset([
+    "Lint/ItWithoutArgumentsInBlock",       # max Ruby 3.3 (it is a block param in 3.4+)
+    "Lint/NonDeterministicRequireOrder",     # max Ruby 2.7 (Dir sorts since 3.0)
+    "Lint/NumberedParameterAssignment",      # syntax error in Ruby 3.4+
+    "Lint/UselessElseWithoutRescue",         # syntax error in Ruby 3.4+
+    "Security/YAMLLoad",                    # max Ruby 3.0 (YAML.load safe in 3.1+)
+    "Rails/StrongParametersExpect",          # requires railties >= 8.0 in Gemfile.lock
+])
+
 
 def fmt_pct(rate: float) -> str:
     """Format rate as percentage, floored to 0.1% (never rounds up to 100%)."""
@@ -331,7 +343,7 @@ def main():
     # include zero-activity cops so downstream reports can distinguish
     # "perfect in corpus" from "never exercised by the corpus".
     observed_cops = set(by_cop_matches) | set(by_cop_fp) | set(by_cop_fn)
-    all_cops = sorted((covered_cops or set()) | observed_cops)
+    all_cops = sorted(((covered_cops or set()) | observed_cops) - UNSUPPORTED_COPS)
     by_cop = []
     for cop in all_cops:
         m = by_cop_matches.get(cop, 0)

@@ -18,14 +18,19 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Cops with no corpus data. Originally 62; reduced to 56 because 6 cannot
-# be triggered under our config:
-#   - Lint/ItWithoutArgumentsInBlock: Ruby 3.4 treats `it` as block param
-#   - Lint/NonDeterministicRequireOrder: Ruby 3.0+ sorts Dir results
-#   - Lint/NumberedParameterAssignment: Ruby 3.4 syntax error on `_1 = x`
-#   - Lint/UselessElseWithoutRescue: Ruby 3.4 syntax error
-#   - Security/YAMLLoad: max Ruby 3.0 (YAML.load is safe in 3.1+)
-#   - Rails/StrongParametersExpect: requires railties >= 8.0 in Gemfile.lock
+# Cops that exist in nitrocop's registry but cannot be triggered under
+# our corpus config (Ruby 4.0 / Rails 8.0 target). Mirrored from
+# bench/corpus/diff_results.py UNSUPPORTED_COPS.
+UNSUPPORTED_COPS = frozenset([
+    "Lint/ItWithoutArgumentsInBlock",       # max Ruby 3.3 (it is a block param in 3.4+)
+    "Lint/NonDeterministicRequireOrder",     # max Ruby 2.7 (Dir sorts since 3.0)
+    "Lint/NumberedParameterAssignment",      # syntax error in Ruby 3.4+
+    "Lint/UselessElseWithoutRescue",         # syntax error in Ruby 3.4+
+    "Security/YAMLLoad",                    # max Ruby 3.0 (YAML.load safe in 3.1+)
+    "Rails/StrongParametersExpect",          # requires railties >= 8.0 in Gemfile.lock
+])
+
+# Cops with no corpus data, excluding UNSUPPORTED_COPS.
 TARGET_COPS = sorted([
     "Lint/ArrayLiteralInRegexp",
     "Lint/DuplicateRescueException",
