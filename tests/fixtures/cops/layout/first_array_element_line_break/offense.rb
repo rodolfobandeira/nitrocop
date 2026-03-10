@@ -14,3 +14,8 @@ z = [:foo,
   :bar,
   :baz
 ]
+
+options = :cache_store, {
+          ^^^^^^^^^^^^^ Layout/FirstArrayElementLineBreak: Add a line break before the first element of a multi-line array.
+  expires_in: 5
+}

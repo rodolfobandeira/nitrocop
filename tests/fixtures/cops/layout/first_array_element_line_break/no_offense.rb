@@ -11,3 +11,14 @@ z = [
   2,
   3
 ]
+
+scenarios = [{ type: :forge },
+]
+
+messages = [<<~MSG,
+  hello
+MSG
+]
+
+words = %w{ alpha
+}
