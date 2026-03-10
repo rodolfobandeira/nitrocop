@@ -3,6 +3,12 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Checks for `return` inside `begin..end` blocks in assignment contexts.
+///
+/// Root cause of 214 FNs (0.9% match rate): the original implementation was missing
+/// operator write node visitors (`+=`, `-=`, `*=`, `/=`, `**=`) which Prism represents
+/// as `*OperatorWriteNode` types. RuboCop handles these via `on_op_asgn`. The fix adds
+/// visitors for all operator write node variants.
 pub struct NoReturnInBeginEndBlocks;
 
 impl Cop for NoReturnInBeginEndBlocks {
@@ -56,6 +62,7 @@ impl NoReturnVisitor<'_, '_> {
 }
 
 impl<'pr> Visit<'pr> for NoReturnVisitor<'_, '_> {
+    // Simple assignment: x = begin ... end
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
         self.check_assignment_value(&node.value());
     }
@@ -86,6 +93,7 @@ impl<'pr> Visit<'pr> for NoReturnVisitor<'_, '_> {
         self.check_assignment_value(&node.value());
     }
 
+    // Or-assignment: x ||= begin ... end
     fn visit_local_variable_or_write_node(
         &mut self,
         node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
@@ -103,6 +111,49 @@ impl<'pr> Visit<'pr> for NoReturnVisitor<'_, '_> {
     fn visit_class_variable_or_write_node(
         &mut self,
         node: &ruby_prism::ClassVariableOrWriteNode<'pr>,
+    ) {
+        self.check_assignment_value(&node.value());
+    }
+
+    // Operator assignments: x += begin ... end, x -= begin ... end, etc.
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_assignment_value(&node.value());
+    }
+
+    fn visit_instance_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_assignment_value(&node.value());
+    }
+
+    fn visit_class_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_assignment_value(&node.value());
+    }
+
+    fn visit_global_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.check_assignment_value(&node.value());
+    }
+
+    fn visit_constant_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+    ) {
+        self.check_assignment_value(&node.value());
+    }
+
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
     ) {
         self.check_assignment_value(&node.value());
     }
