@@ -37,3 +37,7 @@ def post_splat(*args, a, b)
                       ^ Naming/MethodParameterName: Method parameter must be at least 3 characters long.
                          ^ Naming/MethodParameterName: Method parameter must be at least 3 characters long.
 end
+# Double underscore __ is NOT the same as single _ — still checked
+def self.handshake(headers, _, __)
+                               ^^ Naming/MethodParameterName: Method parameter must be at least 3 characters long.
+end

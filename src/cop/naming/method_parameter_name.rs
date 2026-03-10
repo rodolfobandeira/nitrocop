@@ -254,12 +254,14 @@ fn check_param(
 ) {
     let name_str = std::str::from_utf8(name).unwrap_or("");
 
-    // Strip leading underscores to get basename (RuboCop checks the basename).
-    // Skip if the entire name is just underscores (e.g. `_`).
-    let basename = name_str.trim_start_matches('_');
-    if basename.is_empty() {
+    // RuboCop only skips exactly `_` (single underscore). Double underscore `__`
+    // still gets checked (basename is empty but length check fires).
+    if name_str == "_" {
         return;
     }
+
+    // Strip leading underscores to get basename (RuboCop checks the basename).
+    let basename = name_str.trim_start_matches('_');
 
     // Check allowed names (against basename, matching RuboCop)
     if allowed.iter().any(|a| a == basename) {
