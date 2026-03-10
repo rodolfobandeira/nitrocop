@@ -8,6 +8,8 @@
 # nitrocop-expect: 45:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
 # nitrocop-expect: 47:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
 # nitrocop-expect: 54:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
+# nitrocop-expect: 61:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
+# nitrocop-expect: 67:0 Layout/EmptyLinesAroundArguments: Empty line detected around arguments.
 # Empty line between args
 foo(
   bar,
@@ -63,4 +65,17 @@ double_gap(
 
 
   bar
+)
+
+# Whitespace-only blank line before closing paren still counts
+space_gap(
+  value
+  
+)
+
+# Whitespace-only blank line between args still counts
+space_between(
+  alpha,
+  	
+  beta
 )

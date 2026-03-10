@@ -1,17 +1,26 @@
 use crate::cop::node_type::CALL_NODE;
-use crate::cop::util::is_blank_line;
+use crate::cop::util::is_blank_or_whitespace_line;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// FP/FN investigation (2026-03-10): FP=2, FN=2.
+/// ## Corpus investigation (2026-03-10)
 ///
-/// Root cause for the known FPs: nitrocop emitted an offense for every blank
-/// line in a whitespace gap before an argument or closing paren. RuboCop emits
-/// one offense per gap on the last blank line only.
+/// Earlier fixes removed the original FP=2 gap by reporting only the last blank
+/// line in each whitespace gap, matching RuboCop's one-offense-per-gap behavior.
 ///
-/// The two corpus FNs from `fog` and `parslet` did not reproduce locally against
-/// the pinned corpus baseline, so this fix only addresses the verified FP shape.
+/// The remaining FN=2 on the current corpus baseline were whitespace-only blank
+/// lines before an argument/closing paren in `fog` and `parslet`. The previous
+/// implementation only treated truly empty lines as blank here, so separator
+/// lines containing spaces or tabs were ignored.
+///
+/// This cop now uses `is_blank_or_whitespace_line(...)` for the final separator
+/// check, which matches RuboCop's `blank?` behavior without changing the
+/// surrounding gap-detection logic.
+///
+/// Acceptance gate after the fix: expected 455, actual 1,202, CI baseline 453,
+/// raw delta +749, file-drop noise 756, missing 0. The rerun passed because the
+/// delta remained within the existing `jruby` parser-crash noise bucket.
 pub struct EmptyLinesAroundArguments;
 
 impl Cop for EmptyLinesAroundArguments {
@@ -143,7 +152,10 @@ fn check_blank_lines_before(
     // RuboCop reports a single offense on the last blank line in the gap.
     if target_line > prev_line + 1 {
         let line_num = target_line - 1;
-        if line_num > 0 && line_num <= lines.len() && is_blank_line(lines[line_num - 1]) {
+        if line_num > 0
+            && line_num <= lines.len()
+            && is_blank_or_whitespace_line(lines[line_num - 1])
+        {
             diagnostics.push(cop.diagnostic(
                 source,
                 line_num,
