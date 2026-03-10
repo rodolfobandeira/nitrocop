@@ -3,6 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/WhenThen: flags `when x; body` and suggests `when x then body`.
+///
+/// ## Investigation (2026-03-10)
+/// FP=8, FN=0. All 8 FPs from multiline `when` conditions (e.g., multiline
+/// regex literals `%r[...]x`) where the `;` appears on a different line than
+/// the `when` keyword. RuboCop checks `node.multiline?` and skips multiline
+/// when nodes entirely. Fix: compare the line of the `when` keyword with the
+/// line of the `;` — only flag when they're on the same line.
 pub struct WhenThen;
 
 impl Cop for WhenThen {
@@ -106,6 +114,16 @@ impl WhenThen {
         when_node: &ruby_prism::WhenNode<'_>,
         semi_offset: usize,
     ) -> Vec<Diagnostic> {
+        // RuboCop skips multiline when nodes (`return if node.multiline?`).
+        // Only flag when the `when` keyword and `;` are on the same line.
+        let when_keyword_line = source
+            .offset_to_line_col(when_node.keyword_loc().start_offset())
+            .0;
+        let semi_line = source.offset_to_line_col(semi_offset).0;
+        if when_keyword_line != semi_line {
+            return vec![];
+        }
+
         let conditions: Vec<_> = when_node.conditions().into_iter().collect();
         let conditions_text: Vec<String> = conditions
             .iter()

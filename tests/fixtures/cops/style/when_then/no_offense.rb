@@ -28,3 +28,19 @@ when String
   # key; value pairs
   parse(input)
 end
+
+# Multiline when condition with semicolon — not flagged
+case url
+when %r[
+  pattern
+]x; puts url
+end
+
+# Multiline when with heredoc-like multiline condition
+case value
+when *[
+       1,
+       2,
+       3
+     ]; handle(value)
+end
