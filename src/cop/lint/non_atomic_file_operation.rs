@@ -1,13 +1,35 @@
-use crate::cop::node_type::{
-    CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, IF_NODE, UNLESS_NODE,
-};
+use crate::cop::node_type::{CONSTANT_PATH_NODE, CONSTANT_READ_NODE, IF_NODE, UNLESS_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for non-atomic file operations where an existence check precedes
+/// a file create/remove. RuboCop fires two offenses per pattern:
+///
+/// 1. On the existence check condition: "Remove unnecessary existence check `X.exist?`."
+/// 2. On the file operation call (only for non-force methods): "Use atomic file
+///    operation method `FileUtils.replacement`."
+///
+/// ## Root cause analysis (23.4% match rate → rewrite)
+///
+/// Previous implementation had multiple gaps causing 621 FN and 11 FP:
+/// - Only emitted the "Use atomic" offense, missing the "Remove unnecessary" offense entirely
+/// - Did not handle force methods (makedirs, mkdir_p, mkpath, rm_f, rm_rf) which only get
+///   the existence check offense
+/// - Did not handle negated `if !File.exist?` conditions
+/// - Did not handle `elsif` form
+/// - Did not check `force: false` to skip the offense
+/// - Did not verify path arguments match between exist check and file operation
+/// - Did not check condition is not compound (&&/||)
+/// - Body could have multiple statements; RuboCop requires the file op's parent to be
+///   the if node directly (implying single-statement body)
+///
+/// Rewritten to match RuboCop's behavior: start from if/unless nodes, extract the
+/// existence check from condition, verify single file-op body, emit both offenses.
 pub struct NonAtomicFileOperation;
 
 const MAKE_METHODS: &[&[u8]] = &[b"mkdir"];
+const MAKE_FORCE_METHODS: &[&[u8]] = &[b"makedirs", b"mkdir_p", b"mkpath"];
 const REMOVE_METHODS: &[&[u8]] = &[
     b"remove",
     b"delete",
@@ -19,9 +41,162 @@ const REMOVE_METHODS: &[&[u8]] = &[
 ];
 const RECURSIVE_REMOVE_METHODS: &[&[u8]] =
     &[b"remove_dir", b"remove_entry", b"remove_entry_secure"];
+const REMOVE_FORCE_METHODS: &[&[u8]] = &[b"rm_f", b"rm_rf"];
+
 const EXIST_METHODS: &[&[u8]] = &[b"exist?", b"exists?"];
 const EXIST_CLASSES: &[&[u8]] = &[b"FileTest", b"File", b"Dir", b"Shell"];
 const FS_CLASSES: &[&[u8]] = &[b"FileUtils", b"Dir"];
+
+/// All recognized file operation methods (force + non-force).
+fn is_file_op_method(method: &[u8]) -> bool {
+    MAKE_METHODS.contains(&method)
+        || MAKE_FORCE_METHODS.contains(&method)
+        || REMOVE_METHODS.contains(&method)
+        || RECURSIVE_REMOVE_METHODS.contains(&method)
+        || REMOVE_FORCE_METHODS.contains(&method)
+}
+
+/// Whether the method is a "force" variant that doesn't need a replacement suggestion.
+fn is_force_method(method: &[u8]) -> bool {
+    MAKE_FORCE_METHODS.contains(&method) || REMOVE_FORCE_METHODS.contains(&method)
+}
+
+/// Get the replacement method name for non-force methods.
+fn replacement_method(method: &[u8]) -> &'static str {
+    if MAKE_METHODS.contains(&method) {
+        "mkdir_p"
+    } else if REMOVE_METHODS.contains(&method) {
+        "rm_f"
+    } else if RECURSIVE_REMOVE_METHODS.contains(&method) {
+        "rm_rf"
+    } else {
+        // Should not reach here for non-force methods
+        "rm_f"
+    }
+}
+
+/// Extract the constant class name from a receiver node (handles both ConstantReadNode
+/// and ConstantPathNode for `::File` etc.).
+fn const_name<'a>(node: &'a ruby_prism::Node<'a>) -> Option<&'a [u8]> {
+    if let Some(cr) = node.as_constant_read_node() {
+        Some(cr.name().as_slice())
+    } else if let Some(cp) = node.as_constant_path_node() {
+        cp.name().map(|n| n.as_slice())
+    } else {
+        None
+    }
+}
+
+/// Check if a call node is an exist? call on a recognized class.
+fn is_exist_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    if !EXIST_METHODS.contains(&call.name().as_slice()) {
+        return false;
+    }
+    if let Some(recv) = call.receiver() {
+        if let Some(name) = const_name(&recv) {
+            return EXIST_CLASSES.contains(&name);
+        }
+    }
+    false
+}
+
+/// Check if the condition contains an exist? call (direct, negated, or parenthesized).
+/// Returns true if found, and provides the exist call's first argument source and
+/// receiver/method info for the diagnostic message.
+fn find_exist_info(condition: &ruby_prism::Node<'_>) -> Option<ExistInfo> {
+    if let Some(call) = condition.as_call_node() {
+        if call.name().as_slice() == b"!" {
+            // Negated: `!File.exist?(path)`
+            if let Some(inner) = call.receiver() {
+                if let Some(inner_call) = inner.as_call_node() {
+                    if is_exist_call(&inner_call) {
+                        let first_arg = inner_call
+                            .arguments()
+                            .and_then(|args| args.arguments().iter().next())
+                            .map(|a| a.location().as_slice().to_vec());
+                        let recv_name = if let Some(recv) = inner_call.receiver() {
+                            const_name(&recv).unwrap_or(b"File").to_vec()
+                        } else {
+                            b"File".to_vec()
+                        };
+                        let method_name = inner_call.name().as_slice().to_vec();
+                        return Some(ExistInfo {
+                            first_arg,
+                            recv_name,
+                            method_name,
+                        });
+                    }
+                }
+            }
+            return None;
+        }
+        if is_exist_call(&call) {
+            let first_arg = call
+                .arguments()
+                .and_then(|args| args.arguments().iter().next())
+                .map(|a| a.location().as_slice().to_vec());
+            let recv_name = if let Some(recv) = call.receiver() {
+                const_name(&recv).unwrap_or(b"File").to_vec()
+            } else {
+                b"File".to_vec()
+            };
+            let method_name = call.name().as_slice().to_vec();
+            return Some(ExistInfo {
+                first_arg,
+                recv_name,
+                method_name,
+            });
+        }
+    }
+    None
+}
+
+struct ExistInfo {
+    first_arg: Option<Vec<u8>>,
+    recv_name: Vec<u8>,
+    method_name: Vec<u8>,
+}
+
+/// Check if a call node has `force: false` in its arguments.
+fn has_explicit_not_force(call: &ruby_prism::CallNode<'_>) -> bool {
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            if check_force_false(&arg) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check a node (keyword hash or hash) for `force: false`.
+fn check_force_false(node: &ruby_prism::Node<'_>) -> bool {
+    let elements = if let Some(kw_hash) = node.as_keyword_hash_node() {
+        kw_hash.elements()
+    } else if let Some(hash) = node.as_hash_node() {
+        hash.elements()
+    } else {
+        return false;
+    };
+
+    for elem in elements.iter() {
+        if let Some(assoc) = elem.as_assoc_node() {
+            if let Some(key) = assoc.key().as_symbol_node() {
+                if key.unescaped() == b"force"
+                    && assoc.value().as_false_node().is_some()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if a condition is a compound expression (&&/||).
+fn is_operator_condition(condition: &ruby_prism::Node<'_>) -> bool {
+    condition.as_and_node().is_some() || condition.as_or_node().is_some()
+}
 
 impl Cop for NonAtomicFileOperation {
     fn name(&self) -> &'static str {
@@ -33,13 +208,7 @@ impl Cop for NonAtomicFileOperation {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            CALL_NODE,
-            CONSTANT_PATH_NODE,
-            CONSTANT_READ_NODE,
-            IF_NODE,
-            UNLESS_NODE,
-        ]
+        &[CONSTANT_PATH_NODE, CONSTANT_READ_NODE, IF_NODE, UNLESS_NODE]
     }
 
     fn check_node(
@@ -51,7 +220,7 @@ impl Cop for NonAtomicFileOperation {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Look for if/unless nodes
+        // Extract condition, body, and else-branch presence from if/unless nodes
         let (condition, body, has_else) = if let Some(if_node) = node.as_if_node() {
             (
                 if_node.predicate(),
@@ -68,101 +237,110 @@ impl Cop for NonAtomicFileOperation {
             return;
         };
 
-        // Skip if there's an else branch
+        // Skip if there's an else/elsif branch
         if has_else {
             return;
         }
 
-        // Check if condition is a File.exist?/Dir.exist? call
-        let condition_call = match condition.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let cond_method = condition_call.name().as_slice();
-        if !EXIST_METHODS.contains(&cond_method) {
+        // Skip compound conditions (&&, ||)
+        if is_operator_condition(&condition) {
             return;
         }
 
-        // Check receiver is File/Dir/FileTest/Shell
-        let cond_recv = match condition_call.receiver() {
-            Some(r) => r,
+        // Extract existence check info from the condition
+        let exist_info = match find_exist_info(&condition) {
+            Some(info) => info,
             None => return,
         };
 
-        let is_exist_class = if let Some(cr) = cond_recv.as_constant_read_node() {
-            EXIST_CLASSES.iter().any(|c| *c == cr.name().as_slice())
-        } else if let Some(cp) = cond_recv.as_constant_path_node() {
-            cp.name()
-                .is_some_and(|n| EXIST_CLASSES.iter().any(|c| *c == n.as_slice()))
-        } else {
-            false
-        };
-
-        if !is_exist_class {
-            return;
-        }
-
-        // Check body contains a file operation
+        // Check body has exactly one statement that is a file operation
         let body_stmts = match body {
             Some(s) => s,
             None => return,
         };
 
         let stmts: Vec<_> = body_stmts.body().iter().collect();
-        if stmts.is_empty() {
+        if stmts.len() != 1 {
             return;
         }
 
-        for stmt in &stmts {
-            if let Some(call) = stmt.as_call_node() {
-                let method = call.name().as_slice();
+        let file_op_call = match stmts[0].as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
 
-                let is_file_op = MAKE_METHODS.contains(&method)
-                    || REMOVE_METHODS.contains(&method)
-                    || RECURSIVE_REMOVE_METHODS.contains(&method);
-
-                if !is_file_op {
-                    continue;
-                }
-
-                // Check receiver is FileUtils/Dir
-                let recv = match call.receiver() {
-                    Some(r) => r,
-                    None => continue,
-                };
-
-                let is_fs_class = if let Some(cr) = recv.as_constant_read_node() {
-                    FS_CLASSES.iter().any(|c| *c == cr.name().as_slice())
-                } else if let Some(cp) = recv.as_constant_path_node() {
-                    cp.name()
-                        .is_some_and(|n| FS_CLASSES.iter().any(|c| *c == n.as_slice()))
-                } else {
-                    false
-                };
-
-                if !is_fs_class {
-                    continue;
-                }
-
-                let replacement = if MAKE_METHODS.contains(&method) {
-                    "mkdir_p"
-                } else if REMOVE_METHODS.contains(&method) {
-                    "rm_f"
-                } else {
-                    "rm_rf"
-                };
-
-                let loc = call.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    format!("Use atomic file operation method `FileUtils.{replacement}`."),
-                ));
-            }
+        let method = file_op_call.name().as_slice();
+        if !is_file_op_method(method) {
+            return;
         }
+
+        // Check receiver is FileUtils or Dir
+        let recv = match file_op_call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let recv_name = match const_name(&recv) {
+            Some(n) => n,
+            None => return,
+        };
+
+        if !FS_CLASSES.contains(&recv_name) {
+            return;
+        }
+
+        // Check explicit `force: false` — skip entirely
+        if has_explicit_not_force(&file_op_call) {
+            return;
+        }
+
+        // Check first arguments match
+        let op_first_arg = file_op_call
+            .arguments()
+            .and_then(|args| args.arguments().iter().next())
+            .map(|a| a.location().as_slice().to_vec());
+        if exist_info.first_arg != op_first_arg {
+            return;
+        }
+
+        // Emit offense on file operation (only for non-force methods)
+        if !is_force_method(method) {
+            let replacement = replacement_method(method);
+            let loc = file_op_call.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Use atomic file operation method `FileUtils.{replacement}`."),
+            ));
+        }
+
+        // Emit offense on the existence check condition
+        // Range: from the if/unless keyword through the end of the condition
+        let keyword_start = if let Some(if_node) = node.as_if_node() {
+            if let Some(loc) = if_node.if_keyword_loc() {
+                loc.start_offset()
+            } else {
+                return;
+            }
+        } else if let Some(unless_node) = node.as_unless_node() {
+            unless_node.keyword_loc().start_offset()
+        } else {
+            return;
+        };
+
+        let (line, column) = source.offset_to_line_col(keyword_start);
+
+        let recv_str = std::str::from_utf8(&exist_info.recv_name).unwrap_or("File");
+        let method_str = std::str::from_utf8(&exist_info.method_name).unwrap_or("exist?");
+
+        diagnostics.push(self.diagnostic(
+            source,
+            line,
+            column,
+            format!("Remove unnecessary existence check `{recv_str}.{method_str}`."),
+        ));
     }
 }
 
