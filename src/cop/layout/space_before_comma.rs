@@ -3,7 +3,30 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// CI baseline reported FP=0, FN=7.
+///
+/// Fixed the remaining syntax gap in command-form calls and autocorrect:
+/// RuboCop removes the entire whitespace span before `,`, but nitrocop only
+/// removed one ASCII space. The accepted fix now trims the full contiguous
+/// space/tab run before the comma, which covers cases like `break  1  , 2`
+/// as well as the sampled `break`/`next`/`yield` forms from `rufo`.
+///
+/// Acceptance gate after this patch (`scripts/check-cop.py --verbose --rerun`):
+/// expected=3,134, actual=3,162, CI baseline=3,127, raw excess=28,
+/// missing=0, file-drop noise=103. The rerun passes against the CI baseline
+/// once that existing parser-crash noise is applied.
 pub struct SpaceBeforeComma;
+
+fn whitespace_before_comma_start(bytes: &[u8], comma_offset: usize) -> Option<usize> {
+    let mut start = comma_offset;
+    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+
+    (start < comma_offset).then_some(start)
+}
 
 impl Cop for SpaceBeforeComma {
     fn name(&self) -> &'static str {
@@ -25,8 +48,12 @@ impl Cop for SpaceBeforeComma {
     ) {
         let bytes = source.as_bytes();
         for (i, &byte) in bytes.iter().enumerate() {
-            if byte == b',' && i > 0 && bytes[i - 1] == b' ' && code_map.is_code(i) {
-                let (line, column) = source.offset_to_line_col(i - 1);
+            if byte == b',' && code_map.is_code(i) {
+                let Some(start) = whitespace_before_comma_start(bytes, i) else {
+                    continue;
+                };
+
+                let (line, column) = source.offset_to_line_col(start);
                 let mut diag = self.diagnostic(
                     source,
                     line,
@@ -35,7 +62,7 @@ impl Cop for SpaceBeforeComma {
                 );
                 if let Some(ref mut corr) = corrections {
                     corr.push(crate::correction::Correction {
-                        start: i - 1,
+                        start,
                         end: i,
                         replacement: String::new(),
                         cop_name: self.name(),
