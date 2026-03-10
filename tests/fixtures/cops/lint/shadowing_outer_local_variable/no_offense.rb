@@ -65,22 +65,69 @@ def different_branches
   end
 end
 
-# Inner block param inside a conditional, outer var not — suppressed
-def some_method(env)
-  if some_condition
-    pages.each do |env|
-      do_something(env)
+# Variable used in declaration of outer — block is the RHS of the assignment
+def some_method
+  foo = bar { |foo| baz(foo) }
+end
+
+# Variable used in return value assignment of if
+def some_method
+  foo = if condition
+          bar { |foo| baz(foo) }
+        end
+end
+
+# Different branches of if condition
+def some_method
+  if condition?
+    foo = 1
+  elsif other_condition?
+    bar.each do |foo|
+    end
+  else
+    bar.each do |foo|
     end
   end
 end
 
-# Block param shadowing inside if/unless branch — suppressed
-def handler(name)
-  if block_given?
-    items.each do |name|
-      yield name
+# Different branches of unless condition
+def some_method
+  unless condition?
+    foo = 1
+  else
+    bar.each do |foo|
     end
   end
+end
+
+# Different branches of if condition in a nested node
+def some_method
+  if condition?
+    foo = 1
+  else
+    bar = [1, 2, 3]
+    bar.each do |foo|
+    end
+  end
+end
+
+# Different branches of case condition
+def some_method
+  case condition
+  when foo then
+    foo = 1
+  else
+    bar.each do |foo|
+    end
+  end
+end
+
+# Sibling block variables (from prior block body) don't shadow
+def x(array)
+  array.each { |foo|
+    bar = foo
+  }.each { |bar|
+  }
 end
 
 # Class-level begin block vars don't shadow method-level block params

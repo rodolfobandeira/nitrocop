@@ -5,6 +5,21 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Checks for block parameters or block-local variables that shadow outer local variables.
+///
+/// ## Root causes of historical FP/FN (corpus conformance ~57%):
+///
+/// 1. **FP: Variable added to scope before RHS visited.** `visit_local_variable_write_node`
+///    called `add_local` before visiting the value child. This caused `foo = bar { |foo| ... }`
+///    to incorrectly flag `foo` as shadowing, because the LHS `foo` was already in scope when
+///    the block was processed. RuboCop's VariableForce processes the RHS before declaring the
+///    variable, so `foo` isn't in scope yet. Fix: visit the value first, then add to scope.
+///
+/// 2. **FN: Overly aggressive conditional suppression.** The `is_different_conditional_branch`
+///    function had a `(None, Some(_)) => true` case that suppressed ALL shadowing when the
+///    block was inside any conditional but the outer var was not. Per RuboCop, suppression
+///    only applies when BOTH the outer var and the block are in different branches of the
+///    SAME conditional node. Fix: remove the incorrect `(None, Some(_))` case.
 pub struct ShadowingOuterLocalVariable;
 
 impl Cop for ShadowingOuterLocalVariable {
@@ -85,6 +100,38 @@ impl ShadowVisitor<'_, '_> {
     fn current_conditional_branch(&self) -> Option<(usize, usize)> {
         self.conditional_branch_stack.last().copied()
     }
+
+    /// Visit an if/elsif/else chain using a consistent top-level offset.
+    /// This ensures all branches of an if/elsif/else chain share the same
+    /// conditional identity for the `is_different_conditional_branch` check.
+    fn visit_if_node_with_offset(&mut self, node: &ruby_prism::IfNode<'_>, if_offset: usize) {
+        // Visit predicate normally
+        self.visit(&node.predicate());
+
+        // Visit then-body with branch tracking
+        if let Some(stmts) = node.statements() {
+            let branch_offset = stmts.location().start_offset();
+            self.conditional_branch_stack
+                .push((if_offset, branch_offset));
+            self.visit_statements_node(&stmts);
+            self.conditional_branch_stack.pop();
+        }
+
+        // Visit else/elsif with branch tracking, using the SAME if_offset
+        if let Some(subsequent) = node.subsequent() {
+            if let Some(elsif_node) = subsequent.as_if_node() {
+                // elsif — recurse with same top-level if_offset
+                self.visit_if_node_with_offset(&elsif_node, if_offset);
+            } else {
+                // else clause
+                let branch_offset = subsequent.location().start_offset();
+                self.conditional_branch_stack
+                    .push((if_offset, branch_offset));
+                self.visit(&subsequent);
+                self.conditional_branch_stack.pop();
+            }
+        }
+    }
 }
 
 impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
@@ -129,11 +176,100 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        // Visit the value (RHS) BEFORE adding the variable to scope.
+        // This matches RuboCop's VariableForce which processes the RHS before
+        // declaring the LHS variable. Without this ordering, patterns like
+        // `foo = bar { |foo| baz(foo) }` would incorrectly flag `foo` as
+        // shadowing because the LHS `foo` would already be in scope.
+        self.visit(&node.value());
         let name = std::str::from_utf8(node.name().as_slice())
             .unwrap_or("")
             .to_string();
         self.add_local(&name);
-        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+    ) {
+        self.visit(&node.value());
+        let name = std::str::from_utf8(node.name().as_slice())
+            .unwrap_or("")
+            .to_string();
+        self.add_local(&name);
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+    ) {
+        self.visit(&node.value());
+        let name = std::str::from_utf8(node.name().as_slice())
+            .unwrap_or("")
+            .to_string();
+        self.add_local(&name);
+    }
+
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.visit(&node.value());
+        let name = std::str::from_utf8(node.name().as_slice())
+            .unwrap_or("")
+            .to_string();
+        self.add_local(&name);
+    }
+
+    fn visit_local_variable_target_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableTargetNode<'pr>,
+    ) {
+        let name = std::str::from_utf8(node.name().as_slice())
+            .unwrap_or("")
+            .to_string();
+        self.add_local(&name);
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        // Visit the value (RHS) first before adding targets to scope
+        self.visit(&node.value());
+        // Then add all target locals to scope
+        for target in node.lefts().iter() {
+            if let Some(local) = target.as_local_variable_target_node() {
+                let name = std::str::from_utf8(local.name().as_slice())
+                    .unwrap_or("")
+                    .to_string();
+                self.add_local(&name);
+            }
+        }
+        if let Some(rest) = node.rest() {
+            if let Some(splat) = rest.as_splat_node() {
+                if let Some(expr) = splat.expression() {
+                    if let Some(local) = expr.as_local_variable_target_node() {
+                        let name = std::str::from_utf8(local.name().as_slice())
+                            .unwrap_or("")
+                            .to_string();
+                        self.add_local(&name);
+                    }
+                }
+            }
+        }
+        for target in node.rights().iter() {
+            if let Some(local) = target.as_local_variable_target_node() {
+                let name = std::str::from_utf8(local.name().as_slice())
+                    .unwrap_or("")
+                    .to_string();
+                self.add_local(&name);
+            }
+        }
+    }
+
+    // Singleton class (class << self) creates a new scope
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        self.scopes.push(HashMap::new());
+        ruby_prism::visit_singleton_class_node(self, node);
+        self.scopes.pop();
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
@@ -271,6 +407,32 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         self.scopes.pop();
     }
 
+    // Track unless/else branches for the same_conditions_node_different_branch check.
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        let unless_offset = node.location().start_offset();
+
+        // Visit predicate normally
+        self.visit(&node.predicate());
+
+        // Visit body (the unless-true branch) with branch tracking
+        if let Some(stmts) = node.statements() {
+            let branch_offset = stmts.location().start_offset();
+            self.conditional_branch_stack
+                .push((unless_offset, branch_offset));
+            self.visit_statements_node(&stmts);
+            self.conditional_branch_stack.pop();
+        }
+
+        // Visit else clause with branch tracking
+        if let Some(else_clause) = node.else_clause() {
+            let branch_offset = else_clause.location().start_offset();
+            self.conditional_branch_stack
+                .push((unless_offset, branch_offset));
+            self.visit_else_node(&else_clause);
+            self.conditional_branch_stack.pop();
+        }
+    }
+
     // Handle for loops and while/until which share scope
     fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
         ruby_prism::visit_for_node(self, node);
@@ -314,29 +476,18 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
 
     // Track if/unless branches for the same_conditions_node_different_branch check.
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        let if_offset = node.location().start_offset();
-
-        // Visit predicate normally
-        self.visit(&node.predicate());
-
-        // Visit then-body with branch tracking
-        if let Some(stmts) = node.statements() {
-            let branch_offset = stmts.location().start_offset();
-            self.conditional_branch_stack
-                .push((if_offset, branch_offset));
-            self.visit_statements_node(&stmts);
-            self.conditional_branch_stack.pop();
-        }
-
-        // Visit else-body with branch tracking
-        if let Some(subsequent) = node.subsequent() {
-            let branch_offset = subsequent.location().start_offset();
-            self.conditional_branch_stack
-                .push((if_offset, branch_offset));
-            self.visit(&subsequent);
-            self.conditional_branch_stack.pop();
-        }
+        // Find the top-level if offset — for elsif chains, we want the
+        // outermost if so all branches share the same conditional identity.
+        let if_offset = top_level_if_offset(node);
+        self.visit_if_node_with_offset(node, if_offset);
     }
+}
+
+/// Get the offset for an if node — just uses the node's own offset.
+/// This is the entry point; elsif chains use `visit_if_node_with_offset`
+/// to propagate the top-level offset.
+fn top_level_if_offset(node: &ruby_prism::IfNode<'_>) -> usize {
+    node.location().start_offset()
 }
 
 /// Check if two conditional branch contexts are in different branches of the
@@ -347,13 +498,10 @@ fn is_different_conditional_branch(
 ) -> bool {
     match (outer_branch, block_branch) {
         (Some((case1, branch1)), Some((case2, branch2))) => {
-            // Same conditional node but different branch
+            // Same conditional node but different branch — suppress shadowing
+            // because the two variables can never both be in scope.
             case1 == case2 && branch1 != branch2
         }
-        // RuboCop suppresses when the inner (shadowing) variable is inside
-        // a conditional but the outer (shadowed) variable is not. The rationale
-        // is that conditional shadowing is less problematic.
-        (None, Some(_)) => true,
         _ => false,
     }
 }
