@@ -8,6 +8,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=27, FN=2.
+///
+/// FP=27: Prism surfaces array and other collection-style literals as distinct
+/// node kinds, and RuboCop's `literal?` helper accepts them as unambiguous
+/// range boundaries. nitrocop was only allowing a narrower basic-literal set,
+/// so ranges like `[1, 0]...[1, 6]` were flagged incorrectly.
+///
+/// FN=2: Prism keeps `limit.times do ... end` as a `CallNode` boundary with an
+/// attached `BlockNode`. RuboCop requires parentheses for that boundary because
+/// the trailing block keeps the range parsing ambiguous; nitrocop was treating
+/// every non-operator call boundary as acceptable.
 pub struct AmbiguousRange;
 
 impl Cop for AmbiguousRange {
@@ -115,6 +128,13 @@ fn is_acceptable_boundary(node: &ruby_prism::Node<'_>, require_parens_for_chains
         || node.as_rational_node().is_some()
         || node.as_imaginary_node().is_some()
         || node.as_interpolated_string_node().is_some()
+        || node.as_array_node().is_some()
+        || node.as_hash_node().is_some()
+        || node.as_keyword_hash_node().is_some()
+        || node.as_regular_expression_node().is_some()
+        || node.as_interpolated_regular_expression_node().is_some()
+        || node.as_x_string_node().is_some()
+        || node.as_interpolated_symbol_node().is_some()
     {
         return true;
     }
@@ -140,6 +160,11 @@ fn is_acceptable_boundary(node: &ruby_prism::Node<'_>, require_parens_for_chains
 
     // Method calls
     if let Some(call) = node.as_call_node() {
+        // A trailing block keeps the boundary ambiguous: `1..limit.times do`.
+        if call.block().is_some() {
+            return false;
+        }
+
         // Unary operations (negation, etc) are acceptable
         let name = call.name().as_slice();
         if call.receiver().is_some()

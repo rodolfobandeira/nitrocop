@@ -12,3 +12,4 @@ obj[0]..obj[1]
 (a + 1)..b
 (a * 2)..b
 (MESSAGES_PER_CONVERSATION + 5)..10
+[1, 0]...[1, 6]

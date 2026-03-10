@@ -14,3 +14,8 @@ a + 1..b - 1
 
 x * 2..y
 ^^^^^ Lint/AmbiguousRange: Wrap complex range boundaries with parentheses to avoid ambiguity.
+
+1..limit.times do
+   ^^^^^^^^^^^ Lint/AmbiguousRange: Wrap complex range boundaries with parentheses to avoid ambiguity.
+  work
+end
