@@ -32,6 +32,28 @@ use crate::parse::source::SourceFile;
 /// Fix: detect whitespace in the block param source (location length >
 /// name length + 1) and skip body forwarding offenses when present. This
 /// replicates RuboCop's source-comparison quirk.
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=0, FN=3. All 3 FNs from rest-client where
+/// both param and body usage have matching whitespace (e.g., `& block` in
+/// both positions). Attempted fix: per-usage source text comparison instead
+/// of blanket `has_space_in_param` skip (commit 10a4cbe9, reverted 60638464).
+///
+/// Regression: the per-usage comparison caused FP=1138. Root cause not fully
+/// determined but likely related to `visit_yield_node` counting `yield` as
+/// forwarding (sets `has_forwarding=true`) while not adding to
+/// `forwarding_locations`. When `has_forwarding || !has_any_reference` is true
+/// and the param offense fires, the old blanket skip prevented body offenses
+/// but the new per-usage loop emits them. Additionally, RuboCop's
+/// `block_argument_name_matched?` has `return false if
+/// block_pass_node.children.first&.sym_type?` which skips `&:method_name`
+/// symbol block passes — our visitor may be matching those as forwarding.
+///
+/// A correct fix needs to: (1) only compare source text when
+/// `has_space_in_param` is true (keeping the old behavior for normal cases),
+/// and (2) verify that `forwarding_locations` correctly excludes symbol
+/// block passes (`&:foo`).
 pub struct BlockForwarding;
 
 impl Cop for BlockForwarding {
