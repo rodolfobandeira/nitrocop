@@ -5,3 +5,5 @@ y = 2
 z = 3
 a = 4  
      ^^ Layout/TrailingWhitespace: Trailing whitespace detected.
+wide = :a　
+         ^ Layout/TrailingWhitespace: Trailing whitespace detected.

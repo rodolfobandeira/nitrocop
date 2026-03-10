@@ -2,7 +2,54 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// CI baseline reported FP=6, FN=108.
+///
+/// Fixed a confirmed behavior gap in the local and vendor coverage: the
+/// trailing scan previously handled only ASCII spaces and tabs. It now also
+/// recognizes UTF-8 full-width spaces (`U+3000`) and strips a line-ending `\r`
+/// before computing the trailing span so diagnostics and autocorrect stay
+/// aligned on CRLF input.
+///
+/// Sampled corpus `# ` comment lines were consistent with existing file-drop
+/// noise and did not justify a broader comment-specific change, so the
+/// accepted patch stayed narrow.
+///
+/// Acceptance gate after this patch (`scripts/check-cop.py --verbose --rerun`):
+/// expected=73,221, actual=71,636, CI baseline=73,119, excess=0, missing=1,585,
+/// file-drop noise=1,014.
+///
+/// Remaining gap: 1,585 potential FN remain. This batch only fixed the
+/// Unicode/offset handling path; the remaining misses were not reduced further.
 pub struct TrailingWhitespace;
+
+fn strip_line_ending_carriage_return(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+fn trailing_whitespace_start(line: &[u8]) -> Option<usize> {
+    let mut end = line.len();
+    let mut found = false;
+
+    while end > 0 {
+        if matches!(line[end - 1], b' ' | b'\t') {
+            end -= 1;
+            found = true;
+            continue;
+        }
+
+        if end >= 3 && line[end - 3..end] == [0xE3, 0x80, 0x80] {
+            end -= 3;
+            found = true;
+            continue;
+        }
+
+        break;
+    }
+
+    found.then_some(end)
+}
 
 impl Cop for TrailingWhitespace {
     fn name(&self) -> &'static str {
@@ -81,61 +128,34 @@ impl Cop for TrailingWhitespace {
                 }
             }
 
+            let line = strip_line_ending_carriage_return(line);
             if line.is_empty() {
                 continue;
             }
-            let last_content = line.iter().rposition(|&b| b != b' ' && b != b'\t');
-            match last_content {
-                Some(pos) if pos + 1 < line.len() => {
-                    let mut diag = self.diagnostic(
-                        source,
-                        i + 1,
-                        pos + 1,
-                        "Trailing whitespace detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        if let (Some(start), Some(end)) = (
-                            source.line_col_to_offset(i + 1, pos + 1),
-                            source.line_col_to_offset(i + 1, line.len()),
-                        ) {
-                            corr.push(crate::correction::Correction {
-                                start,
-                                end,
-                                replacement: String::new(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                    }
-                    diagnostics.push(diag);
+            if let Some(trailing_start) = trailing_whitespace_start(line) {
+                let Some(line_start) = source.line_col_to_offset(i + 1, 0) else {
+                    continue;
+                };
+                let start = line_start + trailing_start;
+                let end = line_start + line.len();
+                let (line_num, column) = source.offset_to_line_col(start);
+                let mut diag = self.diagnostic(
+                    source,
+                    line_num,
+                    column,
+                    "Trailing whitespace detected.".to_string(),
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start,
+                        end,
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
                 }
-                None => {
-                    // Entire line is whitespace
-                    let mut diag = self.diagnostic(
-                        source,
-                        i + 1,
-                        0,
-                        "Trailing whitespace detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        if let (Some(start), Some(end)) = (
-                            source.line_col_to_offset(i + 1, 0),
-                            source.line_col_to_offset(i + 1, line.len()),
-                        ) {
-                            corr.push(crate::correction::Correction {
-                                start,
-                                end,
-                                replacement: String::new(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                    }
-                    diagnostics.push(diag);
-                }
-                _ => {}
+                diagnostics.push(diag);
             }
         }
     }
