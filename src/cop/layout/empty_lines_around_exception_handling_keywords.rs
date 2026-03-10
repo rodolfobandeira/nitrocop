@@ -4,6 +4,19 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=8, FN=2.
+///
+/// Attempted fix: accept compact `rescue=>e` headers and ignore single-line
+/// `rescue ...; end` clauses. The local fixture additions passed, but the corpus
+/// gate regressed from `expected=540, actual=546, excess=6` to
+/// `expected=540, actual=583, excess=43` and introduced 35 offenses on
+/// `cerebris__jsonapi-resources__e92afc6`, where the corpus artifact reports
+/// zero inspected files for this cop. That change was reverted.
+///
+/// A correct fix needs a narrower discriminator for compact rescue syntax that
+/// does not light up zero-baseline corpus repos.
 pub struct EmptyLinesAroundExceptionHandlingKeywords;
 
 const KEYWORDS: &[&[u8]] = &[b"rescue", b"ensure", b"else"];
