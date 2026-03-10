@@ -116,6 +116,23 @@ use crate::parse::source::SourceFile;
 /// - method_receiver_excluded?: not implemented but would cause FP, not FN
 /// - is_single_heredoc_expression: correctly handles single-heredoc-body blocks
 /// - Brace blocks with body on closing line: already handled by closing-line adjustment
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Investigated the 128 FN in depth. Root cause: `--corpus-check` mode's
+/// `AllCops.Exclude` handling. The `strip_prefix(repo_path)` makes file paths
+/// repo-relative (e.g., `bin/foo.rb`), which matches baseline `Exclude`
+/// patterns like `bin/**/*`. On CI, paths are `repos/<repo_id>/bin/foo.rb`
+/// which do NOT match `bin/**/*`, so CI includes those files.
+///
+/// Removing the global exclude check to match CI behavior causes 510 excess
+/// offenses due to file-set differences (local corpus clones have files CI
+/// shallow clones don't). The current behavior (repo-relative exclude) is
+/// slightly more aggressive than CI but compensates for these file-set
+/// differences, keeping the net result close to CI's 0 FP, 0 FN.
+///
+/// On the CI corpus oracle: FP=0, FN=0. The 128 local FN are purely a
+/// `--corpus-check` mode artifact, not a cop logic issue.
 pub struct BlockLength;
 
 impl Cop for BlockLength {
