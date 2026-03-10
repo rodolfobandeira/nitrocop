@@ -114,3 +114,11 @@ in x then do_foo
 in y then do_foo
 ^^^^^^^^^^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
 end
+
+# Branches with semantically identical strings but different escape syntax are duplicates
+unless "\u2028" == 'u2028'
+  "{\"bar\":\"\u2028 and \u2029\"}"
+else
+^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  "{\"bar\":\"\342\200\250 and \342\200\251\"}"
+end

@@ -39,6 +39,19 @@ use crate::parse::source::SourceFile;
 /// 7. **Offense location** - RuboCop reports on the `else` keyword for else-branch
 ///    duplicates, and on the parent clause node (elsif/when/rescue/in) for others.
 ///    The ternary case reports on the false-branch expression itself. Fixed to match.
+///
+/// ## Follow-up (2026-03-10)
+///
+/// Remaining FNs include branches whose source differs but whose literal values
+/// are equivalent. One real corpus case used two string literals with different
+/// escape spellings (`"\u2028"` vs `"\342\200\250"`) that both decode to the
+/// same Ruby string, which RuboCop treats as duplicate branch bodies.
+///
+/// Fix: keep the existing source-based comparison for general branches, but
+/// canonicalize single string-literal branches by their unescaped bytes so those
+/// escape-equivalent forms compare equal. Also treat `KeywordHashNode` as a
+/// literal branch for the `IgnoreLiteralBranches` config path to satisfy the
+/// Prism hash/keyword-hash split.
 pub struct DuplicateBranch;
 
 impl Cop for DuplicateBranch {
@@ -139,9 +152,23 @@ impl Cop for DuplicateBranch {
 /// delimiter (`<<~RUBY`), not the heredoc content/closing. We use a
 /// `MaxExtentFinder` visitor to discover the true end offset including
 /// heredoc closing locations, then slice the full source range.
+///
+/// For single plain string-literal branches, use the unescaped byte content
+/// instead of the original source so equivalent escape spellings compare equal.
 fn stmts_source(source: &SourceFile, stmts: &Option<ruby_prism::StatementsNode<'_>>) -> Vec<u8> {
     match stmts {
         Some(s) => {
+            let body = s.body();
+            if body.len() == 1 {
+                if let Some(node) = body.iter().next() {
+                    if let Some(string) = node.as_string_node() {
+                        let mut fingerprint = b"string:".to_vec();
+                        fingerprint.extend_from_slice(string.unescaped());
+                        return fingerprint;
+                    }
+                }
+            }
+
             let loc = s.location();
             let start = loc.start_offset();
             let mut end = loc.end_offset();
@@ -250,6 +277,17 @@ fn is_literal_node(node: &ruby_prism::Node<'_>, ignore_constant: bool) -> bool {
     }
 
     if let Some(hash) = node.as_hash_node() {
+        return hash.elements().iter().all(|e| {
+            if let Some(assoc) = e.as_assoc_node() {
+                is_literal_node(&assoc.key(), ignore_constant)
+                    && is_literal_node(&assoc.value(), ignore_constant)
+            } else {
+                false
+            }
+        });
+    }
+
+    if let Some(hash) = node.as_keyword_hash_node() {
         return hash.elements().iter().all(|e| {
             if let Some(assoc) = e.as_assoc_node() {
                 is_literal_node(&assoc.key(), ignore_constant)
@@ -688,4 +726,17 @@ fn check_rescue_branches(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(DuplicateBranch, "cops/lint/duplicate_branch");
+
+    #[test]
+    fn keyword_hash_counts_as_literal_branch() {
+        let result = ruby_prism::parse(b"call(foo: 1)\n");
+        let root = result.node();
+        let program = root.as_program_node().unwrap();
+        let stmts = program.statements();
+        let call = stmts.body().iter().next().unwrap().as_call_node().unwrap();
+        let arg = call.arguments().unwrap().arguments().iter().next().unwrap();
+
+        assert!(arg.as_keyword_hash_node().is_some());
+        assert!(is_literal_node(&arg, false));
+    }
 }
