@@ -6,15 +6,20 @@ use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-10)
 ///
-/// Corpus oracle reported FP=2, FN=27.
+/// Cached corpus oracle reported FP=11, FN=2.
 ///
-/// FN=27: The missing cases are access modifiers inside `do ... end` bodies such
-/// as `included do`, `Class.new do`, and `Module.new do`. The original
-/// implementation only inspected class/module/sclass bodies, so block-bodied
-/// containers were never checked.
+/// Fixed: this cop was already walking block bodies, but it still hardcoded a
+/// 2-space indent for `EnforcedStyle: indent` and ignored `Layout/IndentationWidth`.
+/// That produced false positives in width-4 repos and missed corresponding
+/// under-indented modifiers in the same configs. The local tests now cover both
+/// sides of that width-sensitive behavior.
 ///
-/// FP=2: The remaining corpus false positives were not reproduced with local
-/// fixture coverage during this patch and are left unchanged.
+/// Acceptance gate after this patch (`scripts/check-cop.py --verbose --rerun`):
+/// expected=1,859, actual=1,843, CI baseline=1,868, excess=0, missing=16.
+///
+/// Remaining gap: the rerun still under-reports 16 RuboCop offenses. Those
+/// false negatives were not investigated in this batch; the immediate fix here
+/// was eliminating the width-related false positives safely.
 pub struct AccessModifierIndentation;
 
 const ACCESS_MODIFIERS: &[&[u8]] = &[b"private", b"protected", b"public", b"module_function"];
@@ -52,7 +57,7 @@ impl Cop for AccessModifierIndentation {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "indent");
-        let _indent_width = config.get_usize("IndentationWidth", 2);
+        let indent_width = config.get_usize("IndentationWidth", 2);
 
         // We need a class, module, sclass, or block node that contains access modifiers
         let (body, container_offset) = if let Some(class_node) = node.as_class_node() {
@@ -120,7 +125,7 @@ impl Cop for AccessModifierIndentation {
 
             let expected_col = match style {
                 "outdent" => container_indent,
-                _ => container_indent + 2, // "indent" (default)
+                _ => container_indent + indent_width,
             };
 
             if mod_col != expected_col {
@@ -144,9 +149,44 @@ impl Cop for AccessModifierIndentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full_with_config;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         AccessModifierIndentation,
         "cops/layout/access_modifier_indentation"
     );
+
+    #[test]
+    fn honors_indentation_width_for_block_bodies() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "IndentationWidth".into(),
+                serde_yml::Value::Number(4.into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"describe Foo do\n    private\n    def helper; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert!(
+            diags.is_empty(),
+            "width 4 should accept a 4-space access modifier inside a block: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn flags_under_indented_block_bodies_when_indentation_width_is_four() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "IndentationWidth".into(),
+                serde_yml::Value::Number(4.into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"describe Foo do\n  private\n    def helper; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert_eq!(diags.len(), 1, "expected one offense, got: {:?}", diags);
+        assert_eq!(diags[0].message, "Indent access modifiers like `private`.");
+    }
 }
