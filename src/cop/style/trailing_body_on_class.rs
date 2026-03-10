@@ -3,7 +3,40 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus FP fix: When a class/module body contains rescue/ensure, Prism wraps
+/// the body in a BeginNode whose location starts on the class keyword line
+/// (since the begin is implicit). We must drill into the first actual statement
+/// inside the BeginNode to get the real body start line, matching the pattern
+/// used in TrailingBodyOnMethodDefinition.
 pub struct TrailingBodyOnClass;
+
+/// Get the line and column of the first actual statement in a body node.
+/// For BeginNode (implicit begin wrapping rescue/ensure), the node's own
+/// location may start on the class/module keyword line, so we drill into
+/// the statements to find the real first line.
+fn first_body_line_col(source: &SourceFile, body: &ruby_prism::Node<'_>) -> (usize, usize) {
+    if let Some(begin_node) = body.as_begin_node() {
+        if let Some(stmts) = begin_node.statements() {
+            let stmts_body = stmts.body();
+            if let Some(first_stmt) = stmts_body.iter().next() {
+                let loc = first_stmt.location();
+                return source.offset_to_line_col(loc.start_offset());
+            }
+        }
+        // No statements — check rescue clause location
+        if let Some(rescue) = begin_node.rescue_clause() {
+            let loc = rescue.location();
+            return source.offset_to_line_col(loc.start_offset());
+        }
+        // ensure with no statements or rescue
+        if let Some(ensure) = begin_node.ensure_clause() {
+            let loc = ensure.ensure_keyword_loc();
+            return source.offset_to_line_col(loc.start_offset());
+        }
+    }
+    let loc = body.location();
+    source.offset_to_line_col(loc.start_offset())
+}
 
 impl Cop for TrailingBodyOnClass {
     fn name(&self) -> &'static str {
@@ -30,11 +63,9 @@ impl Cop for TrailingBodyOnClass {
                 None => return,
             };
 
-            // Check if class keyword line equals body start line
             let class_loc = class_node.constant_path().location();
             let (class_line, _) = source.offset_to_line_col(class_loc.start_offset());
-            let body_loc = body.location();
-            let (body_line, body_column) = source.offset_to_line_col(body_loc.start_offset());
+            let (body_line, body_column) = first_body_line_col(source, &body);
 
             if class_line == body_line {
                 // Single-line class definition (end on same line as class) — not an offense
@@ -62,8 +93,7 @@ impl Cop for TrailingBodyOnClass {
 
             let kw_loc = sclass_node.class_keyword_loc();
             let (kw_line, _) = source.offset_to_line_col(kw_loc.start_offset());
-            let body_loc = body.location();
-            let (body_line, body_column) = source.offset_to_line_col(body_loc.start_offset());
+            let (body_line, body_column) = first_body_line_col(source, &body);
 
             if kw_line == body_line {
                 // Single-line singleton class (end on same line as class) — not an offense

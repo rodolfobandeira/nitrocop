@@ -3,7 +3,38 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus FP fix: When a module body contains rescue/ensure, Prism wraps the
+/// body in a BeginNode whose location starts on the module keyword line (since
+/// the begin is implicit). We drill into the first actual statement inside the
+/// BeginNode to get the real body start line. Same root cause and fix as
+/// TrailingBodyOnClass.
 pub struct TrailingBodyOnModule;
+
+/// Get the line and column of the first actual statement in a body node.
+/// For BeginNode (implicit begin wrapping rescue/ensure), the node's own
+/// location may start on the module keyword line, so we drill into
+/// the statements to find the real first line.
+fn first_body_line_col(source: &SourceFile, body: &ruby_prism::Node<'_>) -> (usize, usize) {
+    if let Some(begin_node) = body.as_begin_node() {
+        if let Some(stmts) = begin_node.statements() {
+            let stmts_body = stmts.body();
+            if let Some(first_stmt) = stmts_body.iter().next() {
+                let loc = first_stmt.location();
+                return source.offset_to_line_col(loc.start_offset());
+            }
+        }
+        if let Some(rescue) = begin_node.rescue_clause() {
+            let loc = rescue.location();
+            return source.offset_to_line_col(loc.start_offset());
+        }
+        if let Some(ensure) = begin_node.ensure_clause() {
+            let loc = ensure.ensure_keyword_loc();
+            return source.offset_to_line_col(loc.start_offset());
+        }
+    }
+    let loc = body.location();
+    source.offset_to_line_col(loc.start_offset())
+}
 
 impl Cop for TrailingBodyOnModule {
     fn name(&self) -> &'static str {
@@ -33,11 +64,9 @@ impl Cop for TrailingBodyOnModule {
             None => return,
         };
 
-        // Check if module keyword line equals body start line
         let mod_loc = module_node.constant_path().location();
         let (mod_line, _) = source.offset_to_line_col(mod_loc.start_offset());
-        let body_loc = body.location();
-        let (body_line, body_column) = source.offset_to_line_col(body_loc.start_offset());
+        let (body_line, body_column) = first_body_line_col(source, &body);
 
         // Only flag multiline modules (RuboCop's `multiline?` check).
         // Single-line modules like `module Foo; def bar; end; end` are fine.
