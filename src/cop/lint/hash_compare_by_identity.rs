@@ -1,8 +1,24 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{
+    CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for hashes keyed by `object_id`.
+///
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=0, FN=18.
+///
+/// FN:
+/// - The implementation only matched `foo.object_id`, not bare `object_id`. Real-world code
+///   often uses `hash[object_id]` inside instance methods, where Prism represents the key as a
+///   zero-receiver `CallNode`.
+/// - Residual corpus misses were `hash[key] ||= value` forms. Prism represents those as
+///   `IndexOrWriteNode` / `IndexAndWriteNode` / `IndexOperatorWriteNode`, not normal `CallNode`s.
+/// - Rerunning the corpus gate after handling both shapes matched RuboCop exactly:
+///   expected 74, actual 74, with no potential FP/FN.
 pub struct HashCompareByIdentity;
 
 const HASH_KEY_METHODS: &[&[u8]] = &[b"key?", b"has_key?", b"fetch", b"[]", b"[]="];
@@ -17,7 +33,12 @@ impl Cop for HashCompareByIdentity {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -29,51 +50,87 @@ impl Cop for HashCompareByIdentity {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
+        if let Some(call) = node.as_call_node() {
+            let method_name = call.name().as_slice();
+            if !HASH_KEY_METHODS.contains(&method_name) || call.receiver().is_none() {
+                return;
+            }
 
-        let method_name = call.name().as_slice();
-
-        // Check if it's one of the hash key methods
-        if !HASH_KEY_METHODS.contains(&method_name) {
+            if let Some(first_arg) = first_argument(call.arguments()) {
+                self.add_offense_if_object_id_key(source, &call.as_node(), &first_arg, diagnostics);
+            }
             return;
         }
 
-        // Must have a receiver
-        if call.receiver().is_none() {
+        if let Some(write) = node.as_index_operator_write_node() {
+            if let Some(first_arg) = first_argument(write.arguments()) {
+                self.add_offense_if_object_id_key(
+                    source,
+                    &write.as_node(),
+                    &first_arg,
+                    diagnostics,
+                );
+            }
             return;
         }
 
-        // Check if the first argument is a `.object_id` call
-        let args = match call.arguments() {
-            Some(a) => a,
-            None => return,
-        };
-
-        let arg_list: Vec<_> = args.arguments().iter().collect();
-        if arg_list.is_empty() {
+        if let Some(write) = node.as_index_or_write_node() {
+            if let Some(first_arg) = first_argument(write.arguments()) {
+                self.add_offense_if_object_id_key(
+                    source,
+                    &write.as_node(),
+                    &first_arg,
+                    diagnostics,
+                );
+            }
             return;
         }
 
-        let first_arg = &arg_list[0];
-        if let Some(arg_call) = first_arg.as_call_node() {
-            if arg_call.name().as_slice() == b"object_id" && arg_call.receiver().is_some() {
-                let loc = call.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Use `Hash#compare_by_identity` instead of using `object_id` for keys."
-                            .to_string(),
-                    ),
+        if let Some(write) = node.as_index_and_write_node() {
+            if let Some(first_arg) = first_argument(write.arguments()) {
+                self.add_offense_if_object_id_key(
+                    source,
+                    &write.as_node(),
+                    &first_arg,
+                    diagnostics,
                 );
             }
         }
     }
+}
+
+impl HashCompareByIdentity {
+    fn add_offense_if_object_id_key(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        first_arg: &ruby_prism::Node<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if !is_object_id_call(first_arg) {
+            return;
+        }
+
+        let loc = node.location();
+        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        diagnostics.push(self.diagnostic(
+            source,
+            line,
+            column,
+            "Use `Hash#compare_by_identity` instead of using `object_id` for keys.".to_string(),
+        ));
+    }
+}
+
+fn first_argument(
+    arguments: Option<ruby_prism::ArgumentsNode<'_>>,
+) -> Option<ruby_prism::Node<'_>> {
+    arguments?.arguments().iter().next()
+}
+
+fn is_object_id_call(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_call_node()
+        .is_some_and(|call| call.name().as_slice() == b"object_id")
 }
 
 #[cfg(test)]
