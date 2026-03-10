@@ -9,3 +9,9 @@ begin
 ensure
   cleanup
 end
+
+begin
+  recover
+rescue=>e
+  handle_error
+end

@@ -17,3 +17,11 @@ ensure
 ^ Layout/EmptyLinesAroundExceptionHandlingKeywords: Extra empty line detected after the `ensure`.
   cleanup
 end
+
+begin
+  recover
+rescue=>e
+
+^ Layout/EmptyLinesAroundExceptionHandlingKeywords: Extra empty line detected after the `rescue`.
+  handle_error
+end

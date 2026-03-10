@@ -44,3 +44,11 @@ case x
 else
   default
 end
+
+begin
+  install_ri
+rescue NameError; nil end
+
+def install_rdoc
+  install_rdoc_yard
+end
