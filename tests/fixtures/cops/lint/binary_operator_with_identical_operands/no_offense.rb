@@ -4,3 +4,4 @@ x + x
 1 << 1
 a != b
 c >= d
+mask & mask

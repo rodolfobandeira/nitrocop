@@ -3,6 +3,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=29, FN=9.
+///
+/// FP=29: nitrocop was checking `&`, but RuboCop intentionally leaves that
+/// operator to other cops. The main FP bucket was spec code such as
+/// `false & false` and `mask & mask`.
+///
+/// FN=9: raw source comparison missed semantically identical literals written
+/// with different surface syntax, including `:ruby == :"ruby"` and
+/// `-0.0 <=> 0.0`. RuboCop compares operand nodes semantically, so nitrocop
+/// needs a small amount of literal normalization instead of byte-for-byte text.
 pub struct BinaryOperatorWithIdenticalOperands;
 
 impl Cop for BinaryOperatorWithIdenticalOperands {
@@ -29,11 +41,7 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
     ) {
         // Handle `&&` and `||` (AndNode / OrNode)
         if let Some(and_node) = node.as_and_node() {
-            let left_loc = and_node.left().location();
-            let right_loc = and_node.right().location();
-            let left_src = &source.as_bytes()[left_loc.start_offset()..left_loc.end_offset()];
-            let right_src = &source.as_bytes()[right_loc.start_offset()..right_loc.end_offset()];
-            if left_src == right_src {
+            if operands_match(source, &and_node.left(), &and_node.right()) {
                 let loc = and_node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
@@ -47,11 +55,7 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
         }
 
         if let Some(or_node) = node.as_or_node() {
-            let left_loc = or_node.left().location();
-            let right_loc = or_node.right().location();
-            let left_src = &source.as_bytes()[left_loc.start_offset()..left_loc.end_offset()];
-            let right_src = &source.as_bytes()[right_loc.start_offset()..right_loc.end_offset()];
-            if left_src == right_src {
+            if operands_match(source, &or_node.left(), &or_node.right()) {
                 let loc = or_node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
@@ -73,18 +77,7 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
         let method = call.name().as_slice();
         let is_binary_op = matches!(
             method,
-            b"=="
-                | b"!="
-                | b"==="
-                | b"<=>"
-                | b"=~"
-                | b">"
-                | b">="
-                | b"<"
-                | b"<="
-                | b"|"
-                | b"^"
-                | b"&"
+            b"==" | b"!=" | b"===" | b"<=>" | b"=~" | b">" | b">=" | b"<" | b"<=" | b"|" | b"^"
         );
         if !is_binary_op {
             return;
@@ -106,12 +99,7 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
         }
 
         let first_arg = args.iter().next().unwrap();
-        let recv_loc = receiver.location();
-        let arg_loc = first_arg.location();
-        let recv_src = &source.as_bytes()[recv_loc.start_offset()..recv_loc.end_offset()];
-        let arg_src = &source.as_bytes()[arg_loc.start_offset()..arg_loc.end_offset()];
-
-        if recv_src == arg_src {
+        if operands_match(source, &receiver, &first_arg) {
             let loc = call.location();
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             let op_str = std::str::from_utf8(method).unwrap_or("?");
@@ -123,6 +111,39 @@ impl Cop for BinaryOperatorWithIdenticalOperands {
             ));
         }
     }
+}
+
+fn operands_match(
+    source: &SourceFile,
+    left: &ruby_prism::Node<'_>,
+    right: &ruby_prism::Node<'_>,
+) -> bool {
+    let left_loc = left.location();
+    let right_loc = right.location();
+    let left_src = &source.as_bytes()[left_loc.start_offset()..left_loc.end_offset()];
+    let right_src = &source.as_bytes()[right_loc.start_offset()..right_loc.end_offset()];
+
+    if left_src == right_src {
+        return true;
+    }
+
+    if let (Some(left_sym), Some(right_sym)) = (left.as_symbol_node(), right.as_symbol_node()) {
+        return left_sym.unescaped() == right_sym.unescaped();
+    }
+
+    if let (Some(left_str), Some(right_str)) = (left.as_string_node(), right.as_string_node()) {
+        return left_str.unescaped() == right_str.unescaped();
+    }
+
+    if let (Some(left_float), Some(right_float)) = (left.as_float_node(), right.as_float_node()) {
+        return left_float.value() == right_float.value();
+    }
+
+    if let (Some(left_int), Some(right_int)) = (left.as_integer_node(), right.as_integer_node()) {
+        return left_int.value().to_u32_digits() == right_int.value().to_u32_digits();
+    }
+
+    false
 }
 
 #[cfg(test)]
