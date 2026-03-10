@@ -3,6 +3,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for empty rescue bodies (suppressed exceptions).
+///
+/// ## Investigation (2026-03-10)
+/// Corpus: FP=10, FN=0 (1,804 matches, 99.4% conformance).
+/// Root cause: when `AllowComments` is true (default), the comment check only scanned
+/// lines *between* `rescue_line + 1` and `clause_end_line`, missing trailing comments
+/// on the rescue line itself (e.g., `rescue # ignore` or `rescue StandardError # skip`).
+/// RuboCop treats these as commented rescue bodies and does not flag them.
+/// Fix: also check the rescue keyword line for a trailing `#` comment.
 pub struct SuppressedException;
 
 impl Cop for SuppressedException {
@@ -82,16 +91,33 @@ impl Cop for SuppressedException {
                     };
 
                     let lines: Vec<&[u8]> = source.lines().collect();
-                    for line_num in (rescue_line + 1)..clause_end_line {
-                        if let Some(line) = lines.get(line_num - 1) {
-                            let trimmed = line
-                                .iter()
-                                .position(|&b| b != b' ' && b != b'\t')
-                                .map(|start| &line[start..])
-                                .unwrap_or(&[]);
-                            if trimmed.starts_with(b"#") {
-                                suppressed = false;
-                                break;
+
+                    // Check for trailing comment on the rescue line itself
+                    // (e.g., `rescue # ignore` or `rescue StandardError # skip`)
+                    if let Some(rescue_line_bytes) = lines.get(rescue_line - 1) {
+                        if rescue_line_bytes.windows(1).enumerate().any(|(i, _)| {
+                            rescue_line_bytes[i] == b'#'
+                                && i > 0
+                                && (rescue_line_bytes[i - 1] == b' '
+                                    || rescue_line_bytes[i - 1] == b'\t')
+                        }) {
+                            suppressed = false;
+                        }
+                    }
+
+                    // Check for comment lines between rescue and clause end
+                    if suppressed {
+                        for line_num in (rescue_line + 1)..clause_end_line {
+                            if let Some(line) = lines.get(line_num - 1) {
+                                let trimmed = line
+                                    .iter()
+                                    .position(|&b| b != b' ' && b != b'\t')
+                                    .map(|start| &line[start..])
+                                    .unwrap_or(&[]);
+                                if trimmed.starts_with(b"#") {
+                                    suppressed = false;
+                                    break;
+                                }
                             }
                         }
                     }
