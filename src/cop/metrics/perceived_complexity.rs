@@ -99,6 +99,18 @@ use crate::parse::source::SourceFile;
 ///
 /// Both fixes applied simultaneously to avoid net FP regression that occurred
 /// when only fix #1 was applied in isolation (commit 044592b8, previously reverted).
+///
+/// ## FP fix (2026-03-10) — begin...end while/until overcounting
+///
+/// Root cause: In the Parser gem, `begin...end while cond` produces `:while_post`
+/// and `begin...end until cond` produces `:until_post`, which are NOT included in
+/// COUNTED_NODES. In Prism, both forms are WhileNode/UntilNode with the
+/// `begin_modifier` flag set. nitrocop was counting these as +1, but they should
+/// be skipped entirely. Fix: check `is_begin_modifier()` and skip counting.
+///
+/// Affected repos: SquareSquash/web (bin/setup:149), discourse (config.rb:105),
+/// huginn (switch_to_json_serialization.rb:45), optcarrot (apu.rb:559).
+/// All 4 FPs had score 9 vs threshold 8, overcounted by exactly 1.
 pub struct PerceivedComplexity;
 
 /// Known iterating method names that make blocks count toward complexity.
@@ -244,9 +256,25 @@ impl PerceivedCounter {
                 }
             }
 
-            ruby_prism::Node::WhileNode { .. }
-            | ruby_prism::Node::UntilNode { .. }
-            | ruby_prism::Node::ForNode { .. }
+            // In Parser gem, `begin...end while cond` produces :while_post
+            // (and `begin...end until` produces :until_post), which are NOT in
+            // COUNTED_NODES. In Prism both forms are WhileNode/UntilNode with
+            // the `begin_modifier` flag set. Skip counting when that flag is set.
+            ruby_prism::Node::WhileNode { .. } => {
+                if let Some(while_node) = node.as_while_node() {
+                    if !while_node.is_begin_modifier() {
+                        self.complexity += 1;
+                    }
+                }
+            }
+            ruby_prism::Node::UntilNode { .. } => {
+                if let Some(until_node) = node.as_until_node() {
+                    if !until_node.is_begin_modifier() {
+                        self.complexity += 1;
+                    }
+                }
+            }
+            ruby_prism::Node::ForNode { .. }
             | ruby_prism::Node::AndNode { .. }
             | ruby_prism::Node::OrNode { .. }
             | ruby_prism::Node::RescueModifierNode { .. } => {

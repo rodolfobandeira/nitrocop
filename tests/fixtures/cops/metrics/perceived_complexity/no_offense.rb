@@ -243,3 +243,38 @@ def method_with_numblocks(items)
     :enumerable
   end
 end
+
+# begin...end while / begin...end until should NOT count as decision points.
+# In Parser gem these produce :while_post/:until_post which are NOT in COUNTED_NODES.
+# Score: base 1 + if/else(2) + ternary(1) + if(1) + &&(1) + &&(1) + ternary(1) = 8 <= 8
+def method_with_begin_end_while(question, default)
+  output = ''
+  begin
+    if default
+      say question, "[#{default.empty? ? 'blank' : default}]"
+    else
+      say question
+    end
+    output = gets.strip
+    output = default if default && output.empty?
+  end while output.empty? && default != ''
+  output == '' ? nil : output
+end
+
+# begin...end until with iterating blocks.
+# Score: base 1 + each(1) + map(1) + each(1) + map(1) + map(1) + map!(1) + map(1) = 8 <= 8
+def method_with_begin_end_until(from, to)
+  fields = %w[a b c]
+  fields.each do |table|
+    cols = fields.map { |f| f.upcase }
+    begin
+      rows = get_rows(table)
+      rows.each do |row|
+        data = row.map { |f| from.call(f) }.map { |f| to.call(f) }
+        data.map! { |f| f.encode('utf-8') }
+        sql = cols.map { |f| "#{f}=?" }.join(", ")
+        execute(sql)
+      end
+    end until rows.count == 0
+  end
+end
