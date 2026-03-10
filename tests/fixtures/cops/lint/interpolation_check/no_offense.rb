@@ -29,3 +29,9 @@ f.puts 'gem "example", path: "#{File.dirname(__FILE__)}/../"'
 
 # Format directive in interpolation-like pattern — not valid Ruby interpolation
 msg = 'Replace interpolated variable `#{%<variable>s}`.'
+
+# Escaped hash — backslash before # means not intended as interpolation
+escaped = '\#{not_interpolation}'
+
+# %w array — strings inside are not flagged
+%w(#{a}-foo)
