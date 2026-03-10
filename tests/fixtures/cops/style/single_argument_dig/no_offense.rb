@@ -24,3 +24,12 @@ end
 def fetch_value(&)
   data.dig(&)
 end
+
+# Chained dig calls — skipped (Style/DigChain handles these)
+# Inner dig in chain: single-arg dig whose result is receiver of another dig
+result.dig(:key).dig(:nested, :deep)
+data.dig('a').dig('b', 'c', 'd')
+response.params.dig('charge').dig('details', 'card')
+
+# Receiver is itself a dig call (outer dig in chain with single arg)
+data.dig(:a).dig(:b)

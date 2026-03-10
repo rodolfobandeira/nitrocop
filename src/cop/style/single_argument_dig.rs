@@ -8,16 +8,17 @@ use crate::parse::source::SourceFile;
 
 /// FP investigation (2026-03-08): 11 FP (8 activemerchant, 2 world_cup_json, 1 anyway_config).
 ///
-/// Root cause: Missing `ForwardingArgumentsNode` check. RuboCop's `IGNORED_ARGUMENT_TYPES`
+/// Root cause 1: Missing `ForwardingArgumentsNode` check. RuboCop's `IGNORED_ARGUMENT_TYPES`
 /// includes `forwarded_args` which maps to Prism's `ForwardingArgumentsNode`. Patterns like
 /// `data.dig(...)` (argument forwarding) were being falsely flagged.
 ///
 /// Other forwarding patterns (`dig(*)`, `dig(**)`, `dig(&)`) were already handled by the
 /// existing `SplatNode`, `KeywordHashNode`, and `BlockArgumentNode` checks respectively.
 ///
-/// Also relevant: RuboCop's `ignore_dig_chain?` skips chained `.dig().dig()` calls when
-/// `Style/DigChain` is enabled. This is not yet implemented but may not affect corpus FPs
-/// since those repos may not have DigChain enabled.
+/// Root cause 2 (2026-03-10): 10 FP from chained `.dig().dig()` calls. RuboCop's
+/// `ignore_dig_chain?` skips single-arg dig calls that are part of a chain when
+/// `Style/DigChain` is enabled (which it is by default — `Enabled: pending` is truthy).
+/// Fixed by checking if the receiver is a dig call OR if `.dig(` follows in the source.
 pub struct SingleArgumentDig;
 
 impl Cop for SingleArgumentDig {
@@ -87,6 +88,21 @@ impl Cop for SingleArgumentDig {
             || arg.as_hash_node().is_some()
             || arg.as_forwarding_arguments_node().is_some()
         {
+            return;
+        }
+
+        // Skip chained dig calls (RuboCop's ignore_dig_chain?).
+        // Check if receiver is a dig call (this is the outer dig in a.dig(x).dig(y))
+        if let Some(recv_call) = receiver.as_call_node() {
+            if recv_call.name().as_slice() == b"dig" {
+                return;
+            }
+        }
+        // Check if this dig call is the receiver of another dig call by looking
+        // at the source bytes immediately after this node for ".dig("
+        let end = node.location().end_offset();
+        let remaining = &source.as_bytes()[end..];
+        if remaining.starts_with(b".dig(") {
             return;
         }
 
