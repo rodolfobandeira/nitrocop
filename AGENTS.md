@@ -356,3 +356,4 @@ The script compares nitrocop offense counts against the RuboCop baseline from th
 - **Do not run local benchmark regeneration by default during cop-fix loops.**
   Use per-cop corpus gates (`scripts/check-cop.py ... --verbose [--rerun]`) as the acceptance check.
   Only run `cargo run --release --bin bench_nitrocop -- conform` when explicitly requested (for example release/docs refresh), since it rewrites `bench/results.md`.
+- **When editing a skill, check for related skills that share conventions or interact with it.** Skills in `.claude/skills/` often form workflows (e.g., fix-cops/fix-department/fix-repo create branches, land-branch-commits lands them). Changes to shared conventions (commit message format, Co-Authored-By trailers, branch naming) must be applied consistently across all related skills.

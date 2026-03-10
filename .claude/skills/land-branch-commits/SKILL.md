@@ -49,8 +49,11 @@ Use this when the user wants commits from one or more branches landed onto
    - After each cherry-pick, amend with `git commit --amend --reset-author` to:
      1. Reset the author to the local git user.
      2. Strip any `https://claude.ai/...` URLs (full lines containing them).
-     3. If the original author differs from the local git user, append a
-        `Co-Authored-By: Original Name <original@email>` trailer.
+     3. Strip any existing `Co-Authored-By` lines from the message body.
+     4. If the original author differs from the local git user, append a
+        `Co-Authored-By: Original Name <original@email>` trailer, separated
+        from the body by a blank line (GitHub requires this blank line to
+        recognize trailers).
      Skip the amend if the author already matches and no cleanup is needed.
    - Note: `--reset-author` is a `git commit` flag, NOT a `git cherry-pick`
      flag. Always cherry-pick first, then amend.
@@ -61,9 +64,11 @@ Use this when the user wants commits from one or more branches landed onto
    # read original author before cherry-picking
    git log -1 --format='%an <%ae>' <sha1>
    git cherry-pick <sha1>
-   # amend to reset author, clean message, add Co-Authored-By
-   git commit --amend --reset-author -m "$(cat <<'EOF'
-   Clean commit message here
+   # build clean message: strip claude.ai URLs and existing Co-Authored-By lines
+   clean_msg=$(git log -1 --format='%B' HEAD | grep -v 'https://claude\.ai' | grep -v '^Co-Authored-By:' | sed -e :a -e '/^\n*$/{$d;N;ba}')
+   # amend to reset author, clean message, add Co-Authored-By with blank line
+   git commit --amend --reset-author -m "$(cat <<EOF
+   $clean_msg
 
    Co-Authored-By: Original Name <original@email>
    EOF
