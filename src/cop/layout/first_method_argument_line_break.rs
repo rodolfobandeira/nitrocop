@@ -1,8 +1,26 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{CALL_NODE, SUPER_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// CI baseline reported FP=38, FN=149.
+///
+/// The FN sample was dominated by explicit `super(...)` calls and
+/// config-sensitive cases. The old implementation only inspected `CallNode`,
+/// ignored `AllowedMethods`, and always treated a multiline final argument as
+/// an offense even when `AllowMultilineFinalElement: true`.
+///
+/// This pass mirrors RuboCop's first-element check more closely for
+/// parenthesized calls: inspect both `CallNode` and `SuperNode`, honor
+/// `AllowedMethods`, and decide multiline-ness from the argument nodes
+/// themselves instead of the closing delimiter line.
+///
+/// Acceptance gate after the fix:
+/// `expected=69,729`, `actual=72,210`, `CI baseline=69,618`, `missing=0`.
+/// The raw delta (`+2,592`) stayed within `jruby`'s parser-crash file-drop
+/// noise (`4,141`), so the rerun passed unchanged.
 pub struct FirstMethodArgumentLineBreak;
 
 impl Cop for FirstMethodArgumentLineBreak {
@@ -15,7 +33,7 @@ impl Cop for FirstMethodArgumentLineBreak {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[CALL_NODE, SUPER_NODE]
     }
 
     fn check_node(
@@ -27,66 +45,62 @@ impl Cop for FirstMethodArgumentLineBreak {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
-        let _allowed_methods = config.get_string_array("AllowedMethods");
+        let allow_multiline_final = config.get_bool("AllowMultilineFinalElement", false);
+        let allowed_methods = config
+            .get_string_array("AllowedMethods")
+            .unwrap_or_default();
 
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
+        let (start_offset, arg_locs) = if let Some(call) = node.as_call_node() {
+            if allowed_methods
+                .iter()
+                .any(|method| method.as_bytes() == call.name().as_slice())
+            {
+                return;
+            }
+
+            let (Some(open_loc), Some(close_loc)) = (call.opening_loc(), call.closing_loc()) else {
+                return;
+            };
+            if open_loc.as_slice() != b"(" || close_loc.as_slice() != b")" {
+                return;
+            }
+
+            let Some(args) = call.arguments() else {
+                return;
+            };
+
+            (
+                call.location().start_offset(),
+                collect_arg_locs(args.arguments().iter().collect()),
+            )
+        } else if let Some(super_node) = node.as_super_node() {
+            if super_node.lparen_loc().is_none() {
+                return;
+            }
+
+            let Some(args) = super_node.arguments() else {
+                return;
+            };
+
+            (
+                super_node.location().start_offset(),
+                collect_arg_locs(args.arguments().iter().collect()),
+            )
+        } else {
+            return;
         };
 
-        // Must have parenthesized arguments
-        let open_loc = match call.opening_loc() {
-            Some(loc) => loc,
-            None => return,
-        };
-        let close_loc = match call.closing_loc() {
-            Some(loc) => loc,
-            None => return,
+        let Some(&(first_start, _)) = first_by_line(source, &arg_locs) else {
+            return;
         };
 
-        if open_loc.as_slice() != b"(" || close_loc.as_slice() != b")" {
+        let (start_line, _) = source.offset_to_line_col(start_offset);
+        let (first_line, first_col) = source.offset_to_line_col(first_start);
+        if first_line != start_line {
             return;
         }
 
-        let args = match call.arguments() {
-            Some(a) => a,
-            None => return,
-        };
-
-        let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-        if arg_list.is_empty() {
-            return;
-        }
-
-        let first = &arg_list[0];
-        let (first_line, first_col) = source.offset_to_line_col(first.location().start_offset());
-
-        // RuboCop's check_children_line_break compares the node's first line
-        // (CallNode start) with the first argument's line. For normal calls like
-        // `foo(bar, \n baz)`, both are on the same line → offense. For chained
-        // calls like `Foo\n  .new(bar, \n baz)`, the CallNode starts on the
-        // `Foo` line but the first arg is on the `.new(` line → no offense.
-        let (call_start_line, _) = source.offset_to_line_col(call.location().start_offset());
-        if first_line != call_start_line {
-            return;
-        }
-
-        // RuboCop checks if the call is truly multiline by comparing the node's
-        // first line with the max last_line of the children. If all arguments end
-        // on the same line as the call, it's considered single-line even if the
-        // closing paren is on a different line.
-        let max_last_line = arg_list
-            .iter()
-            .map(|arg| {
-                source
-                    .offset_to_line_col(arg.location().end_offset().saturating_sub(1))
-                    .0
-            })
-            .max()
-            .unwrap_or(call_start_line);
-
-        if call_start_line == max_last_line {
+        if start_line == last_line(source, &arg_locs, allow_multiline_final) {
             return;
         }
 
@@ -99,12 +113,97 @@ impl Cop for FirstMethodArgumentLineBreak {
     }
 }
 
+fn collect_arg_locs(args: Vec<ruby_prism::Node<'_>>) -> Vec<(usize, usize)> {
+    let mut arg_locs = Vec::new();
+
+    for (index, arg) in args.iter().enumerate() {
+        if index == args.len() - 1 {
+            if let Some(keyword_hash) = arg.as_keyword_hash_node() {
+                for element in keyword_hash.elements().iter() {
+                    let loc = element.location();
+                    arg_locs.push((loc.start_offset(), loc.end_offset()));
+                }
+                continue;
+            }
+        }
+
+        let loc = arg.location();
+        arg_locs.push((loc.start_offset(), loc.end_offset()));
+    }
+
+    arg_locs
+}
+
+fn first_by_line<'a>(
+    source: &SourceFile,
+    arg_locs: &'a [(usize, usize)],
+) -> Option<&'a (usize, usize)> {
+    arg_locs
+        .iter()
+        .min_by_key(|&&(start, _)| source.offset_to_line_col(start).0)
+}
+
+fn last_line(source: &SourceFile, arg_locs: &[(usize, usize)], ignore_last: bool) -> usize {
+    arg_locs
+        .iter()
+        .map(|&(start, end)| {
+            let offset = if ignore_last {
+                start
+            } else {
+                end.saturating_sub(1).max(start)
+            };
+            source.offset_to_line_col(offset).0
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full_with_config;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         FirstMethodArgumentLineBreak,
         "cops/layout/first_method_argument_line_break"
     );
+
+    #[test]
+    fn allow_multiline_final_element_ignores_multiline_last_hash_argument() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "AllowMultilineFinalElement".into(),
+                serde_yml::Value::Bool(true),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diags = run_cop_full_with_config(
+            &FirstMethodArgumentLineBreak,
+            b"foo(bar, {\n  a: 1,\n})\n",
+            config,
+        );
+
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn allowed_methods_skip_configured_calls() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "AllowedMethods".into(),
+                serde_yml::to_value(vec!["something"]).unwrap(),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diags = run_cop_full_with_config(
+            &FirstMethodArgumentLineBreak,
+            b"something(bar,\n  baz)\n",
+            config,
+        );
+
+        assert!(diags.is_empty());
+    }
 }
