@@ -5,14 +5,20 @@ use ruby_prism::Visit;
 
 /// Checks for non-local exits from iterators without a return value.
 ///
-/// ## Investigation findings
-/// - **236 FNs (root cause):** The visitor stopped recursion at `DefNode`, so returns inside
-///   method bodies were invisible. Since virtually all real-world Ruby code has `return` inside
-///   methods, this caused massive false negatives. Fixed by recursing into def/class/module
-///   nodes with a saved/restored block stack.
-/// - **4 FPs (root cause):** `lambda { }` (Kernel#lambda method call) was not recognized as a
-///   scope boundary. Only `-> { }` (LambdaNode) was handled. Fixed by checking the method name
-///   for `lambda` calls without a receiver.
+/// ## Corpus investigation (2026-03-10)
+///
+/// Earlier fixes addressed two large issues:
+/// - returns inside method bodies were skipped entirely because recursion stopped
+///   at `DefNode`
+/// - `lambda { }` call blocks were not treated as scope boundaries
+///
+/// Remaining FPs on the March 10, 2026 corpus run came from safe-navigation
+/// chains such as `items&.keys&.each do |item| ... return ... end`. RuboCop's
+/// matcher only treats ordinary `send` nodes with receivers as chained iterator
+/// sends; `csend` / `&.` chains are excluded. The Prism port incorrectly treated
+/// any receiver-bearing `CallNode` as chained.
+///
+/// Fix: only mark a block call as chained when its operator is not `&.`.
 pub struct NonLocalExitFromIterator;
 
 impl Cop for NonLocalExitFromIterator {
@@ -51,16 +57,18 @@ impl Cop for NonLocalExitFromIterator {
 /// inside method bodies were never analyzed. Since virtually all real-world Ruby
 /// code has `return` inside methods, this caused massive false negatives.
 ///
-/// ## Root cause of FPs (4 in corpus)
-/// `lambda { }` (Kernel#lambda method call) was not recognized as a scope boundary.
-/// Only `-> { }` (LambdaNode) was handled. Returns inside `lambda { }` blocks
-/// were incorrectly attributed to outer iterator blocks.
+/// ## Root cause of FPs
+/// - Earlier FP bucket: `lambda { }` (Kernel#lambda method call) was not
+///   recognized as a scope boundary.
+/// - Current FP bucket: safe-navigation block sends (`&.each`, `&.map`, etc.)
+///   were treated as chained iterator sends even though RuboCop excludes `csend`.
 ///
 /// ## Fix
 /// - Recurse into def/class/module nodes but save/restore the block stack so
 ///   returns inside them don't see blocks from an outer scope.
 /// - Treat `lambda { }` calls (and `-> { }` stabby lambdas) as scope boundaries
 ///   that prevent return-from-iterator detection.
+/// - Exclude safe-navigation block sends (`&.`) from chained-send detection.
 #[derive(Clone)]
 enum StackEntry {
     /// A block attached to a method call.
@@ -175,7 +183,10 @@ impl<'pr> Visit<'pr> for NonLocalExitVisitor<'_, '_> {
                     self.block_stack.pop();
                 } else {
                     let has_args = block_node.parameters().is_some();
-                    let is_chained_send = node.receiver().is_some();
+                    let is_chained_send = node.receiver().is_some()
+                        && node
+                            .call_operator_loc()
+                            .is_none_or(|op: ruby_prism::Location<'_>| op.as_slice() != b"&.");
                     let is_define_method = method_name == b"define_method"
                         || method_name == b"define_singleton_method";
 

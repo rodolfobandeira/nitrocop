@@ -96,3 +96,8 @@ Foo.configure do |c|
     return if baz?
   end
 end
+
+# Safe-navigation chain blocks are not treated as iterator sends by RuboCop
+items&.keys&.each do |item|
+  return if item.nil?
+end
