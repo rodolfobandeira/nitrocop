@@ -1,13 +1,42 @@
 use std::path::Path;
 
-use crate::cop::util::is_snake_case;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Check if a filename segment matches RuboCop's SNAKE_CASE regex:
+/// `/^[\d[[:lower:]]_.?!]+$/`
+///
+/// Unlike the shared `is_snake_case` utility (which allows ALL non-ASCII bytes),
+/// this function only allows Unicode lowercase letters (matching Ruby's `[[:lower:]]`).
+/// This correctly rejects emoji (e.g., `💪`) and non-lowercase Unicode characters
+/// while accepting accented lowercase letters like `ü`, `é`.
+fn is_filename_snake_case(segment: &str) -> bool {
+    if segment.is_empty() {
+        return true;
+    }
+    for ch in segment.chars() {
+        if ch.is_ascii() {
+            // ASCII: allow lowercase, digits, underscore, ?, !
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '?' || ch == '!'
+            {
+                continue;
+            }
+            return false;
+        } else {
+            // Non-ASCII: only allow Unicode lowercase (matches Ruby's [[:lower:]])
+            if ch.is_lowercase() {
+                continue;
+            }
+            return false;
+        }
+    }
+    true
+}
+
 /// ## Corpus investigation (2026-03-09)
 ///
-/// Corpus oracle reported FP=3, FN=17.
+/// Corpus oracle initially reported FP=3, FN=17.
 ///
 /// ### FP=3 (all david942j/one_gadget)
 /// Files like `libc-2.23-89cc3bb9361ad139a1967462175759416c9dc82b.rb` under
@@ -16,7 +45,7 @@ use crate::parse::source::SourceFile;
 /// This is a config-exclude issue, not a cop logic bug — nitrocop's config
 /// loader needs to honor the project's AllCops/Exclude for these paths.
 ///
-/// ### FN=17 — two cop logic bugs fixed:
+/// ### FN=17 — two cop logic bugs fixed (previous round):
 ///
 /// **Bug 1: AllowedAcronyms incorrectly applied to filename check (10 FNs).**
 /// nitrocop was replacing AllowedAcronyms (e.g., URI, HTML, HTTP) in the
@@ -32,13 +61,30 @@ use crate::parse::source::SourceFile;
 /// are different files and should be flagged.
 /// Fix: check ALLOWED_NAMES against the full filename (with extension), not stem.
 ///
-/// ### Remaining 5 FNs (not fixable in cop logic):
-/// - `iso-8859-9-encoding.rb`, `euc-jp.rb`: contain hyphens which `is_snake_case`
-///   already rejects. These are likely config/file-discovery layer issues.
-/// - `💪.test.rb`: emoji filename — `is_snake_case` allows all non-ASCII bytes,
-///   but RuboCop's SNAKE_CASE only allows `[[:lower:]]`. Fixing this would
-///   require changing the shared `is_snake_case` utility, risking regressions
-///   in other cops.
+/// ## Corpus investigation (2026-03-10) — FP=3, FN=5
+///
+/// ### FN=1 fixed: emoji filename (`💪.test.rb`)
+/// The shared `is_snake_case` utility allows ALL non-ASCII bytes, but RuboCop's
+/// SNAKE_CASE regex `/^[\d[[:lower:]]_.?!]+$/` only allows Unicode lowercase
+/// letters (`[[:lower:]]`). Emoji characters are not lowercase.
+/// Fix: replaced `is_snake_case` with a custom `is_filename_snake_case` that
+/// uses `char::is_lowercase()` for non-ASCII characters, matching Ruby's
+/// `[[:lower:]]` behavior.
+///
+/// ### FN=4 fixed: non-UTF8 encoded files skipped entirely
+/// Files like `iso-8859-9-encoding.rb`, `euc-jp.rb`, `iso-8859-1_steps.rb`
+/// contain non-UTF8 bytes (from encoding declarations like
+/// `# encoding: iso-8859-9`). Prism parses them successfully (valid Ruby
+/// syntax with encoding declaration), but nitrocop's linter skipped ALL cops
+/// on files failing `std::str::from_utf8()`. RuboCop's commissioner calls
+/// `on_new_investigation` for files with valid syntax regardless of encoding,
+/// so Naming/FileName still fires on these files.
+/// Fix: modified `lint_source_once` in linter.rs to still run `check_lines`
+/// on non-UTF8 files (skipping `check_source` and AST walk). This lets
+/// filename-only cops like Naming/FileName run on files with encoding
+/// declarations that produce non-UTF8 content.
+///
+/// ### Remaining FP=3: config-exclude issue (see FP=3 note above)
 pub struct FileName;
 
 /// Well-known Ruby files that don't follow snake_case convention.
@@ -241,9 +287,7 @@ impl Cop for FileName {
 
         // RuboCop allows dots in filenames (e.g., show.html.haml_spec).
         // Check snake_case on each dot-separated segment individually.
-        let all_segments_snake = check_name
-            .split('.')
-            .all(|seg| is_snake_case(seg.as_bytes()));
+        let all_segments_snake = check_name.split('.').all(is_filename_snake_case);
         if !all_segments_snake {
             diagnostics.push(self.diagnostic(
                 source,
@@ -293,6 +337,7 @@ mod tests {
         camelcase_acronym = "camelcase_acronym.rb",
         allowed_name_with_ext = "allowed_name_with_ext.rb",
         allowed_name_diff_ext = "allowed_name_diff_ext.rb",
+        emoji_filename = "emoji_filename.rb",
     );
 
     #[test]
@@ -595,6 +640,32 @@ mod tests {
             diags.len(),
             1,
             "URI_test.rb should be flagged for snake_case"
+        );
+    }
+
+    #[test]
+    fn offense_emoji_filename() {
+        // RuboCop's SNAKE_CASE = /^[\d[[:lower:]]_.?!]+$/ does NOT match emoji.
+        // [[:lower:]] only matches Unicode lowercase letters, not emoji characters.
+        let source = SourceFile::from_bytes("💪.test.rb", b"x = 1\n".to_vec());
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Emoji filenames should be flagged for snake_case"
+        );
+    }
+
+    #[test]
+    fn no_offense_unicode_lowercase_filename() {
+        // RuboCop's [[:lower:]] matches Unicode lowercase letters like ü, é
+        let source = SourceFile::from_bytes("ünbound_sérvér.rb", b"x = 1\n".to_vec());
+        let mut diags = Vec::new();
+        FileName.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Unicode lowercase filenames should not be flagged"
         );
     }
 

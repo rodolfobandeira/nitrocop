@@ -686,31 +686,36 @@ fn lint_source_once(
     // Skip cops on files with parse errors — the AST from error recovery is
     // unreliable and produces false positives (e.g., Procfile.spec parsed as Ruby).
     // This matches RuboCop's behavior of only reporting Lint/Syntax on such files.
-    if parse_result.errors().count() > 0 {
+    let has_parse_errors = parse_result.errors().count() > 0;
+    if has_parse_errors {
         if let Some(t) = timers {
             t.codemap_ns.fetch_add(0, Ordering::Relaxed);
         }
         return (Vec::new(), Vec::new());
     }
 
-    // Skip cops on files with invalid UTF-8 encoding. RuboCop reports
-    // Lint/Syntax: "Invalid byte sequence in utf-8" for such files and
-    // runs no other cops. Prism's C FFI parses them successfully (the
-    // invalid bytes are typically in comments), but we must match
-    // RuboCop's behavior to avoid false positives.
-    if std::str::from_utf8(source.as_bytes()).is_err() {
+    // Files with invalid UTF-8 encoding still get check_lines run (for
+    // filename-only cops like Naming/FileName), but skip check_source and
+    // AST walk. RuboCop's commissioner calls on_new_investigation for files
+    // with valid syntax even when the encoding isn't UTF-8, because Prism
+    // handles encoding declarations (e.g., `# encoding: iso-8859-9`).
+    let is_non_utf8 = std::str::from_utf8(source.as_bytes()).is_err();
+
+    // Only build CodeMap when we'll actually use it (valid UTF-8)
+    let code_map = if is_non_utf8 {
         if let Some(t) = timers {
             t.codemap_ns.fetch_add(0, Ordering::Relaxed);
         }
-        return (Vec::new(), Vec::new());
-    }
-
-    let codemap_start = std::time::Instant::now();
-    let code_map = CodeMap::from_parse_result(source.as_bytes(), &parse_result);
-    if let Some(t) = timers {
-        t.codemap_ns
-            .fetch_add(codemap_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
+        None
+    } else {
+        let codemap_start = std::time::Instant::now();
+        let cm = CodeMap::from_parse_result(source.as_bytes(), &parse_result);
+        if let Some(t) = timers {
+            t.codemap_ns
+                .fetch_add(codemap_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        Some(cm)
+    };
 
     let mut diagnostics = Vec::new();
     let mut corrections: Vec<crate::correction::Correction> = Vec::new();
@@ -763,26 +768,32 @@ fn lint_source_once(
 
         if should_correct {
             cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
-            cop.check_source(
-                source,
-                &parse_result,
-                &code_map,
-                cop_config,
-                &mut diagnostics,
-                Some(&mut corrections),
-            );
+            if let Some(ref cm) = code_map {
+                cop.check_source(
+                    source,
+                    &parse_result,
+                    cm,
+                    cop_config,
+                    &mut diagnostics,
+                    Some(&mut corrections),
+                );
+            }
         } else {
             cop.check_lines(source, cop_config, &mut diagnostics, None);
-            cop.check_source(
-                source,
-                &parse_result,
-                &code_map,
-                cop_config,
-                &mut diagnostics,
-                None,
-            );
+            if let Some(ref cm) = code_map {
+                cop.check_source(
+                    source,
+                    &parse_result,
+                    cm,
+                    cop_config,
+                    &mut diagnostics,
+                    None,
+                );
+            }
         }
-        ast_cop_indices.push((i, override_idx));
+        if !is_non_utf8 {
+            ast_cop_indices.push((i, override_idx));
+        }
     }
 
     // Pass 2: Pattern cops
@@ -822,26 +833,32 @@ fn lint_source_once(
 
         if should_correct {
             cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
-            cop.check_source(
-                source,
-                &parse_result,
-                &code_map,
-                cop_config,
-                &mut diagnostics,
-                Some(&mut corrections),
-            );
+            if let Some(ref cm) = code_map {
+                cop.check_source(
+                    source,
+                    &parse_result,
+                    cm,
+                    cop_config,
+                    &mut diagnostics,
+                    Some(&mut corrections),
+                );
+            }
         } else {
             cop.check_lines(source, cop_config, &mut diagnostics, None);
-            cop.check_source(
-                source,
-                &parse_result,
-                &code_map,
-                cop_config,
-                &mut diagnostics,
-                None,
-            );
+            if let Some(ref cm) = code_map {
+                cop.check_source(
+                    source,
+                    &parse_result,
+                    cm,
+                    cop_config,
+                    &mut diagnostics,
+                    None,
+                );
+            }
         }
-        ast_cop_indices.push((i, override_idx));
+        if !is_non_utf8 {
+            ast_cop_indices.push((i, override_idx));
+        }
     }
 
     if let Some(t) = timers {
