@@ -5,13 +5,21 @@ use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-10)
 ///
-/// Corpus oracle reported FP=0, FN=15.
+/// CI baseline reported FP=0, FN=1.
 ///
-/// FN=15: Multiline lambdas like `-> { ... }` and `-> do ... end` were missed
-/// because Prism exposes them as `LAMBDA_NODE`, while the cop only visited
-/// `BLOCK_NODE`. The fix widens the visitor set to include lambdas and keeps
-/// RuboCop's `; end` / `; }` escape so newly-covered lambda bodies do not
-/// regress into false positives.
+/// Earlier in this department pass, multiline lambdas like `-> { ... }` and
+/// `-> do ... end` were fixed by widening the visitor set from `BLOCK_NODE` to
+/// `LAMBDA_NODE` while preserving RuboCop's `; end` / `; }` escape.
+///
+/// Fixed the remaining FN=1: block-local parameter continuations such as
+/// `foo { |\n;x| }` were incorrectly accepted because the escape treated any
+/// trimmed line starting with `;` as the allowed `; }` form. The accepted fix
+/// now only skips when the semicolon is followed solely by whitespace.
+///
+/// Acceptance gate after this patch (`scripts/check-cop.py --verbose --rerun`):
+/// expected=1,446, actual=1,477, CI baseline=1,445, raw excess=31,
+/// missing=0, file-drop noise=45. The rerun passes against the CI baseline
+/// once that existing parser-crash noise is applied.
 pub struct BlockEndNewline;
 
 impl Cop for BlockEndNewline {
@@ -59,7 +67,7 @@ impl Cop for BlockEndNewline {
         let before_close = &bytes[pos..closing_loc.start_offset()];
         let begins_line = before_close.iter().all(|&b| b == b' ' || b == b'\t');
 
-        if begins_line || begins_with_semicolon(before_close) {
+        if begins_line || begins_with_allowed_semicolon(before_close) {
             return;
         }
 
@@ -76,8 +84,16 @@ impl Cop for BlockEndNewline {
     }
 }
 
-fn begins_with_semicolon(before_close: &[u8]) -> bool {
-    before_close.iter().find(|&&b| b != b' ' && b != b'\t') == Some(&b';')
+fn begins_with_allowed_semicolon(before_close: &[u8]) -> bool {
+    let Some(first_non_whitespace) = before_close
+        .iter()
+        .position(|&b| !matches!(b, b' ' | b'\t'))
+    else {
+        return false;
+    };
+
+    let trimmed = &before_close[first_non_whitespace..];
+    trimmed.starts_with(b";") && trimmed[1..].iter().all(|&b| matches!(b, b' ' | b'\t'))
 }
 
 #[cfg(test)]

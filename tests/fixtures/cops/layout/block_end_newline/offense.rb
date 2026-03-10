@@ -18,3 +18,7 @@ end
 -> do
   foo end
       ^^^ Layout/BlockEndNewline: Expression at 15, 7 should be on its own line.
+
+foo { |
+;x| }
+    ^ Layout/BlockEndNewline: Expression at 18, 5 should be on its own line.
