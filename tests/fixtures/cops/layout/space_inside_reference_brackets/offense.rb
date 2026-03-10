@@ -6,3 +6,9 @@ array[index ]
 
 foo[ 0]
     ^ Layout/SpaceInsideReferenceBrackets: Do not use space inside reference brackets.
+
+cache[ key] ||= {}
+      ^ Layout/SpaceInsideReferenceBrackets: Do not use space inside reference brackets.
+
+totals[ key] += 1
+       ^ Layout/SpaceInsideReferenceBrackets: Do not use space inside reference brackets.

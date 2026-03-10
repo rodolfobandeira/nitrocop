@@ -1,8 +1,21 @@
-use crate::cop::node_type::CALL_NODE;
+use crate::cop::node_type::{
+    CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=16, FN=16.
+///
+/// FP=16: nested `[]=` receivers like `mapping[:users][ record['name'] ] = value`
+/// were using the write target's `opening_loc`, but RuboCop tokenizes `[]=` and
+/// checks the receiver bracket pair instead.
+///
+/// FN=16: indexed operator writes like `cache[ key] ||= {}` were missed because
+/// Prism parses them as `INDEX_OR_WRITE_NODE` / `INDEX_OPERATOR_WRITE_NODE` /
+/// `INDEX_AND_WRITE_NODE`, not plain `CALL_NODE`.
 pub struct SpaceInsideReferenceBrackets;
 
 impl Cop for SpaceInsideReferenceBrackets {
@@ -11,7 +24,12 @@ impl Cop for SpaceInsideReferenceBrackets {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -27,51 +45,20 @@ impl Cop for SpaceInsideReferenceBrackets {
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // This cop checks [] and []= method calls (reference brackets)
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let method_name = call.name().as_slice();
-        if method_name != b"[]" && method_name != b"[]=" {
-            return;
-        }
-
-        // Must have a receiver (e.g., hash[:key], not standalone [])
-        if call.receiver().is_none() {
-            return;
-        }
-
         let enforced_style = config.get_str("EnforcedStyle", "no_space");
         let empty_style = config.get_str("EnforcedStyleForEmptyBrackets", "no_space");
 
         let bytes = source.as_bytes();
 
-        // Find the opening [ bracket position
-        // For call nodes like hash[:key], the opening_loc gives us the (
-        // But for [] calls, we need to find the [ in the source
-        let opening_loc = match call.opening_loc() {
-            Some(loc) => loc,
+        let (open_start, close_start) = match reference_bracket_offsets(node) {
+            Some(offsets) => offsets,
             None => return,
         };
-
-        let closing_loc = match call.closing_loc() {
-            Some(loc) => loc,
-            None => return,
-        };
-
-        // Verify these are brackets
-        if opening_loc.as_slice() != b"[" || closing_loc.as_slice() != b"]" {
-            return;
-        }
-
-        let open_end = opening_loc.end_offset();
-        let close_start = closing_loc.start_offset();
+        let open_end = open_start + 1;
 
         // Skip multiline
-        let (open_line, _) = source.offset_to_line_col(opening_loc.start_offset());
-        let (close_line, _) = source.offset_to_line_col(closing_loc.start_offset());
+        let (open_line, _) = source.offset_to_line_col(open_start);
+        let (close_line, _) = source.offset_to_line_col(close_start);
         if open_line != close_line {
             return;
         }
@@ -109,7 +96,7 @@ impl Cop for SpaceInsideReferenceBrackets {
                 }
                 "space" => {
                     if close_start == open_end || (close_start - open_end) != 1 {
-                        let (line, col) = source.offset_to_line_col(opening_loc.start_offset());
+                        let (line, col) = source.offset_to_line_col(open_start);
                         let mut diag = self.diagnostic(
                             source,
                             line,
@@ -239,4 +226,101 @@ mod tests {
         SpaceInsideReferenceBrackets,
         "cops/layout/space_inside_reference_brackets"
     );
+}
+
+fn reference_bracket_offsets(node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
+    if let Some(call) = node.as_call_node() {
+        return call_bracket_offsets(&call);
+    }
+    if let Some(index) = node.as_index_and_write_node() {
+        return index_write_bracket_offsets(
+            index.receiver(),
+            index.opening_loc().start_offset(),
+            index.closing_loc().start_offset(),
+        );
+    }
+    if let Some(index) = node.as_index_operator_write_node() {
+        return index_write_bracket_offsets(
+            index.receiver(),
+            index.opening_loc().start_offset(),
+            index.closing_loc().start_offset(),
+        );
+    }
+    if let Some(index) = node.as_index_or_write_node() {
+        return index_write_bracket_offsets(
+            index.receiver(),
+            index.opening_loc().start_offset(),
+            index.closing_loc().start_offset(),
+        );
+    }
+    None
+}
+
+fn call_bracket_offsets(call: &ruby_prism::CallNode<'_>) -> Option<(usize, usize)> {
+    let method_name = call.name().as_slice();
+    if method_name != b"[]" && method_name != b"[]=" {
+        return None;
+    }
+
+    let receiver = call.receiver()?;
+    if method_name == b"[]=" {
+        if let Some(offsets) = nested_reference_brackets(&receiver) {
+            return Some(offsets);
+        }
+    }
+
+    let opening_loc = call.opening_loc()?;
+    let closing_loc = call.closing_loc()?;
+    if opening_loc.as_slice() != b"[" || closing_loc.as_slice() != b"]" {
+        return None;
+    }
+
+    Some((opening_loc.start_offset(), closing_loc.start_offset()))
+}
+
+fn index_write_bracket_offsets(
+    receiver: Option<ruby_prism::Node<'_>>,
+    open_start: usize,
+    close_start: usize,
+) -> Option<(usize, usize)> {
+    receiver?;
+    Some((open_start, close_start))
+}
+
+fn nested_reference_brackets(receiver: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
+    if let Some(call) = receiver.as_call_node() {
+        let method_name = call.name().as_slice();
+        if method_name != b"[]" && method_name != b"[]=" {
+            return None;
+        }
+
+        let opening_loc = call.opening_loc()?;
+        let closing_loc = call.closing_loc()?;
+        if opening_loc.as_slice() != b"[" || closing_loc.as_slice() != b"]" {
+            return None;
+        }
+
+        return Some((opening_loc.start_offset(), closing_loc.start_offset()));
+    }
+
+    if let Some(index) = receiver.as_index_and_write_node() {
+        return Some((
+            index.opening_loc().start_offset(),
+            index.closing_loc().start_offset(),
+        ));
+    }
+    if let Some(index) = receiver.as_index_operator_write_node() {
+        return Some((
+            index.opening_loc().start_offset(),
+            index.closing_loc().start_offset(),
+        ));
+    }
+    if let Some(index) = receiver.as_index_or_write_node() {
+        return Some((
+            index.opening_loc().start_offset(),
+            index.closing_loc().start_offset(),
+        ));
+    }
+
+    None
 }

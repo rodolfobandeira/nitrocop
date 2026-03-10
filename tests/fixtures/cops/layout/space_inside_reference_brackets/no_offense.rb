@@ -4,3 +4,4 @@ foo[0]
 bar[1] = 2
 hash["string"]
 nested[1][2]
+mapping[:users][ record['name'] ] = normalized_name
