@@ -101,7 +101,7 @@ fn lint_clean_file_no_offenses() {
     let file = write_file(
         &dir,
         "clean.rb",
-        b"# frozen_string_literal: true\n\nx = 1\ny = 2\n",
+        b"# frozen_string_literal: true\n\nx = 1\ny = 2\nputs(x + y)\n",
     );
     let config = load_config(None, None, None).unwrap();
     let registry = CopRegistry::default_registry();
@@ -167,7 +167,11 @@ fn lint_file_with_multiple_offenses() {
 #[test]
 fn lint_multiple_files() {
     let dir = temp_dir("multi_file");
-    let f1 = write_file(&dir, "a.rb", b"# frozen_string_literal: true\n\nx = 1\n");
+    let f1 = write_file(
+        &dir,
+        "a.rb",
+        b"# frozen_string_literal: true\n\nx = 1\nputs(x)\n",
+    );
     let f2 = write_file(&dir, "b.rb", b"y = 2  \n");
 
     let config = load_config(None, None, None).unwrap();
