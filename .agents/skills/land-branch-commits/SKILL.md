@@ -18,11 +18,20 @@ Use this when the user wants commits from one or more branches landed onto
    ```
    Treat unrelated working tree changes as off-limits.
 
-2. Fetch the exact refs you need:
+2. Resolve branch names against the remote, then fetch:
    ```bash
-   git fetch origin main <branch1> <branch2> ...
+   git ls-remote --heads origin
    ```
-   Prefer explicit branch names over a broad fetch.
+   The user-provided branch name may not exactly match the remote ref — it
+   could be nested under any prefix. Search `ls-remote` output for refs whose
+   name ends with the user-provided string. If the exact name isn't found but a
+   unique suffix match exists, use that. If multiple matches exist, list them
+   and ask the user to disambiguate.
+
+   Then fetch the resolved refs:
+   ```bash
+   git fetch origin main <resolved-branch1> <resolved-branch2> ...
+   ```
 
 3. Identify patch-new commits for each branch:
    ```bash
@@ -37,14 +46,29 @@ Use this when the user wants commits from one or more branches landed onto
    - Stay on `main`.
    - Cherry-pick each patch-new commit individually in oldest-first order.
      Do NOT pass multiple SHAs to a single `git cherry-pick` invocation.
+   - After each cherry-pick, amend with `git commit --amend --reset-author` to:
+     1. Reset the author to the local git user.
+     2. Strip any `https://claude.ai/...` URLs (full lines containing them).
+     3. If the original author differs from the local git user, append a
+        `Co-Authored-By: Original Name <original@email>` trailer.
+     Skip the amend if the author already matches and no cleanup is needed.
+   - Note: `--reset-author` is a `git commit` flag, NOT a `git cherry-pick`
+     flag. Always cherry-pick first, then amend.
    - Verify each cherry-pick succeeds before moving to the next.
    - If multiple branches are independent, keep the user's branch order unless
      file overlap suggests a safer order.
    ```bash
+   # read original author before cherry-picking
+   git log -1 --format='%an <%ae>' <sha1>
    git cherry-pick <sha1>
-   # verify success, then:
-   git cherry-pick <sha2>
-   # ... and so on for each patch-new commit
+   # amend to reset author, clean message, add Co-Authored-By
+   git commit --amend --reset-author -m "$(cat <<'EOF'
+   Clean commit message here
+
+   Co-Authored-By: Original Name <original@email>
+   EOF
+   )"
+   # verify success, then repeat for next commit
    ```
 
 5. If a cherry-pick conflicts:
