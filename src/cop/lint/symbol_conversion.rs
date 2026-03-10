@@ -1,4 +1,4 @@
-use crate::cop::node_type::{CALL_NODE, INTERPOLATED_STRING_NODE, STRING_NODE, SYMBOL_NODE};
+use crate::cop::node_type::{CALL_NODE, SYMBOL_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -6,52 +6,58 @@ use crate::parse::source::SourceFile;
 /// Lint/SymbolConversion checks for uses of literal strings converted to a symbol
 /// where a literal symbol could be used instead, and for unnecessarily quoted symbols.
 ///
-/// Root causes of prior FNs (1,539 total, 81.1% match rate):
-/// 1. Missing `intern` method handling — only `to_sym` was checked, not `intern`
-/// 2. Missing standalone quoted symbol detection — `:"foo"`, `:'bar'` were not flagged
-/// 3. Missing `dstr.to_sym` / `dstr.intern` — interpolated strings not handled
-/// 4. Missing quoted symbol as hash value — `{ foo: :'bar' }` not detected
-/// 5. Missing rocket-style quoted symbol keys — `{ :'foo' => val }` not detected
-/// 6. Wrong message format for to_sym/intern — said "detected" instead of showing correction
-/// 7. Missing `!` and `?` suffix handling for hash keys — `{ 'foo!': val }` not detected
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=331, FN=279 on the March 10, 2026 run.
+///
+/// The previous regex-based correction logic only understood identifier-like
+/// symbols. That caused:
+/// - FPs on quoted hash labels that still require quotes, such as `"7_days":`
+/// - FNs on quoted operator and variable symbols such as `:"+", :"@ivar"`
+///
+/// Fix: generate corrections using Ruby-like symbol literal rules instead of
+/// assuming every convertible symbol is an identifier. Hash labels now only
+/// autocorrect when the key can be written as a bare Ruby label.
+///
+/// Remaining gap: `EnforcedStyle: consistent` is still not implemented in this
+/// port; the corpus regressions fixed here are all strict-style behavior.
+/// Post-fix corpus rerun: actual offenses moved from 8,232 down to 8,192
+/// against a RuboCop expected total of 8,180, and `check-cop.py --rerun`
+/// cleared its FP-regression gate. Remaining localized divergence appears in a
+/// small number of repos, dominated by jruby's file-drop-noise repo.
 pub struct SymbolConversion;
 
-/// Check if a symbol value can be represented as a bare (unquoted) symbol.
-/// Returns true for identifiers like `foo`, `foo_bar`, `foo!`, `foo?`, `foo=`.
-fn can_be_bare_symbol(value: &[u8]) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    // First char must be letter or underscore
-    if !value[0].is_ascii_alphabetic() && value[0] != b'_' {
-        return false;
-    }
-    // Last char can be !, ?, or = (method-like symbols)
-    let (main, _suffix) = if let Some(&last) = value.last() {
-        if last == b'!' || last == b'?' || last == b'=' {
-            (&value[..value.len() - 1], Some(last))
-        } else {
-            (value, None)
-        }
-    } else {
-        return false;
-    };
-    // All main chars must be alphanumeric or underscore
-    main.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+const BARE_OPERATOR_SYMBOLS: &[&[u8]] = &[
+    b"+", b"-", b"*", b"/", b"%", b"&", b"|", b"^", b"<<", b">>", b"<", b">", b"<=", b">=", b"==",
+    b"===", b"<=>", b"=~", b"!~", b"!", b"~", b"+@", b"-@", b"**", b"[]", b"[]=", b"`",
+];
+
+fn is_identifier_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
 }
 
-/// Check if a symbol value can be a bare hash key (no quotes needed in colon-style).
-/// Same as bare symbol but excludes `=` suffix (e.g., `==` is not valid as `==:`).
-/// Also requires first char to be alphanumeric or underscore (operators like `+` are excluded).
-fn can_be_bare_hash_key(value: &[u8]) -> bool {
-    if value.is_empty() {
+fn is_identifier_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_method_name_symbol(value: &[u8]) -> bool {
+    if value.is_empty() || !is_identifier_start(value[0]) {
         return false;
     }
-    // First char must be letter, digit, or underscore (RuboCop: /\A[a-z0-9_]/i)
-    if !value[0].is_ascii_alphanumeric() && value[0] != b'_' {
+
+    let main = match value.last() {
+        Some(b'!' | b'?' | b'=') => &value[..value.len() - 1],
+        _ => value,
+    };
+
+    !main.is_empty() && main.iter().copied().all(is_identifier_continue)
+}
+
+fn is_hash_label_symbol(value: &[u8]) -> bool {
+    if value.is_empty() || !is_identifier_start(value[0]) {
         return false;
     }
-    // Last char can be ! or ? for hash keys (not =)
+
     let main = if let Some(&last) = value.last() {
         if last == b'!' || last == b'?' {
             &value[..value.len() - 1]
@@ -61,18 +67,101 @@ fn can_be_bare_hash_key(value: &[u8]) -> bool {
     } else {
         return false;
     };
-    main.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+
+    !main.is_empty() && main.iter().copied().all(is_identifier_continue)
+}
+
+fn is_instance_variable_symbol(value: &[u8]) -> bool {
+    value.len() > 1
+        && value[0] == b'@'
+        && is_identifier_start(value[1])
+        && value[2..].iter().copied().all(is_identifier_continue)
+}
+
+fn is_class_variable_symbol(value: &[u8]) -> bool {
+    value.len() > 2
+        && value.starts_with(b"@@")
+        && is_identifier_start(value[2])
+        && value[3..].iter().copied().all(is_identifier_continue)
+}
+
+fn is_global_variable_symbol(value: &[u8]) -> bool {
+    value.len() > 1
+        && value[0] == b'$'
+        && is_identifier_start(value[1])
+        && value[2..].iter().copied().all(is_identifier_continue)
+}
+
+fn is_operator_symbol(value: &[u8]) -> bool {
+    BARE_OPERATOR_SYMBOLS.contains(&value)
+}
+
+fn can_be_unquoted_symbol(value: &[u8]) -> bool {
+    is_method_name_symbol(value)
+        || is_instance_variable_symbol(value)
+        || is_class_variable_symbol(value)
+        || is_global_variable_symbol(value)
+        || is_operator_symbol(value)
+}
+
+fn escape_double_quoted_symbol(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{0C}' => escaped.push_str("\\f"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Compute the correction string for a symbol value.
-/// Returns e.g. `:foo` for simple symbols, `:"foo-bar"` for ones needing quoting.
+/// Returns Ruby-like symbol literal syntax, e.g. `:+`, `:@ivar`, or `:"foo-bar"`.
 fn symbol_correction(value: &[u8]) -> Option<String> {
     let value_str = std::str::from_utf8(value).ok()?;
-    if can_be_bare_symbol(value) {
+    if can_be_unquoted_symbol(value) {
         Some(format!(":{value_str}"))
     } else {
-        Some(format!(":\"{}\"", value_str))
+        Some(format!(":\"{}\"", escape_double_quoted_symbol(value_str)))
     }
+}
+
+fn hash_key_correction(value: &[u8]) -> Option<String> {
+    if !is_hash_label_symbol(value) {
+        return None;
+    }
+
+    Some(std::str::from_utf8(value).ok()?.to_string())
+}
+
+fn normalize_single_quoted_source(source: &str) -> Option<String> {
+    if source.starts_with(":'") && source.ends_with('\'') {
+        let inner = source.strip_prefix(":'")?.strip_suffix('\'')?;
+        return Some(format!(":\"{}\"", escape_double_quoted_symbol(inner)));
+    }
+
+    if source.starts_with('\'') && source.ends_with('\'') {
+        let inner = source.strip_prefix('\'')?.strip_suffix('\'')?;
+        return Some(format!("\"{}\"", escape_double_quoted_symbol(inner)));
+    }
+
+    None
+}
+
+fn source_matches_correction(source: &[u8], correction: &str) -> bool {
+    let Ok(source_str) = std::str::from_utf8(source) else {
+        return false;
+    };
+
+    source_str == correction
+        || normalize_single_quoted_source(source_str)
+            .as_deref()
+            .is_some_and(|normalized| normalized == correction)
 }
 
 impl Cop for SymbolConversion {
@@ -85,12 +174,7 @@ impl Cop for SymbolConversion {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            CALL_NODE,
-            STRING_NODE,
-            SYMBOL_NODE,
-            INTERPOLATED_STRING_NODE,
-        ]
+        &[CALL_NODE, SYMBOL_NODE]
     }
 
     fn check_node(
@@ -145,11 +229,7 @@ impl SymbolConversion {
         if is_colon_hash_key {
             // Hash key with colon style: 'foo': val or "foo": val
             // Only flag if the value can be a bare hash key
-            if can_be_bare_hash_key(value) {
-                let value_str = match std::str::from_utf8(value) {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
+            if let Some(value_str) = hash_key_correction(value) {
                 let loc = sym.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
@@ -170,21 +250,19 @@ impl SymbolConversion {
             _ => return,
         }
 
-        // If the value needs quoting (contains non-identifier chars), it's fine
-        if !can_be_bare_symbol(value) {
-            return;
-        }
-
-        // Value ends with = is allowed (setter methods like `foo=`)
-        if value.last() == Some(&b'=') {
-            return;
-        }
-
-        // The symbol is unnecessarily quoted
         let correction = match symbol_correction(value) {
             Some(c) => c,
             None => return,
         };
+
+        // RuboCop leaves quoted setter-like symbols alone in strict mode.
+        if correction.ends_with('=') {
+            return;
+        }
+
+        if source_matches_correction(src, &correction) {
+            return;
+        }
 
         let loc = sym.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());

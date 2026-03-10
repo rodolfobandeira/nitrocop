@@ -8,6 +8,7 @@ result = :bar
 { another_key: 1, foo: 2 }
 { 'has-hyphen': 1 }
 { 'has space': 1 }
+{ "7_days": 1 }
 :'foo-bar'
 :"foo-bar"
 :'Foo/Bar/Baz'

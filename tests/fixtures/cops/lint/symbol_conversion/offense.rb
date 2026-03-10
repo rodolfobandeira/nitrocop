@@ -46,6 +46,14 @@
 :'foo_bar'
 ^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:foo_bar` instead.
 
+# Unnecessarily quoted operator symbol
+obj.send(:"+")
+         ^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:+` instead.
+
+# Unnecessarily quoted instance variable symbol
+instance_variable_get :"@ivar"
+                      ^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:@ivar` instead.
+
 # Quoted hash key (string style)
 { 'name': 'val' }
   ^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `name:` instead.
