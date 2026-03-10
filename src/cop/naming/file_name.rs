@@ -84,7 +84,14 @@ fn is_filename_snake_case(segment: &str) -> bool {
 /// filename-only cops like Naming/FileName run on files with encoding
 /// declarations that produce non-UTF8 content.
 ///
-/// ### Remaining FP=3: config-exclude issue (see FP=3 note above)
+/// ### Remaining FP=5: all config-exclude issues
+/// 3 from david942j/one_gadget (see FP=3 note above).
+/// 1 from samg/timetrap (`lib/Getopt/Declare.rb`) — capital D, repo likely
+/// excludes this vendored file.
+/// 1 from simplecov-ruby/simplecov (`spec/fixtures/iso-8859.rb`) — hyphen in
+/// filename, repo likely excludes `spec/fixtures/**`.
+/// All are caused by repo-level AllCops/Exclude patterns that nitrocop's
+/// config loader doesn't fully resolve for corpus paths. Not cop logic bugs.
 pub struct FileName;
 
 /// Well-known Ruby files that don't follow snake_case convention.
