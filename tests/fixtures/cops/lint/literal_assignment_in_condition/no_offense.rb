@@ -13,3 +13,15 @@ end
 while line = gets
   process(line)
 end
+
+if values = [1, x, y]
+  do_something
+end
+
+if options = { x => :y }
+  do_something
+end
+
+if options = { x: y }
+  do_something
+end
