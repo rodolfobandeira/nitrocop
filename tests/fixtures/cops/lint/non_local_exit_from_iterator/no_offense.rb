@@ -57,3 +57,42 @@ transaction do
     item.update!(foobar: true)
   end
 end
+
+# lambda { } (Kernel#lambda) creates its own scope - return not flagged (was FP before fix)
+items.each do |item|
+  callback = lambda do
+    return if item.nil?
+  end
+end
+
+# lambda with args creates its own scope
+items.each do |item|
+  handler = lambda do |x|
+    return if x.nil?
+  end
+end
+
+# return inside define_method inside a class
+class Foo
+  [:bar, :baz].each do |name|
+    define_method(name) do
+      return if predicate?
+    end
+  end
+end
+
+# return with value inside method
+class Finder
+  def find_first(items)
+    items.each do |item|
+      return item if item.stock == 0
+    end
+  end
+end
+
+# return inside def inside a block - def scopes the return
+Foo.configure do |c|
+  def bar
+    return if baz?
+  end
+end

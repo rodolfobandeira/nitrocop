@@ -27,3 +27,24 @@ transaction do
     end
   end
 end
+
+# Return inside iterator inside a method body (was FN before fix)
+class Processor
+  def process
+    @items.each do |item|
+      return if item.blank?
+      ^^^^^^ Lint/NonLocalExitFromIterator: Non-local exit from iterator, without return value. `next`, `break`, `Array#find`, `Array#any?`, etc. is preferred.
+      item.save!
+    end
+  end
+end
+
+# Return inside iterator inside a class method
+class Handler
+  def self.run
+    TYPES.each do |type, _|
+      return if type == :skip
+      ^^^^^^ Lint/NonLocalExitFromIterator: Non-local exit from iterator, without return value. `next`, `break`, `Array#find`, `Array#any?`, etc. is preferred.
+    end
+  end
+end
