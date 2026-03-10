@@ -385,6 +385,12 @@ fn lint_file(
         }
     }
 
+    // rubocop-rails MigrationFileSkippable: suppress all offenses on files
+    // whose basename contains a 14-digit "timestamp" <= MigratedSchemaVersion.
+    if cop_filters.is_migrated_file(path) {
+        return Vec::new();
+    }
+
     // Tier 1: stat check (mtime + size) — no file read needed
     if cache.is_enabled() {
         if let CacheLookup::StatHit(cached) = cache.get_by_stat(path) {

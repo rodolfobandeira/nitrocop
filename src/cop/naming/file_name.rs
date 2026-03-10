@@ -84,14 +84,20 @@ fn is_filename_snake_case(segment: &str) -> bool {
 /// filename-only cops like Naming/FileName run on files with encoding
 /// declarations that produce non-UTF8 content.
 ///
-/// ### Remaining FP=5: all config-exclude issues
-/// 3 from david942j/one_gadget (see FP=3 note above).
-/// 1 from samg/timetrap (`lib/Getopt/Declare.rb`) — capital D, repo likely
-/// excludes this vendored file.
-/// 1 from simplecov-ruby/simplecov (`spec/fixtures/iso-8859.rb`) — hyphen in
-/// filename, repo likely excludes `spec/fixtures/**`.
-/// All are caused by repo-level AllCops/Exclude patterns that nitrocop's
-/// config loader doesn't fully resolve for corpus paths. Not cop logic bugs.
+/// ### FP=3 fixed: rubocop-rails MigrationFileSkippable (2026-03-10)
+/// Root cause: rubocop-rails prepends ALL cops with `MigrationFileSkippable`,
+/// which extracts the first 14-digit run from filenames and suppresses offenses
+/// if that "timestamp" <= `AllCops.MigratedSchemaVersion` (default `'19700101000000'`).
+/// The 3 one_gadget files have SHA-1 hashes containing 14+ digit runs that are
+/// numerically <= the UNIX epoch sentinel (e.g., `19674621757594` < `19700101000000`).
+/// Fix: implemented `MigratedSchemaVersion` parsing and `is_migrated_file()` check
+/// in `CopFilterSet` + `lint_file()`, matching RuboCop's behavior globally.
+///
+/// ### Remaining FP=2: timetrap + simplecov (likely CI environment difference)
+/// 1 from samg/timetrap (`lib/Getopt/Declare.rb`) and 1 from simplecov-ruby/simplecov
+/// (`spec/fixtures/iso-8859.rb`). These show as FP in CI corpus oracle but
+/// local `--rerun` verification shows 0 excess. Root cause likely CI-environment
+/// specific (different config resolution, file set, or Ruby version). Not cop bugs.
 pub struct FileName;
 
 /// Well-known Ruby files that don't follow snake_case convention.

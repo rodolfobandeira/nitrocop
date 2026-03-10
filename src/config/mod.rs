@@ -156,6 +156,10 @@ pub struct CopFilterSet {
     universal_cop_indices: Vec<usize>,
     /// Indices of enabled cops that need per-file Include/Exclude pattern matching.
     pattern_cop_indices: Vec<usize>,
+    /// AllCops.MigratedSchemaVersion — when set, files whose basename contains a
+    /// 14-digit run that is <= this value have all offenses suppressed.
+    /// Implements rubocop-rails' MigrationFileSkippable behavior.
+    migrated_schema_version: Option<String>,
 }
 
 impl CopFilterSet {
@@ -201,6 +205,37 @@ impl CopFilterSet {
                         return true;
                     }
                 }
+            }
+        }
+        false
+    }
+
+    /// Check if a file is a "migrated" migration file that should have all offenses
+    /// suppressed. Implements rubocop-rails' MigrationFileSkippable behavior:
+    /// extracts the first 14-digit run from the basename and compares it to
+    /// `AllCops.MigratedSchemaVersion` (string comparison).
+    pub fn is_migrated_file(&self, path: &Path) -> bool {
+        let Some(ref version) = self.migrated_schema_version else {
+            return false;
+        };
+        let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Match Ruby's /(?<timestamp>\d{14})/ — first run of exactly 14+ digits
+        let bytes = basename.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i - start >= 14 {
+                    // Take the first 14 digits (Ruby's named capture gets the full match,
+                    // but the comparison is string-based so longer runs still work)
+                    let timestamp = &basename[start..start + 14];
+                    return timestamp <= version.as_str();
+                }
+            } else {
+                i += 1;
             }
         }
         false
@@ -573,6 +608,11 @@ pub struct ResolvedConfig {
     /// (e.g., `baseline_rubocop.yml`), this is the current working directory.
     /// This distinction matters because non-dotfile configs use cwd-relative patterns.
     base_dir: Option<PathBuf>,
+    /// AllCops.MigratedSchemaVersion from rubocop-rails.
+    /// When set, files whose basename contains a 14-digit "timestamp" <= this value
+    /// have ALL offenses suppressed (rubocop-rails' MigrationFileSkippable).
+    /// Default sentinel from rubocop-rails: `'19700101000000'`.
+    migrated_schema_version: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -596,6 +636,7 @@ impl ResolvedConfig {
             railties_in_lockfile: false,
             rack_version: None,
             base_dir: None,
+            migrated_schema_version: None,
         }
     }
 }
@@ -630,6 +671,10 @@ struct ConfigLayer {
     target_rails_version: Option<f64>,
     /// AllCops.ActiveSupportExtensionsEnabled (set by rubocop-rails).
     active_support_extensions_enabled: Option<bool>,
+    /// AllCops.MigratedSchemaVersion (set by rubocop-rails).
+    /// When set, files whose basename contains a 14+ digit "timestamp" <= this value
+    /// have ALL offenses suppressed (MigrationFileSkippable).
+    migrated_schema_version: Option<String>,
 }
 
 impl ConfigLayer {
@@ -650,6 +695,7 @@ impl ConfigLayer {
             target_ruby_version: None,
             target_rails_version: None,
             active_support_extensions_enabled: None,
+            migrated_schema_version: None,
         }
     }
 }
@@ -1078,6 +1124,7 @@ pub fn load_config(
         railties_in_lockfile,
         rack_version,
         base_dir: Some(base_dir),
+        migrated_schema_version: base.migrated_schema_version,
     })
 }
 
@@ -1530,6 +1577,7 @@ fn parse_config_layer(raw: &Value) -> ConfigLayer {
     let mut target_ruby_version = None;
     let mut target_rails_version = None;
     let mut active_support_extensions_enabled = None;
+    let mut migrated_schema_version: Option<String> = None;
 
     if let Value::Mapping(map) = raw {
         for (key, value) in map {
@@ -1579,6 +1627,15 @@ fn parse_config_layer(raw: &Value) -> ConfigLayer {
                         {
                             active_support_extensions_enabled = ase.as_bool();
                         }
+                        if let Some(msv) =
+                            ac_map.get(Value::String("MigratedSchemaVersion".to_string()))
+                        {
+                            migrated_schema_version = msv
+                                .as_str()
+                                .map(String::from)
+                                .or_else(|| msv.as_u64().map(|u| u.to_string()))
+                                .or_else(|| msv.as_i64().map(|i| i.to_string()));
+                        }
                     }
                     continue;
                 }
@@ -1613,6 +1670,7 @@ fn parse_config_layer(raw: &Value) -> ConfigLayer {
         target_ruby_version,
         target_rails_version,
         active_support_extensions_enabled,
+        migrated_schema_version,
     }
 }
 
@@ -1673,6 +1731,12 @@ fn merge_layer_into(
     // ActiveSupportExtensionsEnabled: last writer wins
     if overlay.active_support_extensions_enabled.is_some() {
         base.active_support_extensions_enabled = overlay.active_support_extensions_enabled;
+    }
+
+    // MigratedSchemaVersion: last writer wins
+    if overlay.migrated_schema_version.is_some() {
+        base.migrated_schema_version
+            .clone_from(&overlay.migrated_schema_version);
     }
 
     // Merge department configs
@@ -2568,6 +2632,7 @@ impl ResolvedConfig {
             sub_config_dirs,
             universal_cop_indices,
             pattern_cop_indices,
+            migrated_schema_version: self.migrated_schema_version.clone(),
         }
     }
 
@@ -3259,6 +3324,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         // Glob pattern should work
         assert!(
@@ -4144,6 +4210,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         let path = Path::new("bench/repos/mastodon/lib/tasks/emojis.rake");
         assert!(
@@ -4165,6 +4232,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         let path = Path::new("/tmp/test/db/migrate/001_create_users.rb");
         assert!(
@@ -4187,6 +4255,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         let path = Path::new("bench/repos/discourse/spec/models/user_spec.rb");
         assert!(
@@ -4209,6 +4278,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         let path = Path::new("bench/repos/discourse/spec/requests/api/invites_spec.rb");
         assert!(
@@ -4230,6 +4300,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         assert!(filter_set.is_cop_match(0, Path::new("app/models/user.rb")));
         assert!(!filter_set.is_cop_match(0, Path::new("vendor/gems/foo.rb")));
@@ -4247,6 +4318,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         assert!(!filter_set.is_cop_match(0, Path::new("anything.rb")));
     }
@@ -4265,6 +4337,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         // File doesn't match Include, but is_cop_excluded only checks Exclude
         assert!(
@@ -4285,6 +4358,7 @@ mod tests {
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         assert!(
             filter_set.is_cop_excluded(0, Path::new("/project/app/controllers/test.rb")),
@@ -4310,6 +4384,7 @@ mod tests {
             sub_config_dirs: vec![PathBuf::from("bench/repos/mastodon/app/controllers")],
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
         };
         // File in sub-config dir: nearest_config_dir is the sub-dir,
         // but root-relative path should still match the Exclude pattern.
@@ -4320,6 +4395,49 @@ mod tests {
             ),
             "Exclude should match via root-relative path even in sub-config dir"
         );
+    }
+
+    #[test]
+    fn migrated_file_skippable() {
+        use std::path::Path;
+        let filter_set = CopFilterSet {
+            global_exclude: GlobSet::empty(),
+            global_exclude_re: None,
+            filters: Vec::new(),
+            config_dir: None,
+            base_dir: None,
+            sub_config_dirs: Vec::new(),
+            universal_cop_indices: Vec::new(),
+            pattern_cop_indices: Vec::new(),
+            migrated_schema_version: Some("19700101000000".to_string()),
+        };
+        // SHA hash containing 14-digit run <= 19700101000000 → migrated
+        assert!(filter_set.is_migrated_file(Path::new(
+            "repos/one_gadget/spec/data/89cc3bb19674621757594b0d0da0c2d3.rb"
+        )));
+        // Normal migration file with timestamp > epoch → not migrated
+        assert!(
+            !filter_set.is_migrated_file(Path::new("db/migrate/20240315120000_create_users.rb"))
+        );
+        // No digits in filename → not migrated
+        assert!(!filter_set.is_migrated_file(Path::new("app/models/user.rb")));
+        // Fewer than 14 digits → not migrated
+        assert!(!filter_set.is_migrated_file(Path::new("test_1234567890.rb")));
+        // Exactly 14 digits at epoch → migrated
+        assert!(filter_set.is_migrated_file(Path::new("19700101000000_init.rb")));
+        // No MigratedSchemaVersion set → never migrated
+        let no_version = CopFilterSet {
+            global_exclude: GlobSet::empty(),
+            global_exclude_re: None,
+            filters: Vec::new(),
+            config_dir: None,
+            base_dir: None,
+            sub_config_dirs: Vec::new(),
+            universal_cop_indices: Vec::new(),
+            pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
+        };
+        assert!(!no_version.is_migrated_file(Path::new("19700101000000_init.rb")));
     }
 
     mod prop_tests {
