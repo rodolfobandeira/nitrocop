@@ -1,14 +1,31 @@
-use crate::cop::node_type::{
-    CALL_NODE, CLASS_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE,
-};
+use crate::cop::node_type::{BLOCK_NODE, CALL_NODE, CLASS_NODE, MODULE_NODE, SINGLETON_CLASS_NODE};
 use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-10)
+///
+/// Corpus oracle reported FP=2, FN=27.
+///
+/// FN=27: The missing cases are access modifiers inside `do ... end` bodies such
+/// as `included do`, `Class.new do`, and `Module.new do`. The original
+/// implementation only inspected class/module/sclass bodies, so block-bodied
+/// containers were never checked.
+///
+/// FP=2: The remaining corpus false positives were not reproduced with local
+/// fixture coverage during this patch and are left unchanged.
 pub struct AccessModifierIndentation;
 
 const ACCESS_MODIFIERS: &[&[u8]] = &[b"private", b"protected", b"public", b"module_function"];
+
+fn body_statements(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
+    if let Some(stmts) = body.as_statements_node() {
+        stmts.body().iter().collect()
+    } else {
+        vec![body]
+    }
+}
 
 impl Cop for AccessModifierIndentation {
     fn name(&self) -> &'static str {
@@ -17,11 +34,11 @@ impl Cop for AccessModifierIndentation {
 
     fn interested_node_types(&self) -> &'static [u8] {
         &[
+            BLOCK_NODE,
             CALL_NODE,
             CLASS_NODE,
             MODULE_NODE,
             SINGLETON_CLASS_NODE,
-            STATEMENTS_NODE,
         ]
     }
 
@@ -53,6 +70,11 @@ impl Cop for AccessModifierIndentation {
                 Some(b) => (b, sclass_node.location().start_offset()),
                 None => return,
             }
+        } else if let Some(block_node) = node.as_block_node() {
+            match block_node.body() {
+                Some(b) => (b, block_node.location().start_offset()),
+                None => return,
+            }
         } else {
             return;
         };
@@ -64,12 +86,7 @@ impl Cop for AccessModifierIndentation {
             None => return,
         };
 
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
-        };
-
-        for stmt in stmts.body().iter() {
+        for stmt in body_statements(body) {
             let call = match stmt.as_call_node() {
                 Some(c) => c,
                 None => continue,

@@ -15,3 +15,15 @@ public
 ^^^^^^ Layout/AccessModifierIndentation: Indent access modifiers like `public`.
   def corge; end
 end
+
+Test = Module.new do
+private
+^^^^^^^ Layout/AccessModifierIndentation: Indent access modifiers like `private`.
+  def grault; end
+end
+
+included do
+private
+^^^^^^^ Layout/AccessModifierIndentation: Indent access modifiers like `private`.
+  def garply; end
+end
