@@ -5,6 +5,16 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use std::collections::HashMap;
 
+/// RSpec/IndexedLet — flags `let` statements using numeric indexes (e.g., `let(:item_1)`)
+/// when the group (by base name with all digits stripped) exceeds `Max`.
+///
+/// **Conformance fixes applied:**
+/// - Grouping uses `gsub(/\d+/, '')` (strips ALL digit sequences) to match RuboCop's
+///   `let_name_stripped_index`, not just trailing digits. This matters for names like
+///   `user_1_item_1` / `user_1_item_2` / `user_2_item_1` which all group to `user__item_`.
+/// - Message uses the first `/\d+/` match (first digit sequence in the name), matching
+///   RuboCop's `let_name(let_node)[INDEX_REGEX]`.
+/// - Names without trailing `/_?\d+$/` are still excluded (matching `SUFFIX_INDEX_REGEX`).
 pub struct IndexedLet;
 
 impl Cop for IndexedLet {
@@ -83,10 +93,10 @@ impl Cop for IndexedLet {
 
         // Collect indexed lets at this level (direct children only)
         struct LetInfo {
-            #[allow(dead_code)]
-            name: String,
-            base_name: String,
-            index_str: String,
+            /// Grouping key: name with all digits stripped (matches RuboCop's gsub(/\d+/, ''))
+            group_key: String,
+            /// First digit sequence in the name (for the message)
+            first_index: String,
             line: usize,
             column: usize,
         }
@@ -147,24 +157,25 @@ impl Cop for IndexedLet {
                 }
             }
 
-            // Check if name has a trailing numeric suffix
-            if let Some((base, index_str)) = split_trailing_index(&name_str) {
+            // Check if name has a trailing numeric suffix (SUFFIX_INDEX_REGEX = /_?\d+$/)
+            if has_trailing_index(&name_str) {
                 let loc = c.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
+                let group_key = strip_all_digits(&name_str);
+                let first_index = first_digit_sequence(&name_str).unwrap_or_default();
                 indexed_lets.push(LetInfo {
-                    name: name_str,
-                    base_name: base,
-                    index_str,
+                    group_key,
+                    first_index,
                     line,
                     column,
                 });
             }
         }
 
-        // Group by base name and flag groups with more than Max entries
+        // Group by key (all digits stripped) and flag groups with more than Max entries
         let mut groups: HashMap<&str, Vec<&LetInfo>> = HashMap::new();
         for info in &indexed_lets {
-            groups.entry(&info.base_name).or_default().push(info);
+            groups.entry(&info.group_key).or_default().push(info);
         }
 
         for lets in groups.values() {
@@ -176,7 +187,7 @@ impl Cop for IndexedLet {
                         let_info.column,
                         format!(
                             "This `let` statement uses `{}` in its name. Please give it a meaningful name.",
-                            let_info.index_str
+                            let_info.first_index
                         ),
                     ));
                 }
@@ -185,26 +196,45 @@ impl Cop for IndexedLet {
     }
 }
 
-/// Split a name into base name (with digits stripped) and index string.
-/// Matches Ruby's `/_?\d+$/` pattern.
-/// e.g., "item_1" → Some(("item", "1")), "item1" → Some(("item", "1"))
-fn split_trailing_index(name: &str) -> Option<(String, String)> {
-    // Find trailing digits
-    let name_bytes = name.as_bytes();
-    let mut i = name_bytes.len();
-    while i > 0 && name_bytes[i - 1].is_ascii_digit() {
+/// Check if name has a trailing numeric suffix matching `/_?\d+$/`.
+/// Returns `true` for `item_1`, `item1`, `user_1_item_2`, etc.
+fn has_trailing_index(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
         i -= 1;
     }
-    if i >= name_bytes.len() || i == 0 {
-        return None; // No trailing digits or only digits
+    // Must have trailing digits, and not be all digits
+    i < bytes.len() && i > 0
+}
+
+/// Strip ALL digit sequences from name (equivalent to Ruby's `gsub(/\d+/, '')`).
+/// Used for grouping: `user_1_item_2` → `user__item_`.
+fn strip_all_digits(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if !ch.is_ascii_digit() {
+            result.push(ch);
+        }
     }
-    let index_str = &name[i..];
-    // Base name is everything before digits, also strip trailing underscore
-    let mut base = &name[..i];
-    if base.ends_with('_') {
-        base = &base[..base.len() - 1];
+    result
+}
+
+/// Extract the first digit sequence from name (equivalent to Ruby's `name[/\d+/]`).
+/// Used for the message: `user_1_item_2` → `1`.
+fn first_digit_sequence(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    let mut start = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_digit() {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if start.is_some() {
+            return Some(name[start.unwrap()..i].to_string());
+        }
     }
-    Some((base.to_string(), index_str.to_string()))
+    start.map(|s| name[s..].to_string())
 }
 
 #[cfg(test)]
