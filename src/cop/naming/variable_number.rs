@@ -29,6 +29,18 @@ use crate::parse::source::SourceFile;
 /// never checks empty symbols. In Prism, empty symbols are `SymbolNode`
 /// with an empty `unescaped()` value, so nitrocop was processing them.
 /// Fix: skip empty names early in `check_number_style` (`!has_digit || name.is_empty()`).
+///
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=0, FN=1. No example locations available.
+/// The cop handles all variable write/compound-write/target node types,
+/// RequiredParameterNode, DefNode (method names), and SymbolNode. RuboCop's
+/// `on_arg` covers all parameter types, but optional/keyword/rest/block
+/// parameters are not checked in RuboCop's VariableNumber cop (it only has
+/// `on_arg`, not `on_optarg`/`on_kwarg`/`on_kwoptarg`/`on_restarg`/`on_blockarg`).
+/// FN=1 is likely a corpus artifact (CI file discovery, encoding, or stale cache)
+/// given 16,625 matches with 99.99% match rate. Local `check-cop.py --rerun`
+/// needed to confirm.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
