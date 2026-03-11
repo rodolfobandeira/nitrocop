@@ -16,3 +16,5 @@ obj[0]..obj[1]
 # Rational literals (e.g., 1/3r) are acceptable boundaries
 1/10r..1/3r
 0/1r..1/1r
+# begin...end blocks are acceptable range boundaries (RuboCop's begin_type?)
+begin; compute_min; end..begin; compute_max; end

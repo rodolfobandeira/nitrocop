@@ -30,6 +30,15 @@ use crate::parse::source::SourceFile;
 /// check on the receiver was rejecting it. Added `is_rational_literal()` to
 /// match RuboCop's `RationalLiteral` mixin, which explicitly accepts
 /// `(send (int _) :/ (rational _))` as an unambiguous boundary.
+///
+/// ## Corpus investigation (2026-03-11, round 2)
+///
+/// FP=1, FN=0. Root cause: RuboCop's `acceptable?` checks `node.begin_type?`
+/// which in the Parser gem covers both parenthesized expressions `(expr)` AND
+/// explicit `begin...end` blocks. nitrocop only checked `ParenthesesNode`,
+/// missing `BeginNode`. A `begin; expr; end..begin; expr; end` range boundary
+/// was being flagged as ambiguous. Fixed by adding `as_begin_node()` check
+/// alongside `as_parentheses_node()`.
 pub struct AmbiguousRange;
 
 impl Cop for AmbiguousRange {
@@ -121,8 +130,9 @@ impl Cop for AmbiguousRange {
 }
 
 fn is_acceptable_boundary(node: &ruby_prism::Node<'_>, require_parens_for_chains: bool) -> bool {
-    // Parenthesized expression
-    if node.as_parentheses_node().is_some() {
+    // Parenthesized expression or begin...end block
+    // RuboCop's `begin_type?` covers both `(expr)` and `begin...end`.
+    if node.as_parentheses_node().is_some() || node.as_begin_node().is_some() {
         return true;
     }
 
