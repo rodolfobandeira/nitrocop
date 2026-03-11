@@ -2,7 +2,7 @@ use crate::cop::node_type::{
     ALIAS_METHOD_NODE, ARRAY_NODE, ASSOC_NODE, CLASS_NODE, DEF_NODE, KEYWORD_HASH_NODE,
     MODULE_NODE, STATEMENTS_NODE, STRING_NODE, SYMBOL_NODE,
 };
-use crate::cop::util::{has_keyword_arg, is_dsl_call};
+use crate::cop::util::is_dsl_call;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -13,24 +13,33 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Investigation findings
 ///
-/// **FP root cause (29 FP):** nitrocop did not recognize `delegate :name, to: :obj`,
-/// `alias_method :new, :old`, or `alias new old` as defining action methods.
-/// RuboCop's `defined_action_methods` includes delegated and aliased methods.
+/// **FP root causes (28 FP):**
+/// - nitrocop emitted one offense per unmatched action name, while RuboCop
+///   emits one offense per filter call aggregating all unmatched names.
+///   A filter with 3 unmatched methods produced 3 offenses vs RuboCop's 1.
+/// - Offense was located at the individual symbol, not the filter call.
 ///
-/// **FN root cause (56 FN):**
-/// - Missing filter methods: `append_after_action`, `append_around_action`,
-///   `append_before_action`, `prepend_after_action`, `prepend_around_action`,
-///   `prepend_before_action`, `skip_action_callback` were not in FILTER_METHODS.
-/// - String values in `only`/`except` (e.g., `only: ['show']`) were not handled;
-///   only SymbolNode was checked, not StringNode.
-/// - ModuleNode context was not handled (only ClassNode).
+/// **FN root causes (46 FN):**
+/// - Filter calls nested inside blocks (e.g., `included do ... end`) were
+///   not found because we only searched direct children of the class body.
+///   RuboCop's `on_send` fires on all send nodes and walks up to the parent
+///   class/module via `each_ancestor`.
+/// - RuboCop's NodePattern matches the hash with exactly one pair, which
+///   correctly skips multi-key hashes like `only: :show, if: :admin?`.
 ///
-/// **Fixes applied:**
-/// - Added all 13 RESTRICT_ON_SEND methods from vendor RuboCop.
-/// - Added delegate/alias_method/alias recognition to defined method collection.
-/// - Added StringNode handling in extract_action_names_from_keyword.
-/// - Added ModuleNode support alongside ClassNode.
+/// **Fixes applied (round 2):**
+/// - Changed to emit one offense per filter call with aggregated message.
+/// - Offense now points to the filter call (matching RuboCop location).
+/// - Message format changed to match RuboCop: `` `name` is not explicitly
+///   defined on the class. `` / `` `a`, `b` are not explicitly defined on
+///   the module. ``
+/// - Added recursive search for filter calls in nested blocks to handle
+///   `included do ... end` pattern.
+/// - Maintained existing delegate/alias_method/alias recognition.
 pub struct LexicallyScopedActionFilter;
+
+/// (call_start_offset, only_action_names, except_action_names)
+type FilterCallInfo = (usize, Vec<Vec<u8>>, Vec<Vec<u8>>);
 
 const FILTER_METHODS: &[&[u8]] = &[
     b"after_action",
@@ -85,11 +94,11 @@ impl Cop for LexicallyScopedActionFilter {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Handle both ClassNode and ModuleNode
-        let body = if let Some(class) = node.as_class_node() {
-            class.body()
+        // Determine if this is a ClassNode or ModuleNode
+        let (body, type_name) = if let Some(class) = node.as_class_node() {
+            (class.body(), "class")
         } else if let Some(module) = node.as_module_node() {
-            module.body()
+            (module.body(), "module")
         } else {
             return;
         };
@@ -103,7 +112,7 @@ impl Cop for LexicallyScopedActionFilter {
             None => return,
         };
 
-        // Collect defined method names in this class/module
+        // Collect defined method names in this class/module (direct children only)
         let mut defined_methods: Vec<Vec<u8>> = Vec::new();
         for stmt_node in stmts.body().iter() {
             if let Some(def_node) = stmt_node.as_def_node() {
@@ -111,8 +120,7 @@ impl Cop for LexicallyScopedActionFilter {
             }
         }
 
-        // Collect delegated methods: `delegate :name, to: :obj`
-        // and alias methods: `alias_method :new, :old`
+        // Collect delegated methods and alias methods (direct children only)
         for stmt_node in stmts.body().iter() {
             if let Some(call) = stmt_node.as_call_node() {
                 if call.receiver().is_none() {
@@ -130,41 +138,141 @@ impl Cop for LexicallyScopedActionFilter {
             }
         }
 
-        // Collect filter calls from class/module body
-        let calls: Vec<ruby_prism::CallNode<'_>> = stmts
-            .body()
-            .iter()
-            .filter_map(|node| node.as_call_node())
-            .collect();
+        // Find filter calls recursively (handles `included do ... end` blocks)
+        // We collect (start_offset, action_names_for_only, action_names_for_except)
+        let mut filter_info: Vec<FilterCallInfo> = Vec::new();
+        collect_filter_calls_recursive(&stmts, &mut filter_info);
 
-        for call in &calls {
-            let is_filter = FILTER_METHODS.iter().any(|&m| is_dsl_call(call, m));
-            if !is_filter {
-                continue;
-            }
-
-            // Check :only and :except keyword args for symbol references
-            for keyword in &[b"only".as_slice(), b"except".as_slice()] {
-                if !has_keyword_arg(call, keyword) {
+        for (call_offset, only_names, except_names) in &filter_info {
+            for action_names in [only_names, except_names] {
+                if action_names.is_empty() {
                     continue;
                 }
 
-                let action_names = extract_action_names_from_keyword(call, keyword);
-                for (name, offset) in action_names {
-                    if !defined_methods.contains(&name) {
-                        let (line, column) = source.offset_to_line_col(offset);
-                        let name_str = String::from_utf8_lossy(&name);
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            format!("Action `{name_str}` is not defined in this controller."),
-                        ));
+                let unmatched: Vec<&Vec<u8>> = action_names
+                    .iter()
+                    .filter(|name| !defined_methods.contains(name))
+                    .collect();
+
+                if unmatched.is_empty() {
+                    continue;
+                }
+
+                let (line, column) = source.offset_to_line_col(*call_offset);
+
+                let message = if unmatched.len() == 1 {
+                    let name_str = String::from_utf8_lossy(unmatched[0]);
+                    format!("`{name_str}` is not explicitly defined on the {type_name}.")
+                } else {
+                    let names: Vec<String> = unmatched
+                        .iter()
+                        .map(|n| format!("`{}`", String::from_utf8_lossy(n)))
+                        .collect();
+                    let joined = names.join(", ");
+                    format!("{joined} are not explicitly defined on the {type_name}.")
+                };
+
+                diagnostics.push(self.diagnostic(source, line, column, message));
+            }
+        }
+    }
+}
+
+/// Recursively collect filter call info from statements, including inside blocks.
+/// This handles patterns like `included do before_action ... end`.
+/// Collects (call_start_offset, only_action_names, except_action_names) tuples.
+fn collect_filter_calls_recursive(
+    stmts: &ruby_prism::StatementsNode<'_>,
+    results: &mut Vec<FilterCallInfo>,
+) {
+    for stmt_node in stmts.body().iter() {
+        if let Some(call) = stmt_node.as_call_node() {
+            let is_filter = FILTER_METHODS.iter().any(|&m| is_dsl_call(&call, m));
+            if is_filter {
+                let offset = call.location().start_offset();
+                let only_names = extract_action_names_from_call(&call, b"only");
+                let except_names = extract_action_names_from_call(&call, b"except");
+                if !only_names.is_empty() || !except_names.is_empty() {
+                    results.push((offset, only_names, except_names));
+                }
+            } else {
+                // Check inside block bodies (e.g., `included do ... end`)
+                if let Some(block) = call.block() {
+                    if let Some(block_node) = block.as_block_node() {
+                        if let Some(body) = block_node.body() {
+                            if let Some(inner_stmts) = body.as_statements_node() {
+                                collect_filter_calls_recursive(&inner_stmts, results);
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// Extract action names (as symbol or string values) from the :only or :except keyword arg
+/// of a filter call. Returns just the names (no offsets needed since we report on the call).
+/// RuboCop's pattern requires the keyword hash to contain ONLY the only:/except: pair.
+fn extract_action_names_from_call(call: &ruby_prism::CallNode<'_>, key: &[u8]) -> Vec<Vec<u8>> {
+    let mut results = Vec::new();
+
+    let args = match call.arguments() {
+        Some(a) => a,
+        None => return results,
+    };
+
+    for arg in args.arguments().iter() {
+        let kw = match arg.as_keyword_hash_node() {
+            Some(k) => k,
+            None => continue,
+        };
+
+        // RuboCop's NodePattern `(hash (pair (sym {:only :except}) $_))`
+        // matches only when the hash has exactly one pair
+        let elements: Vec<_> = kw.elements().iter().collect();
+        if elements.len() != 1 {
+            continue;
+        }
+
+        let assoc = match elements[0].as_assoc_node() {
+            Some(a) => a,
+            None => continue,
+        };
+        let key_sym = match assoc.key().as_symbol_node() {
+            Some(s) => s,
+            None => continue,
+        };
+        if key_sym.unescaped() != key {
+            continue;
+        }
+
+        let value = assoc.value();
+
+        // Single symbol: `only: :show`
+        if let Some(sym) = value.as_symbol_node() {
+            results.push(sym.unescaped().to_vec());
+        }
+
+        // Single string: `only: 'show'`
+        if let Some(str_node) = value.as_string_node() {
+            results.push(str_node.unescaped().to_vec());
+        }
+
+        // Array of symbols/strings: `only: [:show, :edit]` or `only: ['show', 'edit']`
+        if let Some(arr) = value.as_array_node() {
+            for elem in arr.elements().iter() {
+                if let Some(sym) = elem.as_symbol_node() {
+                    results.push(sym.unescaped().to_vec());
+                }
+                if let Some(str_node) = elem.as_string_node() {
+                    results.push(str_node.unescaped().to_vec());
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// Collect method names from `delegate :name1, :name2, to: :obj`
@@ -175,7 +283,6 @@ fn collect_delegated_methods(call: &ruby_prism::CallNode<'_>, defined_methods: &
     };
 
     // delegate takes symbol args followed by a keyword hash with `to:`
-    // Check that the last arg is a keyword hash with `to:` key
     let arg_list: Vec<_> = args.arguments().iter().collect();
     let has_to_key = arg_list.iter().any(|arg| {
         if let Some(kw) = arg.as_keyword_hash_node() {
@@ -244,8 +351,6 @@ fn collect_alias_node(
     current_defined: &[Vec<u8>],
     defined_methods: &mut Vec<Vec<u8>>,
 ) {
-    // In Prism, `alias new old` produces AliasMethodNode with
-    // new_name() and old_name() which are SymbolNode
     let new_name_node = alias_node.new_name();
     let old_name_node = alias_node.old_name();
 
@@ -264,80 +369,6 @@ fn collect_alias_node(
     if current_defined.contains(&old_name) {
         defined_methods.push(new_name);
     }
-}
-
-/// Extract action names (as symbol or string values) from the :only or :except keyword arg.
-/// Returns (name_bytes, symbol_offset) pairs.
-/// RuboCop's pattern requires the keyword hash to contain ONLY the only:/except: pair,
-/// so we skip hashes that have additional keys like `if:`, `unless:`, etc.
-fn extract_action_names_from_keyword(
-    call: &ruby_prism::CallNode<'_>,
-    key: &[u8],
-) -> Vec<(Vec<u8>, usize)> {
-    let mut results = Vec::new();
-
-    let args = match call.arguments() {
-        Some(a) => a,
-        None => return results,
-    };
-
-    for arg in args.arguments().iter() {
-        let kw = match arg.as_keyword_hash_node() {
-            Some(k) => k,
-            None => continue,
-        };
-
-        // RuboCop's NodePattern `(hash (pair (sym {:only :except}) $_))`
-        // matches only when the hash has exactly one pair
-        let elements: Vec<_> = kw.elements().iter().collect();
-        if elements.len() != 1 {
-            continue;
-        }
-
-        let assoc = match elements[0].as_assoc_node() {
-            Some(a) => a,
-            None => continue,
-        };
-        let key_sym = match assoc.key().as_symbol_node() {
-            Some(s) => s,
-            None => continue,
-        };
-        if key_sym.unescaped() != key {
-            continue;
-        }
-
-        let value = assoc.value();
-
-        // Single symbol: `only: :show`
-        if let Some(sym) = value.as_symbol_node() {
-            results.push((sym.unescaped().to_vec(), sym.location().start_offset()));
-        }
-
-        // Single string: `only: 'show'`
-        if let Some(str_node) = value.as_string_node() {
-            results.push((
-                str_node.unescaped().to_vec(),
-                str_node.location().start_offset(),
-            ));
-        }
-
-        // Array of symbols/strings: `only: [:show, :edit]` or `only: ['show', 'edit']`
-        if let Some(arr) = value.as_array_node() {
-            for elem in arr.elements().iter() {
-                if let Some(sym) = elem.as_symbol_node() {
-                    results.push((sym.unescaped().to_vec(), sym.location().start_offset()));
-                }
-                if let Some(str_node) = elem.as_string_node() {
-                    results.push((
-                        str_node.unescaped().to_vec(),
-                        str_node.location().start_offset(),
-                    ));
-                }
-            }
-        }
-    }
-
-    results
 }
 
 #[cfg(test)]

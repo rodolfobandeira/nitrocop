@@ -34,3 +34,31 @@ module AdminModule
   before_action :auth, only: :index
   def index; end
 end
+
+module FooMixin
+  extend ActiveSupport::Concern
+
+  included do
+    before_action proc { authenticate }, only: :foo
+  end
+
+  def foo; end
+end
+
+class FooController < ApplicationController
+  before_action :foo, except: %I[index show]
+
+  def index
+  end
+
+  def show
+  end
+end
+
+class ConditionalController < ActionController
+  before_action(:authenticate, only: %i[update cancel]) unless foo
+
+  def update; end
+
+  def cancel; end
+end
