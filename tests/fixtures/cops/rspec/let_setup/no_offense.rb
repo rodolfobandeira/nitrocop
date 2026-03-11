@@ -72,3 +72,34 @@ describe Service do
     end
   end
 end
+
+# include_examples block with let! that IS referenced
+describe Widget do
+  include_examples 'shared behavior' do
+    let!(:item) { create(:item) }
+
+    it 'uses item' do
+      expect(item).to be_valid
+    end
+  end
+end
+
+# include_context block with let! that IS referenced
+describe Widget do
+  include_context 'with setup' do
+    let!(:record) { create(:record) }
+
+    it 'uses record' do
+      expect(record).to be_valid
+    end
+  end
+end
+
+# RSpec.describe with let! that IS referenced
+RSpec.describe Widget do
+  let!(:item) { create(:item) }
+
+  it 'uses item' do
+    expect(item).to be_valid
+  end
+end

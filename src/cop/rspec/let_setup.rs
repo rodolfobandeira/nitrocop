@@ -13,6 +13,10 @@ use std::collections::HashSet;
 ///   `let!(:record) { create(...) }`). RuboCop skips these via `overrides_outer_let_bang?`.
 /// - Implemented a recursive visitor that maintains a stack of ancestor `let!` names, so inner
 ///   overrides are correctly suppressed without needing parent node references.
+/// - FN fix: Added `include_examples` and `include_context` to recognized group names.
+///   RuboCop's `example_or_shared_group_or_including?` matches `Includes.all` which includes
+///   `include_examples`, `include_context`, `it_behaves_like`, `it_should_behave_like`.
+///   nitrocop was missing `include_examples` and `include_context`, causing 103 FNs.
 pub struct LetSetup;
 
 impl Cop for LetSetup {
@@ -126,7 +130,7 @@ impl<'pr> LetSetupVisitor<'_> {
 impl<'pr> Visit<'pr> for LetSetupVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let name = node.name().as_slice();
-        if !is_example_group(name) {
+        if !is_example_group_or_include(name) {
             // Not an example group — continue default traversal
             ruby_prism::visit_call_node(self, node);
             return;
@@ -180,9 +184,10 @@ impl<'pr> Visit<'pr> for IdentifierCollector<'_> {
     }
 }
 
-fn is_example_group(name: &[u8]) -> bool {
+fn is_example_group_or_include(name: &[u8]) -> bool {
     matches!(
         name,
+        // ExampleGroups (regular, focused, skipped)
         b"describe"
             | b"context"
             | b"feature"
@@ -193,11 +198,15 @@ fn is_example_group(name: &[u8]) -> bool {
             | b"fdescribe"
             | b"fcontext"
             | b"ffeature"
+            // SharedGroups
             | b"shared_context"
             | b"shared_examples"
             | b"shared_examples_for"
+            // Includes (Examples + Context)
             | b"it_behaves_like"
             | b"it_should_behave_like"
+            | b"include_examples"
+            | b"include_context"
     )
 }
 
