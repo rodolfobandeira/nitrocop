@@ -36,3 +36,6 @@ end
 
 def with_inline_comment # some comment
 end
+
+def disabled_route(*)
+end # handled elsewhere

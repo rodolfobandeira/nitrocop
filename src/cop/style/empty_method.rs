@@ -3,7 +3,30 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=1, FN=0.
+///
+/// FP=1: empty methods with an inline comment on the `end` line were still
+/// being flagged. RuboCop treats any comment within the method's line span as
+/// making the method non-empty, so the fix checks parsed comments across the
+/// full `def..end` range instead of only looking at the `def` line and comment-
+/// only body lines.
+///
+/// FN=0: no missed detections were reported by the corpus oracle for this run.
 pub struct EmptyMethod;
+
+fn method_has_comment(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    def_line: usize,
+    end_line: usize,
+) -> bool {
+    parse_result.comments().any(|comment| {
+        let (comment_line, _) = source.offset_to_line_col(comment.location().start_offset());
+        (def_line..=end_line).contains(&comment_line)
+    })
+}
 
 impl Cop for EmptyMethod {
     fn name(&self) -> &'static str {
@@ -18,7 +41,7 @@ impl Cop for EmptyMethod {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -55,28 +78,8 @@ impl Cop for EmptyMethod {
             return;
         }
 
-        // Check for comments associated with this method.
-        // Prism treats comments as not part of the AST body, so a method with
-        // only comments will have an empty/None body. RuboCop does not flag
-        // methods that contain comments, including inline comments on the def line.
-
-        // Check for inline comment on the def line (e.g., `def foo # :nodoc:`)
-        if let Some(line) = source.lines().nth(def_line - 1) {
-            if line.contains(&b'#') {
-                return;
-            }
-        }
-
-        if !is_single_line {
-            for line_num in (def_line + 1)..end_line {
-                if let Some(line) = source.lines().nth(line_num - 1) {
-                    let trimmed = line.iter().skip_while(|&&b| b == b' ' || b == b'\t');
-                    let trimmed_bytes: Vec<u8> = trimmed.copied().collect();
-                    if !trimmed_bytes.is_empty() && trimmed_bytes[0] == b'#' {
-                        return;
-                    }
-                }
-            }
+        if method_has_comment(source, parse_result, def_line, end_line) {
+            return;
         }
 
         match enforced_style {
