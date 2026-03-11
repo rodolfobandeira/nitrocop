@@ -15,3 +15,19 @@ options.merge(
     },
   } : {},
 )
+
+# Multiline condition but ternary branches on one line, inside a method call
+do_something(arg
+               .foo ? bar : baz)
+
+# Multiline condition inside return
+return arg
+         .foo ? bar : baz
+
+# Multiline condition inside another method call
+process arg
+          .value ? 'yes' : 'no'
+
+# Multiline condition inside safe navigation method call
+obj&.do_something arg
+                    .foo ? bar : baz
