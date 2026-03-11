@@ -25,3 +25,7 @@ end
 class MyApp
   require 'json'
 end
+
+# Wrapped requires have different parents — not duplicates
+assert require('test_helper')
+result = require 'test_helper'
