@@ -32,3 +32,26 @@ hash.each do |key, value|
 end
 
 -> (_foo, bar) { puts bar }
+
+# Nested block shadows outer param, but outer is also used directly
+items.each do |item|
+  puts item
+  results.map do |item|
+    item.name
+  end
+end
+
+# Outer param used before nested block that shadows it
+data.each do |value|
+  puts value
+  items.map do |value|
+    value.to_s
+  end
+end
+
+# Nested block does NOT shadow - different param name, both used
+items.each do |item|
+  results.map do |result|
+    [item, result]
+  end
+end

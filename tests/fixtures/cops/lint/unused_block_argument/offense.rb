@@ -35,3 +35,26 @@ end
 
 -> (foo, bar) { puts bar }
     ^^^ Lint/UnusedBlockArgument: Unused block argument - `foo`.
+
+# Variable shadowing in nested blocks: outer `item` is unused because
+# inner block shadows it — the read of `item` inside refers to the inner param
+items.each do |item|
+               ^^^^ Lint/UnusedBlockArgument: Unused block argument - `item`.
+  results.map do |item|
+    item.name
+  end
+end
+
+# Nested lambda shadows outer param
+records.each do |record|
+                 ^^^^^^ Lint/UnusedBlockArgument: Unused block argument - `record`.
+  -> (record) { record.save }
+end
+
+# Multiple levels of nesting with shadowing
+data.each do |value|
+              ^^^^^ Lint/UnusedBlockArgument: Unused block argument - `value`.
+  items.each do |value|
+    value.process
+  end
+end

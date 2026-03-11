@@ -22,6 +22,24 @@ use ruby_prism::Visit;
 /// Fix: Rewrote to use `check_source` with a visitor that handles both BlockNode
 /// and LambdaNode, collects rest params and block-local variables, detects bare
 /// `binding` calls, and only counts actual reads (not write targets) as references.
+///
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=27, FN=5393.
+///
+/// FN=5393: The `VarRefFinder` used simple name-matching — it collected all
+/// `LocalVariableReadNode` names in the block body without considering scope.
+/// When a nested block redeclares a parameter with the same name (variable
+/// shadowing), reads of that name inside the nested scope were incorrectly
+/// counted as references to the outer parameter. Fixed by tracking shadowed
+/// names in `VarRefFinder`: when entering a nested block/lambda, any params
+/// that shadow outer names are pushed to a `shadowed` list, and reads of
+/// those names inside the nested scope are excluded from collection.
+///
+/// FP=27: Likely remaining edge cases from config differences or variable
+/// tracking gaps. The fundamental VariableForce sophistication gap means
+/// some FPs may persist where RuboCop's scope tracking differs from our
+/// simple approach.
 pub struct UnusedBlockArgument;
 
 impl Cop for UnusedBlockArgument {
@@ -244,6 +262,7 @@ impl BlockVisitor<'_, '_> {
         let mut finder = VarRefFinder {
             names: Vec::new(),
             has_bare_binding: false,
+            shadowed: Vec::new(),
         };
         if let Some(ref body) = body {
             finder.visit(body);
@@ -302,14 +321,24 @@ impl BlockVisitor<'_, '_> {
 
 /// Finds local variable reads in a block body. Only counts actual reads,
 /// not write targets (multi-assign LHS). Also detects bare `binding` calls.
+/// Tracks variable shadowing: when a nested block/lambda redeclares a parameter
+/// with the same name, reads of that name inside the nested scope are not counted
+/// as references to the outer parameter.
 struct VarRefFinder {
     names: Vec<Vec<u8>>,
     has_bare_binding: bool,
+    /// Names currently shadowed by nested block parameters — reads of these
+    /// names are NOT collected because they refer to the inner scope's param.
+    shadowed: Vec<Vec<u8>>,
 }
 
 impl<'pr> Visit<'pr> for VarRefFinder {
     fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
-        self.names.push(node.name().as_slice().to_vec());
+        let name = node.name().as_slice();
+        // Don't count reads of names that are shadowed by a nested block param
+        if !self.shadowed.iter().any(|s| s.as_slice() == name) {
+            self.names.push(name.to_vec());
+        }
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -324,10 +353,86 @@ impl<'pr> Visit<'pr> for VarRefFinder {
         ruby_prism::visit_call_node(self, node);
     }
 
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        self.visit_nested_block_or_lambda(node.parameters(), node.body());
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        self.visit_nested_block_or_lambda(node.parameters(), node.body());
+    }
+
     // Don't recurse into nested def/class/module (they create new scopes)
     fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
     fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+}
+
+impl VarRefFinder {
+    /// Visit a nested block/lambda body, temporarily shadowing any parameter
+    /// names that the nested scope redeclares.
+    fn visit_nested_block_or_lambda<'pr>(
+        &mut self,
+        parameters: Option<ruby_prism::Node<'pr>>,
+        body: Option<ruby_prism::Node<'pr>>,
+    ) {
+        // Collect parameter names from the nested block
+        let nested_params = Self::collect_param_names(parameters);
+
+        // Push shadowed names
+        let shadow_start = self.shadowed.len();
+        self.shadowed.extend(nested_params);
+
+        // Visit the body with shadowed names active
+        if let Some(body) = body {
+            self.visit(&body);
+        }
+
+        // Pop shadowed names
+        self.shadowed.truncate(shadow_start);
+    }
+
+    /// Extract all parameter names from a block_parameters node.
+    fn collect_param_names(parameters: Option<ruby_prism::Node<'_>>) -> Vec<Vec<u8>> {
+        let mut names = Vec::new();
+        let block_params = match parameters.and_then(|p| p.as_block_parameters_node()) {
+            Some(bp) => bp,
+            None => return names,
+        };
+        let Some(params) = block_params.parameters() else {
+            return names;
+        };
+
+        for req in params.requireds().iter() {
+            if let Some(rp) = req.as_required_parameter_node() {
+                names.push(rp.name().as_slice().to_vec());
+            }
+        }
+        for opt in params.optionals().iter() {
+            if let Some(op) = opt.as_optional_parameter_node() {
+                names.push(op.name().as_slice().to_vec());
+            }
+        }
+        if let Some(rest) = params.rest() {
+            if let Some(rp) = rest.as_rest_parameter_node() {
+                if let Some(name) = rp.name() {
+                    names.push(name.as_slice().to_vec());
+                }
+            }
+        }
+        for post in params.posts().iter() {
+            if let Some(rp) = post.as_required_parameter_node() {
+                names.push(rp.name().as_slice().to_vec());
+            }
+        }
+        for kw in params.keywords().iter() {
+            if let Some(kp) = kw.as_required_keyword_parameter_node() {
+                names.push(kp.name().as_slice().to_vec());
+            } else if let Some(kp) = kw.as_optional_keyword_parameter_node() {
+                names.push(kp.name().as_slice().to_vec());
+            }
+        }
+        names
+    }
 }
 
 /// Checks if a specific variable is written to (assigned) in the body.
