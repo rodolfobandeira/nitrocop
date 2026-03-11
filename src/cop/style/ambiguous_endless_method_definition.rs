@@ -1,18 +1,24 @@
+use crate::cop::node_type::DEF_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
 /// Checks for ambiguous endless method definitions that use low-precedence operators.
 ///
-/// ## Corpus conformance fix (2026-03-08)
-/// **Root cause:** RuboCop requires `minimum_target_ruby_version 3.0` — endless methods
-/// were introduced in Ruby 3.0, so this cop only fires for repos targeting Ruby >= 3.0.
-/// The nitrocop implementation was missing this version check, causing 13 false positives
-/// across 10 repos (rbs, newrelic, yard, nats.rb, blueprinter, puppet, rack, rails,
-/// ferrum, stripe-mock) that target Ruby < 3.0.
+/// ## Corpus investigation (2026-03-11)
 ///
-/// **Fix:** Added TargetRubyVersion >= 3.0 check at the start of `check_lines`,
-/// matching the pattern used by `Style/ItBlockParameter` for its 3.4 threshold.
+/// Corpus oracle reported FP=13, FN=0.
+///
+/// FP root cause 1: the old line-based parser treated any one-line `def` containing
+/// ` = ` plus a later `if`/`or` token as an endless method, so regular method
+/// definitions with default arguments or inline assignments were misclassified.
+///
+/// FP root cause 2: RuboCop only checks `def`, not singleton `defs`. Prism represents
+/// both with `DefNode`, using `receiver().is_some()` for singleton methods, so nitrocop
+/// was still flagging `def obj.foo = ... unless ...` cases that RuboCop ignores.
+///
+/// Fix: keep the Ruby >= 3.0 gate, inspect only the source tail that appears *after* an
+/// actual endless instance-method `def` node's range, and skip receiver-bearing defs.
 pub struct AmbiguousEndlessMethodDefinition;
 
 impl Cop for AmbiguousEndlessMethodDefinition {
@@ -20,9 +26,15 @@ impl Cop for AmbiguousEndlessMethodDefinition {
         "Style/AmbiguousEndlessMethodDefinition"
     }
 
-    fn check_lines(
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[DEF_NODE]
+    }
+
+    fn check_node(
         &self,
         source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        _parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -38,61 +50,58 @@ impl Cop for AmbiguousEndlessMethodDefinition {
             return;
         }
 
-        let low_precedence_ops = [" and ", " or ", " if ", " unless ", " while ", " until "];
-
-        for (i, line) in source.lines().enumerate() {
-            let line_str = match std::str::from_utf8(line) {
-                Ok(s) => s.trim_end(),
-                Err(_) => continue,
-            };
-
-            // Check for endless method definition: `def foo = ...`
-            let trimmed = line_str.trim_start();
-            if !trimmed.starts_with("def ") {
-                continue;
-            }
-
-            // Find the `=` that makes it endless
-            // Look for `= ` after method name (not `==`)
-            let after_def = &trimmed[4..];
-            let eq_pos = after_def.find(" = ");
-            if eq_pos.is_none() {
-                continue;
-            }
-
-            let eq_pos = eq_pos.unwrap();
-            let after_eq = &after_def[eq_pos + 3..];
-
-            // Check if there's a low-precedence operator in the body
-            // that isn't wrapped in parentheses
-            for op in &low_precedence_ops {
-                if after_eq.contains(op) {
-                    // Check it's not inside parentheses
-                    let op_pos = after_eq.find(op).unwrap();
-                    let before_op = &after_eq[..op_pos];
-                    let paren_depth: i32 = before_op
-                        .chars()
-                        .map(|c| match c {
-                            '(' => 1,
-                            ')' => -1,
-                            _ => 0,
-                        })
-                        .sum();
-
-                    if paren_depth == 0 {
-                        let col = 0;
-                        let op_name = op.trim();
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            i + 1,
-                            col,
-                            format!("Avoid using `{}` statements with endless methods.", op_name),
-                        ));
-                        break;
-                    }
-                }
-            }
+        let def_node = match node.as_def_node() {
+            Some(def_node) => def_node,
+            None => return,
+        };
+        if def_node.receiver().is_some()
+            || def_node.equal_loc().is_none()
+            || def_node.end_keyword_loc().is_some()
+        {
+            return;
         }
+
+        let loc = def_node.location();
+        let source_bytes = source.as_bytes();
+        let tail_start = loc.end_offset();
+        let mut tail_end = tail_start;
+        while tail_end < source_bytes.len() && source_bytes[tail_end] != b'\n' {
+            tail_end += 1;
+        }
+
+        let tail = match std::str::from_utf8(&source_bytes[tail_start..tail_end]) {
+            Ok(tail) => tail,
+            Err(_) => return,
+        };
+        let tail = tail.split('#').next().unwrap_or("").trim_end();
+        if tail.trim_start().starts_with(')') {
+            return;
+        }
+
+        let low_precedence_ops = [
+            (" and ", "and"),
+            (" or ", "or"),
+            (" if ", "if"),
+            (" unless ", "unless"),
+            (" while ", "while"),
+            (" until ", "until"),
+        ];
+
+        let Some((_, op_name)) = low_precedence_ops
+            .iter()
+            .filter_map(|(needle, op_name)| tail.find(needle).map(|idx| (idx, *op_name)))
+            .min_by_key(|(idx, _)| *idx)
+        else {
+            return;
+        };
+
+        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        diagnostics.push(self.diagnostic(
+            source,
+            line,
+            column,
+            format!("Avoid using `{}` statements with endless methods.", op_name),
+        ));
     }
 }
 
