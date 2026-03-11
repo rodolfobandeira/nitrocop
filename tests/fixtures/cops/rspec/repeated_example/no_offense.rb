@@ -111,3 +111,12 @@ describe 'receiver examples' do
   object.it { expect(foo).to be(bar) }
   object.it { expect(foo).to be(bar) }
 end
+
+# Argless example and named example with same body are NOT duplicates
+# RuboCop distinguishes nil metadata (no args) from [] metadata (has doc string)
+describe 'argless vs named' do
+  it { expect(foo).to be(bar) }
+  it "named" do
+    expect(foo).to be(bar)
+  end
+end

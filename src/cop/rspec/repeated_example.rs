@@ -56,6 +56,25 @@ use std::collections::HashMap;
 /// FP root cause 2: example calls with explicit receivers (e.g., `object.it { ... }`) were
 /// treated as examples. RuboCop requires `nil?` receiver (bare method call).
 /// Fix: skip calls that have a receiver.
+///
+/// **Investigation (2026-03-11):** 354 FPs and 217 FNs remaining.
+///
+/// FP root cause: The fingerprinter did not distinguish between "no arguments" (metadata=nil
+/// in RuboCop) and "has doc string only" (metadata=[] in RuboCop). In Ruby, `nil != []`, so
+/// `it { body }` and `it "desc" { body }` are NOT duplicates. The old code treated both as
+/// having empty metadata, producing the same fingerprint.
+/// Fix: emit different marker bytes for no-args (0xFE) vs has-args (0xFD).
+///
+/// FN root cause: The fingerprinter only skipped the first argument when it was a string type
+/// (StringNode or InterpolatedStringNode). RuboCop's `extract_metadata` pattern `(send _ _ _ $...)`
+/// always skips the first argument regardless of type (it's the doc string). When the first arg
+/// was a symbol, hash, or other non-string type, nitrocop included it in the fingerprint,
+/// making structurally identical examples (differing only in their doc string arg) appear unique.
+/// Fix: always skip the first argument for non-`its` calls, regardless of type.
+///
+/// For `its()` calls, the first argument is an attribute accessor and IS significant. RuboCop
+/// appends `definition.arguments` to the signature separately. Updated to match: skip first arg
+/// in metadata (like all examples), then append the full arguments list in a separate section.
 pub struct RepeatedExample;
 
 impl Cop for RepeatedExample {
@@ -376,23 +395,47 @@ fn example_body_signature(call: &ruby_prism::CallNode<'_>, method_name: &[u8]) -
 
     // Separator between metadata and body sections
     const SECTION_SEP: u8 = 0xFF;
+    // Markers to distinguish "no arguments at all" vs "has arguments"
+    // RuboCop's extract_metadata returns nil when no first arg exists,
+    // vs [] when there's a first arg (doc string) but nothing after it.
+    // nil != [] in Ruby, so `it { body }` and `it "desc" { body }` are not duplicates.
+    const NO_ARGS_MARKER: u8 = 0xFE;
+    const HAS_ARGS_MARKER: u8 = 0xFD;
 
-    // Include metadata args (skip the first string/symbol description if present).
-    // For `its()`, the first string arg is an attribute accessor, not a description,
-    // so we include it in the signature.
+    // Include metadata args.
+    // RuboCop's extract_metadata pattern `(send _ _ _ $...)` always skips the first
+    // argument (treating it as a doc string) regardless of its type. For non-`its` calls,
+    // the first arg is never part of the comparison signature.
+    // For `its()`, the first arg is an attribute accessor, and the full arguments list
+    // is appended to the signature separately.
     let is_its = method_name == b"its";
     if let Some(args) = call.arguments() {
+        fp.buf.push(HAS_ARGS_MARKER);
         let arg_list: Vec<_> = args.arguments().iter().collect();
+        // Always skip first argument — RuboCop's extract_metadata `(send _ _ _ $...)`
+        // treats the first arg as a doc string and excludes it from metadata,
+        // regardless of its type (string, symbol, hash, etc.)
         for (i, arg) in arg_list.iter().enumerate() {
-            // Skip first argument if it's a string (description) — but not for `its()`
-            if i == 0
-                && !is_its
-                && (arg.as_string_node().is_some() || arg.as_interpolated_string_node().is_some())
-            {
+            if i == 0 {
                 continue;
             }
             fp.fingerprint_node(arg);
             fp.buf.push(b',');
+        }
+    } else {
+        fp.buf.push(NO_ARGS_MARKER);
+    }
+
+    // For `its()`, append the full arguments list (matching RuboCop's
+    // `signature << example.definition.arguments`). This includes the first arg
+    // (attribute accessor) which distinguishes `its(:x)` from `its(:y)`.
+    if is_its {
+        if let Some(args) = call.arguments() {
+            fp.buf.push(b'A'); // arguments section marker
+            for arg in args.arguments().iter() {
+                fp.fingerprint_node(&arg);
+                fp.buf.push(b',');
+            }
         }
     }
 

@@ -82,3 +82,16 @@ describe 'nested in if' do
     end
   end
 end
+
+# Examples with symbol first args (non-string) should still be duplicates
+# RuboCop skips the first arg regardless of type when building metadata
+describe 'symbol first args' do
+  it :pending do
+  ^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 75.
+    expect(foo).to be(bar)
+  end
+  it :skipped do
+  ^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 72.
+    expect(foo).to be(bar)
+  end
+end
