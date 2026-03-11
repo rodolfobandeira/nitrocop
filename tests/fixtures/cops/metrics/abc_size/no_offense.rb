@@ -207,3 +207,17 @@ end
 def simple_multi_assign
   a, b = 1, 2
 end
+
+# ||= where the value is a method call WITH A BLOCK should NOT get
+# compound_assignment_extra A+1. In Parser AST, a call+block is wrapped
+# as (or_asgn lvasgn (block (send ...) ...)) — the block node doesn't
+# respond to setter_method?, so compound_assignment skips it.
+# Without fix: A=8, B=13, C=8 => sqrt(64+169+64) = 17.23 > 17 => FP
+# With fix:    A=7, B=13, C=8 => sqrt(49+169+64) = 16.79 => no offense
+def method_with_or_assign_block_value
+  addrs = Socket.ip_address_list.select(&:ipv4?).sort_by(&:ip_address)
+  result   = addrs.detect { |ip| !ip.ipv4_loopback? && !ip.ipv4_private? }
+  result ||= addrs.detect { |ip| !ip.ipv4_loopback? }
+  result ||= addrs.first
+  result&.ip_address
+end

@@ -131,6 +131,25 @@ use crate::parse::source::SourceFile;
 ///
 /// This affects borderline methods (score within ~1.0 of Max) where the slight
 /// undercount of assignments caused nitrocop to miss offenses that RuboCop flags.
+///
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=42, FN=34.
+///
+/// FN=34: CallTargetNode and IndexTargetNode (multi-write targets like
+/// `r.color, r.key = ...` or `params[:x] = ...`) were not counted as branches.
+/// In Parser, these are regular `:send` nodes that count as B+1. Fix: added
+/// match arm for CallTargetNode/IndexTargetNode → B+1. Commit de1d816b.
+///
+/// FP=42: All had scores 17.03-18.25 (barely above Max=17). Root cause:
+/// `compound_assignment_extra` incorrectly added A+1 for `||=`/`&&=`/`+=`
+/// where the value is a method call WITH A BLOCK. In Parser AST, `x ||=
+/// items.detect { |i| ... }` is `(or_asgn lvasgn (block (send ...)))` — the
+/// `:block` wrapper doesn't respond to `setter_method?`, so RuboCop's
+/// `compound_assignment` skips it. In Prism, the `.value()` is the CallNode
+/// directly (block is a child), so our code saw it as a non-setter call and
+/// incorrectly added A+1. Fix: skip CallNodes that have a block in
+/// `compound_assignment_extra`.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
@@ -337,6 +356,15 @@ impl AbcCounter {
         match value {
             Some(v) => {
                 if let Some(call) = v.as_call_node() {
+                    // In Parser AST, a call with a block is wrapped in a :block node
+                    // (e.g., `x ||= items.detect { |i| ... }` → (or_asgn lvasgn (block (send ...) ...))).
+                    // RuboCop's compound_assignment checks direct children of or_asgn for
+                    // setter_method?, but :block nodes don't respond to setter_method?, so
+                    // they are NOT counted. In Prism, the .value() is the CallNode directly
+                    // (block is a child of the call). Skip calls with blocks to match.
+                    if call.block().is_some() {
+                        return 0;
+                    }
                     if !is_setter_method(call.name().as_slice()) {
                         return 1;
                     }
@@ -1333,6 +1361,33 @@ mod tests {
         assert!(
             diags[0].message.contains("[2.45/1]"),
             "x ||= fetch_val should be A=2,B=1,C=1 => 2.45. Got: {}",
+            diags[0].message
+        );
+    }
+
+    /// compound_assignment_extra should NOT fire when the value is a call with a block.
+    /// In Parser, `x ||= items.detect { |i| i.ok? }` is (or_asgn lvasgn (block (send ...))).
+    /// The :block wrapper doesn't respond to setter_method?, so compound_assignment skips it.
+    /// A=2 (x from ||=, |i| param), B=3 (items, detect, ok?), C=2 (or_asgn, detect block iter)
+    /// => sqrt(4+9+4) = 4.12
+    #[test]
+    fn or_write_no_extra_for_block_value() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([("Max".into(), serde_yml::Value::Number(1.into()))]),
+            ..CopConfig::default()
+        };
+        let source = b"def test_method\n  x ||= items.detect { |i| i.ok? }\nend\n";
+        let diags = run_cop_full_with_config(&AbcSize, source, config);
+        assert!(!diags.is_empty(), "Should fire with Max:1");
+        // A=2 (x from ||=, |i| param), B=3 (items, detect, ok?), C=2 (or_asgn, detect block iter)
+        // => sqrt(4+9+4) = sqrt(17) = 4.12
+        // If compound_assignment_extra wrongly fires: A=3 => sqrt(9+9+4) = 4.69
+        assert!(
+            diags[0].message.contains("[4.12/1]"),
+            "x ||= items.detect {{ block }} should be A=2,B=3,C=2 => 4.12 (no extra A). Got: {}",
             diags[0].message
         );
     }
