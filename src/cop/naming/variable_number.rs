@@ -41,6 +41,19 @@ use crate::parse::source::SourceFile;
 /// FN=1 is likely a corpus artifact (CI file discovery, encoding, or stale cache)
 /// given 16,625 matches with 99.99% match rate. Local `check-cop.py --rerun`
 /// needed to confirm.
+///
+/// ## Corpus rerun (2026-03-11)
+///
+/// Local acceptance gate `python3 scripts/check-cop.py Naming/VariableNumber
+/// --verbose --rerun` matched RuboCop exactly (0 FP, 0 FN), confirming the
+/// oracle's single FN row was stale artifact noise.
+///
+/// Investigation notes:
+/// - The reported `hexapdf` FN points at a hash literal line with no numbered
+///   identifiers, so there is no live cop repro to fix.
+/// - The batch gate still prints a large raw delta because
+///   `--corpus-check` includes 1,285 file-drop offenses from a `jruby` parser
+///   crash repo; the RuboCop-aligned comparison is exact.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[

@@ -84,6 +84,21 @@ use crate::parse::source::SourceFile;
 /// comparison_method (including <=> exclusion), predicate_method, negation,
 /// conditionals, and/or chains, parenthesized expressions, begin/kwbegin,
 /// rescue, assignments, variables, blocks, lambdas, super, etc.
+///
+/// ## Corpus rerun (2026-03-11)
+///
+/// Local acceptance gate `python3 scripts/check-cop.py Naming/PredicateMethod
+/// --verbose --rerun` matched RuboCop exactly (0 FP, 0 FN). The CI corpus row
+/// of FP=6/FN=5 is stale.
+///
+/// Investigation notes:
+/// - The reported FN rows in `autolab/lib/archive.rb` and
+///   `discourse/app/models/topic.rb` do not reproduce locally.
+/// - At least one historical FP row was config noise: `redmine` disables
+///   `Naming/PredicateMethod` in `.rubocop.yml`.
+/// - The batch gate still prints `1 FP remain from CI baseline` because
+///   `--corpus-check` shows raw offense deltas alongside file-drop noise from a
+///   `jruby` parser-crash repo; the RuboCop-aligned comparison is exact.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
