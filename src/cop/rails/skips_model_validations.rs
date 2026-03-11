@@ -6,11 +6,40 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/SkipsModelValidations — flags methods that skip ActiveRecord validations.
+///
+/// ## Investigation (2026-03-10)
+///
+/// Root causes of FP/FN vs RuboCop:
+///
+/// 1. **FN: receiver-required check (major, ~1600 FN)** — Our code returned early when
+///    `call.receiver().is_none()`, but RuboCop flags bare calls (implicit self) like
+///    `insert(attrs, returning: false)`. Removed the receiver check entirely.
+///
+/// 2. **FN: diagnostic location on wrong line** — Used `node.location()` (entire call
+///    expression starting at receiver) instead of `call.message_loc()` (method name only).
+///    For multi-line calls like `User\n  .touch`, this reported line 1 instead of line 2,
+///    creating phantom FP on line 1 and FN on line 2.
+///
+/// 3. **FP: `good_insert?` logic inversion** — Our code flagged insert calls if ANY hash
+///    key was `:returning`/`:unique_by`. RuboCop's pattern skips (doesn't flag) if ANY key
+///    is NOT those AR-specific keys. Fixed to match: only flag if ALL keys are AR-specific.
+///
+/// 4. **FN: missing `touch_all`** — Not in SKIP_METHODS fallback list. Added it.
+///
+/// 5. **FP: `FileUtils` constant path check too loose** — Exempted `Foo::FileUtils.touch`
+///    but RuboCop only exempts `FileUtils.touch` and `::FileUtils.touch`. Fixed to check
+///    that ConstantPathNode has nil parent (cbase).
+///
+/// 6. **FN: `good_touch?` should only match `send`, not `csend`** — RuboCop's pattern uses
+///    `(send ...)` not `(call ...)`, so `obj&.touch(true)` is NOT exempted. Added check for
+///    safe navigation operator.
 pub struct SkipsModelValidations;
 
 const SKIP_METHODS: &[&[u8]] = &[
     b"update_attribute",
     b"touch",
+    b"touch_all",
     b"update_column",
     b"update_columns",
     b"update_all",
@@ -88,12 +117,8 @@ impl Cop for SkipsModelValidations {
             }
         }
 
-        if call.receiver().is_none() {
-            return;
-        }
-
         // RuboCop: METHODS_WITH_ARGUMENTS — skip if the method is in this list
-        // and has no arguments (e.g. `model.touch` with no args).
+        // and has no arguments (e.g. `User.toggle!` with no args).
         let methods_with_args: &[&[u8]] = &[
             b"decrement!",
             b"decrement_counter",
@@ -116,41 +141,26 @@ impl Cop for SkipsModelValidations {
             return;
         }
 
-        // RuboCop: good_insert? — for insert/insert!, skip when the second argument
-        // is not a hash with :returning or :unique_by keys. This distinguishes
-        // String#insert(idx, str) from ActiveRecord insert(attributes_hash).
+        // RuboCop: good_insert? — for insert/insert!, skip when the call looks like
+        // String#insert or Array#insert rather than ActiveRecord insert.
+        // Pattern: (call _ {:insert :insert!} _ { !(hash ...) | (hash <(pair (sym !{:returning :unique_by}) _) ...>) } ...)
+        // This means: skip if 2+ args AND second arg is not a hash, OR is a hash where
+        // at least one key is NOT :returning/:unique_by (i.e., not purely AR-specific keys).
+        // Uses `call` (matches both send and csend).
         if method_name == b"insert" || method_name == b"insert!" {
             if let Some(args) = call.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
-                // good_insert? pattern: (call _ {:insert :insert!} _ { !(hash ...) | (hash without :returning/:unique_by) } ...)
-                // If there are at least 2 args, check the second arg
                 if arg_list.len() >= 2 {
                     let second = &arg_list[1];
-                    let is_ar_insert = if let Some(hash) = second.as_hash_node() {
-                        // It's a hash — only flag if it contains :returning or :unique_by
-                        hash.elements().iter().any(|elem| {
-                            if let Some(assoc) = elem.as_assoc_node() {
-                                if let Some(sym) = assoc.key().as_symbol_node() {
-                                    let name: &[u8] = sym.unescaped();
-                                    return name == b"returning" || name == b"unique_by";
-                                }
-                            }
-                            false
-                        })
+                    let is_good = if let Some(hash) = second.as_hash_node() {
+                        // It's a hash — "good" (not AR) if at least one key is NOT :returning/:unique_by
+                        hash_has_non_ar_key(hash.elements().iter())
                     } else if let Some(kw_hash) = second.as_keyword_hash_node() {
-                        kw_hash.elements().iter().any(|elem| {
-                            if let Some(assoc) = elem.as_assoc_node() {
-                                if let Some(sym) = assoc.key().as_symbol_node() {
-                                    let name: &[u8] = sym.unescaped();
-                                    return name == b"returning" || name == b"unique_by";
-                                }
-                            }
-                            false
-                        })
+                        kw_hash_has_non_ar_key(kw_hash.elements().iter())
                     } else {
-                        false // Not a hash — not an AR insert
+                        true // Not a hash at all — not an AR insert (e.g., String#insert)
                     };
-                    if !is_ar_insert {
+                    if is_good {
                         return;
                     }
                 }
@@ -158,21 +168,30 @@ impl Cop for SkipsModelValidations {
         }
 
         // RuboCop: good_touch? — FileUtils.touch or _.touch(boolean)
-        if method_name == b"touch" {
+        // Uses `send` (NOT `call`), so safe navigation `&.touch(true)` is NOT exempted.
+        let is_safe_nav = call
+            .call_operator_loc()
+            .is_some_and(|op| op.as_slice() == b"&.");
+        if method_name == b"touch" && !is_safe_nav {
             if let Some(recv) = call.receiver() {
+                // (send (const {nil? cbase} :FileUtils) :touch ...) — only bare or top-level
                 if let Some(cr) = recv.as_constant_read_node() {
                     if cr.name().as_slice() == b"FileUtils" {
                         return;
                     }
                 }
                 if let Some(cp) = recv.as_constant_path_node() {
-                    if let Some(name) = cp.name() {
-                        if name.as_slice() == b"FileUtils" {
-                            return;
+                    // Only match ::FileUtils (cbase — parent is nil), not Foo::FileUtils
+                    if cp.parent().is_none() {
+                        if let Some(name) = cp.name() {
+                            if name.as_slice() == b"FileUtils" {
+                                return;
+                            }
                         }
                     }
                 }
             }
+            // (send _ :touch boolean) — touch with a single boolean argument
             if let Some(args) = call.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
                 if arg_list.len() == 1 {
@@ -184,14 +203,48 @@ impl Cop for SkipsModelValidations {
             }
         }
 
-        let loc = node.location();
+        // Report at method name location (node.loc.selector in RuboCop)
+        let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        let msg = format!(
-            "Avoid `{}` because it skips validations.",
-            std::str::from_utf8(method_name).unwrap_or("?")
-        );
+        let msg = format!("Avoid using `{}` because it skips validations.", method_str);
         diagnostics.push(self.diagnostic(source, line, column, msg));
     }
+}
+
+/// Check if a hash has at least one key that is NOT :returning or :unique_by.
+fn hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a>>) -> bool {
+    for elem in elements {
+        if let Some(assoc) = elem.as_assoc_node() {
+            if let Some(sym) = assoc.key().as_symbol_node() {
+                let name: &[u8] = sym.unescaped();
+                if name != b"returning" && name != b"unique_by" {
+                    return true;
+                }
+            } else {
+                // Non-symbol key — not an AR-specific key
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a keyword hash has at least one key that is NOT :returning or :unique_by.
+fn kw_hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a>>) -> bool {
+    for elem in elements {
+        if let Some(assoc) = elem.as_assoc_node() {
+            if let Some(sym) = assoc.key().as_symbol_node() {
+                let name: &[u8] = sym.unescaped();
+                if name != b"returning" && name != b"unique_by" {
+                    return true;
+                }
+            } else {
+                // Non-symbol key — not an AR-specific key
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
