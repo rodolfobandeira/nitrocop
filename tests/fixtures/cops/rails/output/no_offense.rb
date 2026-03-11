@@ -17,3 +17,12 @@ puts(&block)
 
 # Hash argument
 print(flush: true)
+
+# Chained method calls (p is a local variable, not Kernel#p)
+p.do_something
+p&.do_something
+
+# Methods with receivers (not Kernel calls)
+obj.print
+something.p
+nothing.pp
