@@ -3,6 +3,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-11)
+///
+/// Corpus oracle reported FP=0, FN=1.
+///
+/// FN=1: Phlex wraps endless method definitions in command calls like
+/// `register_element def animate(...) = nil`. Nitrocop used the `def` column as
+/// the indentation width proxy for the line-length guard, which incorrectly
+/// counted the `register_element ` prefix and suppressed valid offenses.
+/// RuboCop only counts the line's leading indentation for this check.
 pub struct MultilineMethodSignature;
 
 impl Cop for MultilineMethodSignature {
@@ -68,7 +77,7 @@ impl Cop for MultilineMethodSignature {
             let def_start = def_loc.start_offset();
             let rparen_end = rparen.end_offset();
             let definition_width = rparen_end - def_start;
-            let (_, indentation_width) = source.offset_to_line_col(def_start);
+            let indentation_width = line_indentation_width(source, def_line);
             if indentation_width + definition_width > max_line_length {
                 return;
             }
@@ -82,6 +91,22 @@ impl Cop for MultilineMethodSignature {
             "Avoid multi-line method signatures.".to_string(),
         ));
     }
+}
+
+fn line_indentation_width(source: &SourceFile, line: usize) -> usize {
+    let line_start = source.line_col_to_offset(line, 0).unwrap_or(0);
+    let line_end = source
+        .lines()
+        .nth(line.saturating_sub(1))
+        .map(|bytes| line_start + bytes.len())
+        .unwrap_or(line_start);
+    source
+        .as_bytes()
+        .get(line_start..line_end)
+        .unwrap_or(&[])
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
 }
 
 #[cfg(test)]
