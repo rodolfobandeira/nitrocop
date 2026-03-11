@@ -72,3 +72,21 @@ badOp += 1
 
 for badItem in items; end
     ^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+
+begin
+  something
+rescue => badError
+          ^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+end
+
+begin
+  something
+rescue StandardError => @badIvarError
+                        ^^^^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+end
+
+begin
+  something
+rescue => @@badCvarErr
+          ^^^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+end

@@ -9,7 +9,7 @@ use crate::cop::node_type::{
     LOCAL_VARIABLE_WRITE_NODE, MULTI_WRITE_NODE,
 };
 use crate::cop::util::is_snake_case;
-use crate::cop::{Cop, CopConfig};
+use crate::cop::{CodeMap, Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -65,6 +65,19 @@ use crate::parse::source::SourceFile;
 /// snake_case regex uses `[[:lower:]]` which only matches Unicode
 /// lowercase letters. Fixed by updating `is_snake_case` to validate
 /// non-ASCII characters via `char::is_lowercase()`.
+///
+/// ## Corpus investigation (2026-03-11, round 4)
+///
+/// FN=3: `rescue => badVar` produces `LocalVariableTargetNode` in Prism,
+/// which we excluded from `interested_node_types` (round 3) because
+/// pattern matching and regex captures also produce TargetNodes. However,
+/// in the Parser gem, `rescue => e` produces an `lvasgn` node, so
+/// RuboCop's `on_lvasgn`/`on_ivasgn`/`on_cvasgn` handlers check it.
+/// Additionally, Prism's `Visit` trait calls `visit_rescue_node()` directly
+/// without going through `visit_branch_node_enter()`, so `check_node`
+/// never sees RescueNode. Fixed by adding a `check_source` implementation
+/// with a custom `RescueRefVisitor` that overrides `visit_rescue_node`
+/// to check rescue reference variables.
 pub struct VariableName;
 
 impl Cop for VariableName {
@@ -227,6 +240,50 @@ impl Cop for VariableName {
         } else {
             self.check_variable_name(source, var_name_str, line, column, config, diagnostics);
         }
+    }
+
+    fn check_source(
+        &self,
+        source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        // Handle rescue => var references. In Prism, RescueNode is visited via
+        // visit_rescue_node() which doesn't trigger visit_branch_node_enter(),
+        // so check_node never sees it. We use a custom visitor to find rescue
+        // references specifically.
+        use ruby_prism::Visit;
+        let mut visitor = RescueRefVisitor {
+            cop: self,
+            source,
+            config,
+            diagnostics,
+        };
+        visitor.visit(&parse_result.node());
+    }
+}
+
+/// Visitor that finds rescue node references (rescue => var) and checks their names.
+/// This is needed because Prism's Visit trait calls visit_rescue_node() directly,
+/// bypassing visit_branch_node_enter(), so check_node never sees RescueNode.
+struct RescueRefVisitor<'a> {
+    cop: &'a VariableName,
+    source: &'a SourceFile,
+    config: &'a CopConfig,
+    diagnostics: &'a mut Vec<Diagnostic>,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for RescueRefVisitor<'_> {
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        if let Some(ref_node) = node.reference() {
+            self.cop
+                .check_target_node(self.source, &ref_node, self.config, self.diagnostics);
+        }
+        // Continue walking into children (exceptions, statements, subsequent)
+        ruby_prism::visit_rescue_node(self, node);
     }
 }
 
@@ -657,6 +714,18 @@ mod tests {
             "Forbidden variable name should be flagged"
         );
         assert!(diags[0].message.contains("forbidden"));
+    }
+
+    #[test]
+    fn rescue_variable_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"begin\n  something\nrescue => badError\n  nil\nend\n";
+        let diags = run_cop_full(&VariableName, source);
+        assert!(
+            !diags.is_empty(),
+            "rescue => badError should be flagged: got {:?}",
+            diags
+        );
     }
 
     #[test]

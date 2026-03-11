@@ -45,3 +45,16 @@ end
 # Unicode lowercase letters are valid snake_case (matches Ruby [[:lower:]])
 héllo = 1
 µ_value = 2
+
+# rescue => var with snake_case should not be flagged
+begin
+  something
+rescue => good_error
+  nil
+end
+
+begin
+  something
+rescue StandardError => @good_ivar
+  nil
+end
