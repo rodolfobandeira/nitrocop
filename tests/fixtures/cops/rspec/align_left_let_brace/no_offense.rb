@@ -21,3 +21,21 @@ RSpec.describe 'scoped lets' do
     let(:email_channel)           { third }
   end
 end
+
+# let-like text inside heredocs should NOT be detected as let calls
+RSpec.describe 'heredoc' do
+  let(:template) { <<~RUBY }
+    let(:foo) { bar }
+    let(:blahblah) { baz }
+  RUBY
+end
+
+# let-like text inside strings should NOT be detected
+RSpec.describe 'string' do
+  let(:code) { "let(:foo) { bar }\nlet(:blahblah) { baz }" }
+end
+
+# let with proc argument (no block) should NOT be detected
+RSpec.describe 'proc' do
+  let(:user, &args[:build_user])
+end
