@@ -617,6 +617,14 @@ impl AbcCounter {
                 }
             }
 
+            // CallTargetNode and IndexTargetNode: multi-write assignment targets like
+            // `r.color, r.key = ...` or `params[:controller], params[:action] = ...`.
+            // In Parser gem these are regular :send nodes (counted as branches).
+            // In Prism they are separate node types that are NOT CallNode.
+            ruby_prism::Node::CallTargetNode { .. } | ruby_prism::Node::IndexTargetNode { .. } => {
+                self.branches += 1;
+            }
+
             // yield counts as a branch
             ruby_prism::Node::YieldNode { .. } => {
                 self.branches += 1;

@@ -201,3 +201,9 @@ def method_with_or_assign_literals
   f ||= 6
   g ||= 7
 end
+
+# Simple multi-assign with no CallTargetNode — should not push over threshold.
+# A=2, B=0, C=0 => 2.0
+def simple_multi_assign
+  a, b = 1, 2
+end

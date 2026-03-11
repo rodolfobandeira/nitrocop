@@ -169,3 +169,24 @@ def method_with_or_assign_calls
   f ||= fetch_val
   g ||= fetch_val
 end
+
+# Multi-write with CallTargetNode: `r.color, r.key = ...` are CallTargetNodes in Prism
+# but regular :send nodes in Parser (counted as branches).
+# A=14 (r, r_key/r_value/r_color, b, left=, @left, @right, right=, 3 call targets, @key/@value)
+# B=13 (Object.new, r.key/r.value/r.color RHS, r.left, left=, r.right, right=, 3 CallTargetNode LHS, r.update_size, update_size)
+# C=0
+# score = sqrt(196+169) = 19.10
+def multi_write_call_targets
+^^^ Metrics/AbcSize: Assignment Branch Condition size for multi_write_call_targets is too high. [19.10/17]
+  r = Object.new
+  r_key, r_value, r_color = r.key, r.value, r.color
+  b = r.left
+  r.left = @left
+  @left = r
+  @right = r.right
+  r.right = b
+  r.color, r.key, r.value = :red, @key, @value
+  @key, @value = r_key, r_value
+  r.update_size
+  update_size
+end
