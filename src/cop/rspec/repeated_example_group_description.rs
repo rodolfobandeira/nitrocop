@@ -1,13 +1,26 @@
-use crate::cop::node_type::{
-    BLOCK_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, PROGRAM_NODE, STATEMENTS_NODE,
-};
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
+use crate::cop::node_type::{PROGRAM_NODE, STATEMENTS_NODE};
+use crate::cop::util::is_rspec_example_group;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use std::collections::HashMap;
 
 /// RSpec/RepeatedExampleGroupDescription: Flag example groups with identical descriptions.
+///
+/// ## Investigation findings (2026-03-11)
+///
+/// Root cause of 119 FNs: the cop only handled `ProgramNode` (top-level) and `CallNode`
+/// (example group blocks) as parent contexts. RuboCop's `on_begin` fires on ANY `begin`
+/// node (equivalent to Prism's `StatementsNode`), which also includes module/class bodies,
+/// method bodies, and any other compound statement context.
+///
+/// Fix: switched to handling `StatementsNode` directly, which covers all contexts where
+/// sibling example groups can appear (top-level program, module/class bodies, block bodies).
+///
+/// Also added:
+/// - `skip_or_pending` filtering: groups containing bare `skip` or `pending` calls are
+///   excluded from duplicate checking (matches RuboCop's SkipOrPending mixin).
+/// - Empty description filtering: groups with no arguments are excluded.
 pub struct RepeatedExampleGroupDescription;
 
 impl Cop for RepeatedExampleGroupDescription {
@@ -20,18 +33,11 @@ impl Cop for RepeatedExampleGroupDescription {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        RSPEC_DEFAULT_INCLUDE
+        crate::cop::util::RSPEC_DEFAULT_INCLUDE
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            BLOCK_NODE,
-            CALL_NODE,
-            CONSTANT_PATH_NODE,
-            CONSTANT_READ_NODE,
-            PROGRAM_NODE,
-            STATEMENTS_NODE,
-        ]
+        &[PROGRAM_NODE, STATEMENTS_NODE]
     }
 
     fn check_node(
@@ -43,44 +49,39 @@ impl Cop for RepeatedExampleGroupDescription {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Check top-level siblings or siblings inside an example group
+        // Handle ProgramNode (top-level) and StatementsNode (module/class/block bodies).
+        // ProgramNode is needed because Prism may not visit the top-level StatementsNode
+        // as a separate node in the walk.
         let stmts: Vec<ruby_prism::Node<'_>> = if let Some(program) = node.as_program_node() {
             program.statements().body().iter().collect()
-        } else if let Some(call) = node.as_call_node() {
-            let name = call.name().as_slice();
-            if !is_parent_group(name) {
-                return;
-            }
-            let block = match call.block() {
-                Some(b) => b,
-                None => return,
-            };
-            let block_node = match block.as_block_node() {
-                Some(b) => b,
-                None => return,
-            };
-            let body = match block_node.body() {
-                Some(b) => b,
-                None => return,
-            };
-            let inner_stmts = match body.as_statements_node() {
-                Some(s) => s,
-                None => return,
-            };
-            inner_stmts.body().iter().collect()
+        } else if let Some(stmts_node) = node.as_statements_node() {
+            stmts_node.body().iter().collect()
         } else {
             return;
         };
 
+        // RuboCop's several_example_groups? requires at least 2 example groups
+        let example_group_count = stmts.iter().filter(|s| is_example_group_call(s)).count();
+        if example_group_count < 2 {
+            return;
+        }
+
         #[allow(clippy::type_complexity)] // internal collection used only in this function
         let mut desc_map: HashMap<Vec<u8>, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
 
-        for stmt in stmts {
-            let call = match stmt.as_call_node() {
+        for stmt in &stmts {
+            let call = match extract_example_group_call(stmt) {
                 Some(c) => c,
                 None => continue,
             };
-            if !is_rspec_group_for_desc(&call) {
+
+            // Skip groups with skip/pending inside the block
+            if has_skip_or_pending_in_block(stmt) {
+                continue;
+            }
+
+            // Skip groups with no description (empty_description?)
+            if call.arguments().is_none() {
                 continue;
             }
 
@@ -89,7 +90,7 @@ impl Cop for RepeatedExampleGroupDescription {
             // Extract the description signature (all args)
             let desc_sig = match description_signature(source, &call) {
                 Some(s) => s,
-                None => continue, // No description
+                None => continue,
             };
 
             let loc = call.location();
@@ -126,6 +127,61 @@ impl Cop for RepeatedExampleGroupDescription {
     }
 }
 
+/// Check if a node is an example group call (with or without receiver).
+fn is_example_group_call(node: &ruby_prism::Node<'_>) -> bool {
+    extract_example_group_call(node).is_some()
+}
+
+/// Extract the CallNode from a node if it's an example group call.
+/// The node might be a bare CallNode or a CallNode with a block.
+fn extract_example_group_call<'a>(
+    node: &'a ruby_prism::Node<'a>,
+) -> Option<ruby_prism::CallNode<'a>> {
+    let call = node.as_call_node()?;
+    if is_rspec_group_for_desc(&call) {
+        // Must have a block to be an example group
+        if call.block().is_some() {
+            return Some(call);
+        }
+    }
+    None
+}
+
+/// Check if a block-level example group contains `skip` or `pending` calls.
+/// Matches RuboCop's `skip_or_pending_inside_block?` pattern:
+///   (block <(send nil? {:skip :pending} ...) ...>)
+fn has_skip_or_pending_in_block(node: &ruby_prism::Node<'_>) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+    let block = match call.block() {
+        Some(b) => b,
+        None => return false,
+    };
+    let block_node = match block.as_block_node() {
+        Some(b) => b,
+        None => return false,
+    };
+    let body = match block_node.body() {
+        Some(b) => b,
+        None => return false,
+    };
+    let stmts = match body.as_statements_node() {
+        Some(s) => s,
+        None => return false,
+    };
+    for stmt in stmts.body().iter() {
+        if let Some(inner_call) = stmt.as_call_node() {
+            let name = inner_call.name().as_slice();
+            if (name == b"skip" || name == b"pending") && inner_call.receiver().is_none() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn description_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
     let args = call.arguments()?;
     let arg_list: Vec<_> = args.arguments().iter().collect();
@@ -159,25 +215,6 @@ fn is_rspec_group_for_desc(call: &ruby_prism::CallNode<'_>) -> bool {
             }
         }
     }
-}
-
-fn is_parent_group(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"describe"
-            | b"context"
-            | b"feature"
-            | b"example_group"
-            | b"xdescribe"
-            | b"xcontext"
-            | b"xfeature"
-            | b"fdescribe"
-            | b"fcontext"
-            | b"ffeature"
-            | b"shared_examples"
-            | b"shared_examples_for"
-            | b"shared_context"
-    )
 }
 
 #[cfg(test)]
