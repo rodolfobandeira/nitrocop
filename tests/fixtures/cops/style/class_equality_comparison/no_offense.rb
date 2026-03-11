@@ -21,3 +21,8 @@ end
 def eql?(other)
   self.class.eql?(other.class) && name.eql?(other.name)
 end
+
+# Dynamic string interpolation on RHS should not trigger offense
+var.class.name == "String#{interpolation}"
+var.class.to_s == "#{some_class}"
+var.class.name == "#{mod}::#{cls}"

@@ -3,6 +3,14 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// FP investigation (2026-03-10):
+/// - Root cause 1: Missing dstr_type check. RuboCop has `return if class_node.dstr_type?`
+///   to skip when the RHS of the comparison is an interpolated string (e.g.,
+///   `x.class.name == "#{some_class}"`). In Prism this corresponds to
+///   `InterpolatedStringNode`. Fixed by checking `arguments[0].as_interpolated_string_node()`.
+/// - Root cause 2: AllowedPatterns was checked against the source line text instead of
+///   the enclosing def method name. RuboCop checks `matches_allowed_pattern?(def_node.method_name)`.
+///   Fixed by matching AllowedPatterns against `enclosing_def_name` like AllowedMethods.
 pub struct ClassEqualityComparison;
 
 impl Cop for ClassEqualityComparison {
@@ -93,21 +101,32 @@ impl<'a, 'pr> Visit<'pr> for ClassEqVisitor<'a> {
                     };
 
                     if is_class_call || is_class_name_call {
-                        // Check AllowedPatterns against the source line
+                        // Check AllowedPatterns against the enclosing def name (like RuboCop)
+                        if !self.allowed_patterns.is_empty() {
+                            if let Some(ref def_name) = self.enclosing_def_name {
+                                let def_str = std::str::from_utf8(def_name).unwrap_or("");
+                                if self.allowed_patterns.iter().any(|p| p.is_match(def_str)) {
+                                    ruby_prism::visit_call_node(self, node);
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Get the RHS argument (the class_node in RuboCop terms)
+                        if let Some(args) = node.arguments() {
+                            if let Some(rhs) = args.arguments().iter().next() {
+                                // Skip if the RHS is an interpolated string (dstr_type)
+                                if rhs.as_interpolated_string_node().is_some() {
+                                    ruby_prism::visit_call_node(self, node);
+                                    return;
+                                }
+                            }
+                        }
+
                         let loc = recv_call
                             .message_loc()
                             .unwrap_or_else(|| recv_call.location());
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                        if !self.allowed_patterns.is_empty() {
-                            if let Some(line_bytes) = self.source.lines().nth(line - 1) {
-                                if let Ok(line_str) = std::str::from_utf8(line_bytes) {
-                                    if self.allowed_patterns.iter().any(|p| p.is_match(line_str)) {
-                                        ruby_prism::visit_call_node(self, node);
-                                        return;
-                                    }
-                                }
-                            }
-                        }
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
                             line,
