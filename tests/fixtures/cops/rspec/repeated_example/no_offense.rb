@@ -98,3 +98,16 @@ describe 'doing x' do
   its(:x) { is_expected.to be_present }
   its(:x) { is_expected.to be_blank }
 end
+
+# Block-less example calls with same metadata are NOT duplicates
+# RuboCop requires a block to consider something an example
+describe 'pending examples' do
+  it "is pending"
+  it "is also pending"
+end
+
+# Examples with a receiver are NOT detected (RuboCop requires nil receiver)
+describe 'receiver examples' do
+  object.it { expect(foo).to be(bar) }
+  object.it { expect(foo).to be(bar) }
+end

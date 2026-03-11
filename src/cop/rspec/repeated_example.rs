@@ -1,5 +1,7 @@
 use crate::cop::node_type::{BLOCK_NODE, CALL_NODE};
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example};
+use crate::cop::util::{
+    RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group, is_rspec_shared_group,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -35,6 +37,25 @@ use std::collections::HashMap;
 /// 1. Metadata args (everything after the first string description arg) — AST fingerprint
 /// 2. Block body (the implementation) — AST fingerprint
 /// 3. For `its()` calls, the first arg (attribute accessor) is also included
+///
+/// **Investigation (2026-03-10):** 302 FPs and 705 FNs remaining.
+///
+/// FN root cause: nitrocop only checked direct children of the example group's StatementsNode
+/// for examples. RuboCop's `ExampleGroup#examples` uses `find_all_in_scope` which recursively
+/// searches the AST for examples, stopping only at scope changes (nested example groups,
+/// shared groups, includes) or at other examples. Examples nested inside control flow
+/// (if/unless/case), arbitrary method call blocks, or other non-scope-changing constructs
+/// were missed entirely.
+/// Fix: implemented recursive example collection matching RuboCop's `find_all_in_scope` logic.
+///
+/// FP root cause 1: block-less example calls (e.g., `it "is pending"` without a block) were
+/// treated as examples. RuboCop's `example?` matcher requires a block: `(block (send nil? ...))`.
+/// Two block-less calls with similar metadata would produce false duplicate reports.
+/// Fix: only consider calls that have a block node as examples.
+///
+/// FP root cause 2: example calls with explicit receivers (e.g., `object.it { ... }`) were
+/// treated as examples. RuboCop requires `nil?` receiver (bare method call).
+/// Fix: skip calls that have a receiver.
 pub struct RepeatedExample;
 
 impl Cop for RepeatedExample {
@@ -73,6 +94,14 @@ impl Cop for RepeatedExample {
             return;
         }
 
+        // RuboCop checks `#rspec?` which means nil receiver or explicit `RSpec` receiver
+        if call.receiver().is_some() {
+            // Allow `RSpec.describe` but skip other receivers
+            if !is_rspec_receiver(&call) {
+                return;
+            }
+        }
+
         let block = match call.block() {
             Some(b) => b,
             None => return,
@@ -81,29 +110,15 @@ impl Cop for RepeatedExample {
             Some(b) => b,
             None => return,
         };
-        let body = match block_node.body() {
-            Some(b) => b,
-            None => return,
-        };
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
-        };
 
-        // Collect examples: body_signature -> list of (line, col)
+        // Collect examples recursively (matching RuboCop's find_all_in_scope)
+        let mut examples: Vec<(Vec<u8>, usize, usize)> = Vec::new();
+        collect_examples_in_scope(&block_node, source, &mut examples);
+
+        // Group by signature
         let mut body_map: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
-
-        for stmt in stmts.body().iter() {
-            if let Some(c) = stmt.as_call_node() {
-                let m = c.name().as_slice();
-                if is_rspec_example(m) || m == b"its" {
-                    if let Some(sig) = example_body_signature(&c, m) {
-                        let loc = c.location();
-                        let (line, col) = source.offset_to_line_col(loc.start_offset());
-                        body_map.entry(sig).or_default().push((line, col));
-                    }
-                }
-            }
+        for (sig, line, col) in examples {
+            body_map.entry(sig).or_default().push((line, col));
         }
 
         for locs in body_map.values() {
@@ -124,6 +139,224 @@ impl Cop for RepeatedExample {
             }
         }
     }
+}
+
+/// Check if a CallNode has an explicit `RSpec` receiver (e.g., `RSpec.describe`).
+fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
+    if let Some(receiver) = call.receiver() {
+        if let Some(c) = receiver.as_constant_read_node() {
+            return c.name().as_slice() == b"RSpec";
+        }
+    }
+    false
+}
+
+/// Check if a node is a scope change (nested example group, shared group, or include).
+/// Matches RuboCop's `ExampleGroup#scope_change?` pattern.
+/// In Prism, blocks are children of CallNodes, so we check CallNodes that have a block.
+fn is_scope_change(node: &ruby_prism::Node<'_>) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // Must have a block (scope changes are block-based in RuboCop)
+    if call.block().is_none() {
+        return false;
+    }
+
+    let name = call.name().as_slice();
+
+    // Example groups and shared groups (with nil or RSpec receiver)
+    if (is_example_group(name) || is_rspec_example_group(name) || is_rspec_shared_group(name))
+        && (call.receiver().is_none() || is_rspec_receiver(&call))
+    {
+        return true;
+    }
+
+    // Includes: include_examples, it_behaves_like, it_should_behave_like, include_context
+    if is_rspec_include(name) && call.receiver().is_none() {
+        return true;
+    }
+
+    false
+}
+
+/// Check if a method name is an RSpec include method.
+fn is_rspec_include(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"include_examples" | b"it_behaves_like" | b"it_should_behave_like" | b"include_context"
+    )
+}
+
+/// Check if a node is an RSpec example (a call with a block, example method name, nil receiver).
+/// Returns the CallNode if it matches.
+/// In Prism, `it "x" do ... end` is a CallNode with a block child.
+fn is_example_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::CallNode<'a>> {
+    let call = node.as_call_node()?;
+
+    // Must have a block (RuboCop requires: `(block (send nil? ...) ...)`)
+    call.block()?;
+
+    // Must have nil receiver (bare method call)
+    if call.receiver().is_some() {
+        return None;
+    }
+
+    let name = call.name().as_slice();
+    if is_rspec_example(name) || name == b"its" {
+        Some(call)
+    } else {
+        None
+    }
+}
+
+/// Recursively collect examples within a block node's scope.
+/// Matches RuboCop's `ExampleGroup#find_all_in_scope` which recursively searches
+/// for examples, stopping at scope changes (nested example groups, shared groups, includes)
+/// and at other examples (doesn't recurse into them).
+fn collect_examples_in_scope(
+    block_node: &ruby_prism::BlockNode<'_>,
+    source: &SourceFile,
+    examples: &mut Vec<(Vec<u8>, usize, usize)>,
+) {
+    let body = match block_node.body() {
+        Some(b) => b,
+        None => return,
+    };
+
+    // RuboCop's find_all_in_scope starts by iterating child nodes of the block
+    collect_examples_from_children(&body, source, examples);
+}
+
+/// Recursively find examples in child nodes, stopping at scope changes and examples.
+fn collect_examples_from_children(
+    node: &ruby_prism::Node<'_>,
+    source: &SourceFile,
+    examples: &mut Vec<(Vec<u8>, usize, usize)>,
+) {
+    // Iterate over direct children using the node's child nodes
+    for child in iter_child_nodes(node) {
+        collect_examples_from_node(&child, source, examples);
+    }
+}
+
+/// Process a single node: if it's an example, collect it; if it's a scope change, stop;
+/// otherwise recurse into its children.
+fn collect_examples_from_node(
+    node: &ruby_prism::Node<'_>,
+    source: &SourceFile,
+    examples: &mut Vec<(Vec<u8>, usize, usize)>,
+) {
+    // Is this an example? (call with block, example method, nil receiver)
+    if let Some(call) = is_example_node(node) {
+        let m = call.name().as_slice();
+        if let Some(sig) = example_body_signature(&call, m) {
+            // Report at the CallNode location (covers `it "..." do ... end`)
+            let loc = call.location();
+            let (line, col) = source.offset_to_line_col(loc.start_offset());
+            examples.push((sig, line, col));
+        }
+        return; // Don't recurse into examples
+    }
+
+    // Is this a scope change? (nested example group, shared group, include)
+    if is_scope_change(node) {
+        return; // Don't recurse into scope changes
+    }
+
+    // Otherwise, recurse into children
+    collect_examples_from_children(node, source, examples);
+}
+
+/// Iterate over the child nodes of a node.
+/// This is a helper since ruby_prism doesn't expose a generic children iterator.
+fn iter_child_nodes<'a>(node: &ruby_prism::Node<'a>) -> Vec<ruby_prism::Node<'a>> {
+    // Use statements node's body if available, otherwise use a visitor approach
+    if let Some(stmts) = node.as_statements_node() {
+        return stmts.body().iter().collect();
+    }
+    if let Some(block) = node.as_block_node() {
+        let mut children = Vec::new();
+        if let Some(body) = block.body() {
+            children.push(body);
+        }
+        return children;
+    }
+    if let Some(if_node) = node.as_if_node() {
+        let mut children = Vec::new();
+        if let Some(stmts) = if_node.statements() {
+            children.push(stmts.as_node());
+        }
+        if let Some(subsequent) = if_node.subsequent() {
+            children.push(subsequent);
+        }
+        return children;
+    }
+    if let Some(unless_node) = node.as_unless_node() {
+        let mut children = Vec::new();
+        if let Some(stmts) = unless_node.statements() {
+            children.push(stmts.as_node());
+        }
+        if let Some(else_clause) = unless_node.else_clause() {
+            children.push(else_clause.as_node());
+        }
+        return children;
+    }
+    if let Some(else_node) = node.as_else_node() {
+        let mut children = Vec::new();
+        if let Some(stmts) = else_node.statements() {
+            children.push(stmts.as_node());
+        }
+        return children;
+    }
+    if let Some(case_node) = node.as_case_node() {
+        let mut children: Vec<ruby_prism::Node<'a>> = Vec::new();
+        for cond in case_node.conditions().iter() {
+            children.push(cond);
+        }
+        if let Some(else_clause) = case_node.else_clause() {
+            children.push(else_clause.as_node());
+        }
+        return children;
+    }
+    if let Some(when_node) = node.as_when_node() {
+        let mut children = Vec::new();
+        if let Some(stmts) = when_node.statements() {
+            children.push(stmts.as_node());
+        }
+        return children;
+    }
+    if let Some(begin_node) = node.as_begin_node() {
+        let mut children = Vec::new();
+        if let Some(stmts) = begin_node.statements() {
+            children.push(stmts.as_node());
+        }
+        return children;
+    }
+    // For CallNode with a block (non-example, non-scope-change), look inside the block
+    if let Some(call) = node.as_call_node() {
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                let mut children = Vec::new();
+                if let Some(body) = block_node.body() {
+                    children.push(body);
+                }
+                return children;
+            }
+        }
+    }
+    // For parentheses
+    if let Some(paren) = node.as_parentheses_node() {
+        let mut children = Vec::new();
+        if let Some(body) = paren.body() {
+            children.push(body);
+        }
+        return children;
+    }
+    // Default: no children to recurse into
+    Vec::new()
 }
 
 /// Build a structural AST signature from the example's metadata + block body.

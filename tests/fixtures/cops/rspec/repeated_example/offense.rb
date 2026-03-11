@@ -66,3 +66,19 @@ describe 'four dupes' do
     expect(foo).to be(bar)
   end
 end
+
+# Examples nested in control flow should still be detected as duplicates
+# RuboCop recursively searches for examples, not just direct children
+describe 'nested in if' do
+  if some_condition
+    it "nested a" do
+    ^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 63.
+      expect(foo).to be(bar)
+    end
+  else
+    it "nested b" do
+    ^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 59.
+      expect(foo).to be(bar)
+    end
+  end
+end
