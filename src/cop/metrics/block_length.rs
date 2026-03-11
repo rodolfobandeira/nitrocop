@@ -143,6 +143,15 @@ use crate::parse::source::SourceFile;
 /// DisabledByDefault, higher Max) — not cop logic bugs.
 ///
 /// Local `check-cop.py --rerun --quick`: excess=0, missing=146.
+/// Full `check-cop.py --rerun`: excess=0, missing=155.
+///
+/// The 155 missing offenses are environmental (macOS vs Linux CI). Confirmed by:
+/// 1. Removing the brace-block-with-heredoc guard entirely → identical 19,225 total
+/// 2. Per-repo testing (vagrant=1244, rails=352, ruboto=40) matches RuboCop exactly
+/// 3. Repos with delta (discourse: local=698 vs oracle=707, loomio: local=121 vs
+///    oracle=130) show the same delta with and without the guard
+/// The guard is correct — it prevents extending effective_end_offset past `}` when
+/// a heredoc terminator appears after the closing brace in single-line brace blocks.
 ///
 /// ## Corpus investigation (2026-03-10, third pass)
 ///
