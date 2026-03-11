@@ -1,4 +1,4 @@
-use crate::cop::node_type::{ARRAY_NODE, ASSOC_NODE, CALL_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -20,6 +20,17 @@ use crate::parse::source::SourceFile;
 /// **Fix:** Extract task name from both symbol/string first-arg and hash-first-arg
 /// forms. Skip if task name is "default". For hash-first-arg, check the value for
 /// dependencies (symbol = has dep, non-empty array = has dep, empty array = no dep).
+///
+/// ## Investigation findings (2026-03-10)
+///
+/// **45 FP:** `has_dependencies()` was too restrictive — only recognized SymbolNode,
+/// StringNode, and non-empty ArrayNode as dependencies. Method calls (`task foo: dep`),
+/// constants, and variables were not recognized, causing false positives. RuboCop's
+/// `with_hash_style_dependencies?` treats ANY non-array, non-nil value as having
+/// dependencies (the `else true` branch).
+///
+/// **Fix:** Simplified `has_dependencies()` to return `true` for anything except an
+/// empty array, matching RuboCop's logic exactly.
 pub struct RakeEnvironment;
 
 impl Cop for RakeEnvironment {
@@ -32,13 +43,7 @@ impl Cop for RakeEnvironment {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[
-            ARRAY_NODE,
-            ASSOC_NODE,
-            CALL_NODE,
-            KEYWORD_HASH_NODE,
-            SYMBOL_NODE,
-        ]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -169,20 +174,15 @@ fn is_name_default(node: &ruby_prism::Node<'_>) -> bool {
 }
 
 /// Check if a node represents non-empty dependencies.
-/// A symbol value means a single dependency. A non-empty array means multiple deps.
-/// An empty array means no dependencies.
+/// Matches RuboCop's logic: anything except an empty array counts as a dependency.
+/// This includes symbols, strings, method calls, constants, variables, etc.
 fn has_dependencies(node: &ruby_prism::Node<'_>) -> bool {
-    if node.as_symbol_node().is_some() {
-        return true;
-    }
     if let Some(arr) = node.as_array_node() {
+        // Empty array means no dependencies
         return arr.elements().iter().next().is_some();
     }
-    // String value could also be a dependency
-    if node.as_string_node().is_some() {
-        return true;
-    }
-    false
+    // Any non-array value is treated as a dependency (symbol, string, method call, etc.)
+    true
 }
 
 #[cfg(test)]

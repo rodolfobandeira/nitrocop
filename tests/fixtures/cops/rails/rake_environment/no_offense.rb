@@ -19,3 +19,15 @@ end
 task setup: :database do
   puts "setup depends on database"
 end
+task foo: dep do
+  puts "method call dependency"
+end
+task foo: [dep, :bar] do
+  puts "method call in array dependency"
+end
+task :foo, [:arg] => dep do
+  puts "args with method call dependency"
+end
+task :generate => [:environment] do
+  puts "hash rocket with array"
+end
