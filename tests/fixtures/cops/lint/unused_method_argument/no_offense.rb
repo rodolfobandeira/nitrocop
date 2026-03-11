@@ -103,3 +103,8 @@ end
 def fail_bare(arg)
   fail
 end
+
+# binding called with a receiver still suppresses warnings (matches RuboCop)
+def with_receiver_binding(name, value)
+  some_object.binding
+end

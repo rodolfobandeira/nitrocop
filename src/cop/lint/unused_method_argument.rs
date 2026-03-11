@@ -6,7 +6,7 @@ use ruby_prism::Visit;
 
 /// Checks for unused method arguments.
 ///
-/// ## Root causes of historical FP/FN (corpus 87.3% match rate):
+/// ## Root causes of historical FP/FN (corpus 87.3% → 99.6% match rate):
 /// - **FN: block params (`&block`)** were not collected — now handled via `params.block()`
 /// - **FN: keyword rest (`**opts`)** were not collected — now handled via `params.keyword_rest()`
 /// - **FN: post params** (after rest, e.g. `def foo(*a, b)`) were not collected — now handled via `params.posts()`
@@ -17,6 +17,13 @@ use ruby_prism::Visit;
 ///   of reading from config. Now uses the configured exception list.
 /// - **FN: `LocalVariableOperatorWriteNode`/`AndWriteNode`/`OrWriteNode`** (`a += 1`, `a ||= x`)
 ///   implicitly read the variable but weren't detected. Now handled.
+/// - **FP: `binding` with receiver** — RuboCop's VariableForce treats ANY call to a method
+///   named `binding` (regardless of receiver) as making all local variables referenced.
+///   nitrocop only handled receiverless `binding`. Fixed to match RuboCop: `obj.binding`
+///   now also suppresses unused argument warnings.
+/// - **FN: empty methods with `IgnoreEmptyMethods: false`** — a double-return bug in the
+///   `body.is_none()` branch caused empty methods to always be skipped, even when config
+///   set `IgnoreEmptyMethods: false`. Fixed to properly check params when body is absent.
 pub struct UnusedMethodArgument;
 
 impl Cop for UnusedMethodArgument {
@@ -51,23 +58,20 @@ impl Cop for UnusedMethodArgument {
         let allow_unused_keyword = config.get_bool("AllowUnusedKeywordArguments", false);
         let not_implemented_exceptions = config.get_string_array("NotImplementedExceptions");
 
-        let body = match def_node.body() {
-            Some(b) => b,
-            None => {
-                // Empty method
-                if ignore_empty {
-                    return;
-                }
-                // Fall through to check params with no body
-                return;
-            }
-        };
+        let body = def_node.body();
+
+        // Check for empty methods
+        if body.is_none() && ignore_empty {
+            return;
+        }
 
         // Check for not-implemented methods
-        if ignore_not_implemented
-            && is_not_implemented(&body, not_implemented_exceptions.as_deref())
-        {
-            return;
+        if let Some(ref b) = body {
+            if ignore_not_implemented
+                && is_not_implemented(b, not_implemented_exceptions.as_deref())
+            {
+                return;
+            }
         }
 
         let params = match def_node.parameters() {
@@ -180,7 +184,9 @@ impl Cop for UnusedMethodArgument {
             has_forwarding_super: false,
             has_binding_call: false,
         };
-        finder.visit(&body);
+        if let Some(ref b) = body {
+            finder.visit(b);
+        }
 
         // Also scan parameter default values for variable reads
         for opt in params.optionals().iter() {
@@ -380,12 +386,13 @@ impl<'pr> Visit<'pr> for VarReadFinder {
         self.has_forwarding_super = true;
     }
 
-    // Detect `binding` calls — accessing binding exposes all local variables
+    // Detect `binding` calls — accessing binding exposes all local variables.
+    // RuboCop's VariableForce treats `binding` with ANY receiver (including
+    // `obj.binding`) as making all variables referenced, so we match that
+    // behavior. Only `binding` with arguments (e.g. `binding(:something)`)
+    // is excluded — that's not Kernel#binding.
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        if node.receiver().is_none()
-            && node.name().as_slice() == b"binding"
-            && node.arguments().is_none()
-        {
+        if node.name().as_slice() == b"binding" && node.arguments().is_none() {
             self.has_binding_call = true;
         }
         ruby_prism::visit_call_node(self, node);
@@ -445,6 +452,53 @@ mod tests {
             names.iter().any(|m| m.contains("last")),
             "Expected offense for unused post param 'last', got: {:?}",
             names
+        );
+    }
+
+    #[test]
+    fn test_keyword_arg_used_no_offense() {
+        // keyword arg that IS used should NOT be flagged
+        let diags = crate::testutil::run_cop_full(
+            &UnusedMethodArgument,
+            b"def foo(bar:)\n  puts bar\nend\n",
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for used keyword arg, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_binding_with_receiver_no_offense() {
+        // obj.binding should suppress unused arg warnings (matches RuboCop)
+        let diags = crate::testutil::run_cop_full(
+            &UnusedMethodArgument,
+            b"def foo(bar)\n  some_object.binding\nend\n",
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offense when obj.binding is called, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_empty_method_ignore_false() {
+        // When IgnoreEmptyMethods is false, empty methods should still flag unused args
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "IgnoreEmptyMethods".to_string(),
+            serde_yml::Value::Bool(false),
+        );
+        let diags = crate::testutil::run_cop_full_with_config(
+            &UnusedMethodArgument,
+            b"def foo(bar)\nend\n",
+            config,
+        );
+        assert!(
+            !diags.is_empty(),
+            "Expected offense for unused arg in empty method when IgnoreEmptyMethods=false"
         );
     }
 
