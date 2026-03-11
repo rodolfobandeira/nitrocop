@@ -105,3 +105,52 @@ class Formatter
     end
   end
 end
+
+# MatchWriteNode with non-literal regexp on LHS should reset capture state
+# (Bug: stale capture count from previous literal regexp leaked through)
+/(foo)(bar)/ =~ "foobar"
+puts $1
+PATTERN =~ some_string
+puts $1
+
+# case/in with zero-capture patterns should not flag $N from stale state
+/(foo)(bar)/ =~ "foobar"
+case value
+in [x, y]
+  puts $1
+in Integer
+  puts $1
+end
+
+# case/in with non-regexp pattern after regexp match should not flag
+/(abc)(def)(ghi)/ =~ str
+case obj
+in { name: String }
+  puts $1
+  puts $2
+end
+
+# gsub/sub with string argument (not regexp) should reset capture state
+/(foo)/ =~ str
+str.gsub('old', 'new')
+puts $2
+
+# scan with string argument should reset capture state
+/(foo)/ =~ str
+str.scan('pattern')
+puts $2
+
+# index with string argument should reset capture state
+/(foo)/ =~ str
+str.index('needle')
+puts $2
+
+# gsub with no arguments (returns enumerator) should reset capture state
+/(foo)/ =~ str
+str.gsub
+puts $2
+
+# sub with block but string pattern should reset capture state
+/(foo)/ =~ str
+str.sub('x') { |m| m.upcase }
+puts $2

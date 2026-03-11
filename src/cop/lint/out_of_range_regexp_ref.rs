@@ -27,6 +27,25 @@ use ruby_prism::Visit;
 /// **Fix:** Changed initial state to `Some(0)`, changed `None` to mean "unknown/don't flag",
 /// replaced all `Some(usize::MAX)` with `None` for non-literal regexp cases, and added
 /// `None` reset in `visit_case_node` for when clauses without literal regexp conditions.
+///
+/// ## Investigation (2026-03-11)
+///
+/// **Root cause of remaining 18 FPs:** Three additional state-management gaps:
+///
+/// 1. **`sets_backref` methods with no arguments:** Methods like `str.gsub` (no args,
+///    returns enumerator) didn't reset `current_capture_count`. RuboCop's `after_send`
+///    unconditionally sets `@valid_ref = nil` before checking for regexp args, so any
+///    RESTRICT_ON_SEND method without a literal regexp arg resets state. Fixed by adding
+///    else branch when `node.arguments()` is None.
+///
+/// 2. **`visit_case_match_node` zero-capture patterns:** `case/in` clauses with non-regexp
+///    patterns (e.g., `in [x, y]`, `in Integer`) didn't reset `current_capture_count`.
+///    RuboCop's `on_in_pattern` returns `[].max` (nil) when no regexp patterns exist.
+///    Fixed by replacing `count_captures_in_pattern` with `has_regexp_in_pattern` that
+///    distinguishes "no regexp" (reset to None) from "regexp with 0 captures" (Some(0)).
+///
+/// 3. **`visit_match_write_node` defensive fix:** Added else branch to reset to None
+///    when the regexp has interpolation (can't count captures statically).
 pub struct OutOfRangeRegexpRef;
 
 impl Cop for OutOfRangeRegexpRef {
@@ -187,6 +206,8 @@ impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
                 self.visit(&args.as_node());
             }
             // Now set the capture count from this call's regexp argument.
+            // Matches RuboCop's after_send which sets @valid_ref = nil first,
+            // then only sets it to a number if a literal regexp arg is found.
             if let Some(args) = node.arguments() {
                 let arg_list: Vec<ruby_prism::Node<'pr>> = args.arguments().iter().collect();
                 if let Some(arg) = arg_list.first() {
@@ -198,6 +219,10 @@ impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
                         self.current_capture_count = None;
                     }
                 }
+            } else {
+                // No arguments (e.g., `str.gsub` returning an enumerator) —
+                // captures are unknown, mark as such to match RuboCop behavior
+                self.current_capture_count = None;
             }
             // Now visit the block (if any) with the correct capture count.
             if let Some(block) = node.block() {
@@ -210,11 +235,16 @@ impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
     }
 
     fn visit_match_write_node(&mut self, node: &ruby_prism::MatchWriteNode<'pr>) {
-        // This is for `/regexp/ =~ string` where the regexp is on the LHS
+        // This is for `/(?<named>regexp)/ =~ string` where the regexp is on the LHS
+        // with named captures. The receiver should always be a literal regexp,
+        // but handle the else case defensively (e.g., interpolated regexp).
         let call = node.call();
         if let Some(recv) = call.receiver() {
             if let Some(count) = count_captures_in_node(&recv) {
                 self.current_capture_count = Some(count);
+            } else {
+                // Interpolated regexp with named captures — can't count statically
+                self.current_capture_count = None;
             }
         }
         ruby_prism::visit_match_write_node(self, node);
@@ -258,9 +288,13 @@ impl<'pr> Visit<'pr> for RegexpRefVisitor<'_, '_> {
         let saved = self.current_capture_count;
         for condition in node.conditions().iter() {
             if let Some(in_node) = condition.as_in_node() {
-                let max_captures = count_captures_in_pattern(&in_node.pattern());
-                if max_captures > 0 {
+                let (has_regexp, max_captures) = has_regexp_in_pattern(&in_node.pattern());
+                if has_regexp {
                     self.current_capture_count = Some(max_captures);
+                } else {
+                    // No regexp in pattern — captures are unknown.
+                    // Matches RuboCop's on_in_pattern where [].max returns nil.
+                    self.current_capture_count = None;
                 }
                 if let Some(body) = in_node.statements() {
                     self.visit_statements_node(&body);
@@ -400,18 +434,23 @@ fn count_capture_groups(pattern: &str) -> usize {
     if named_count > 0 { named_count } else { count }
 }
 
-/// Count max captures in a pattern matching expression.
-fn count_captures_in_pattern(node: &ruby_prism::Node<'_>) -> usize {
+/// Check if a pattern matching expression contains any regexp nodes,
+/// and return the max capture count. Returns (has_regexp, max_captures).
+fn has_regexp_in_pattern(node: &ruby_prism::Node<'_>) -> (bool, usize) {
+    let mut found = false;
     let mut max = 0;
 
     if let Some(count) = count_captures_in_node(node) {
+        found = true;
         max = max.max(count);
     }
 
     // Check array patterns
     if let Some(arr) = node.as_array_pattern_node() {
         for elem in arr.requireds().iter() {
-            max = max.max(count_captures_in_pattern(&elem));
+            let (f, c) = has_regexp_in_pattern(&elem);
+            found |= f;
+            max = max.max(c);
         }
     }
 
@@ -419,28 +458,36 @@ fn count_captures_in_pattern(node: &ruby_prism::Node<'_>) -> usize {
     if let Some(hash) = node.as_hash_pattern_node() {
         for elem in hash.elements().iter() {
             if let Some(assoc) = elem.as_assoc_node() {
-                max = max.max(count_captures_in_pattern(&assoc.value()));
+                let (f, c) = has_regexp_in_pattern(&assoc.value());
+                found |= f;
+                max = max.max(c);
             }
         }
     }
 
     // Check alternation patterns
     if let Some(alt) = node.as_alternation_pattern_node() {
-        max = max.max(count_captures_in_pattern(&alt.left()));
-        max = max.max(count_captures_in_pattern(&alt.right()));
+        let (f1, c1) = has_regexp_in_pattern(&alt.left());
+        let (f2, c2) = has_regexp_in_pattern(&alt.right());
+        found |= f1 | f2;
+        max = max.max(c1).max(c2);
     }
 
     // Check capture patterns (=> var)
     if let Some(cap) = node.as_capture_pattern_node() {
-        max = max.max(count_captures_in_pattern(&cap.value()));
+        let (f, c) = has_regexp_in_pattern(&cap.value());
+        found |= f;
+        max = max.max(c);
     }
 
     // Check pinned patterns
     if let Some(pin) = node.as_pinned_variable_node() {
-        max = max.max(count_captures_in_pattern(&pin.variable()));
+        let (f, c) = has_regexp_in_pattern(&pin.variable());
+        found |= f;
+        max = max.max(c);
     }
 
-    max
+    (found, max)
 }
 
 #[cfg(test)]
