@@ -28,3 +28,14 @@ end
 
 # Calls without blocks should not be flagged
 describe 'Something', a: true
+
+# String key metadata is not flagged
+describe 'Something', 'a' => true do
+end
+
+# Non-symbol-key hash metadata is not flagged
+describe 'Something', a => true do
+end
+
+# Block argument (not a real block) should not be flagged
+it 'has metadata', &(proc do end)
