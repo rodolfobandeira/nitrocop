@@ -23,3 +23,21 @@
 # Hack the planet is a movie reference
 # Optimize your workflow by using shortcuts
 # Review the documentation for details
+
+# Bare keyword alone (no colon or space after) — not an annotation per RuboCop
+
+# TODO
+
+# FIXME
+
+# HACK
+
+# NOTE
+
+# REVIEW
+
+# OPTIMIZE
+
+# Todo
+
+# Fixme

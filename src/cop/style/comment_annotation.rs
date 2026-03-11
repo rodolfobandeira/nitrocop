@@ -2,6 +2,23 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/CommentAnnotation cop.
+///
+/// ## Investigation findings (2026-03-10)
+///
+/// Root cause of 235 FPs: bare keyword comments like `# TODO`, `# FIXME`, `# NOTE`
+/// (keyword alone at end of line, no colon or space after) were being flagged as
+/// "missing a note". RuboCop's `keyword_appearance?` method requires either a colon
+/// or space after the keyword for it to count as an annotation. A bare keyword with
+/// nothing after it is not considered an annotation and is silently accepted.
+///
+/// Fix: Changed the `keyword_appearance?` check from
+/// `!has_colon && !has_space && !after_kw.is_empty()` to `!has_colon && !has_space`,
+/// so bare keywords (empty after_kw) are also skipped. Also removed the redundant
+/// gate at the offense registration site that checked `after_kw.starts_with(':')`
+/// or `after_kw.starts_with(' ')`, since keyword_appearance is already validated
+/// earlier. Additionally fixed the "missing a note" message condition to check
+/// `has_note` instead of `after_kw.is_empty()`, matching RuboCop's behavior.
 pub struct CommentAnnotation;
 
 const DEFAULT_KEYWORDS: &[&str] = &["TODO", "FIXME", "OPTIMIZE", "HACK", "REVIEW", "NOTE"];
@@ -169,7 +186,9 @@ impl Cop for CommentAnnotation {
 
                 // RuboCop's annotation? = keyword_appearance? && !just_keyword_of_sentence?
                 // keyword_appearance? = keyword && (colon || space)
-                if !has_colon && !has_space && !after_kw.is_empty() {
+                // A bare keyword alone (e.g. `# TODO`) with nothing after it is NOT
+                // considered an annotation — it needs at least a colon or space.
+                if !has_colon && !has_space {
                     continue;
                 }
 
@@ -187,31 +206,30 @@ impl Cop for CommentAnnotation {
                     continue;
                 }
 
-                // Check if this is actually an annotation keyword (followed by colon, space, or end-of-line)
-                if after_kw.is_empty() || after_kw.starts_with(':') || after_kw.starts_with(' ') {
-                    let msg = if after_kw.is_empty() {
-                        format!(
-                            "Annotation comment, with keyword `{}`, is missing a note.",
-                            kw_upper
-                        )
-                    } else if require_colon {
-                        format!(
-                            "Annotation keywords like `{}` should be all upper case, followed by a colon, and a space, then a note describing the problem.",
-                            kw_upper,
-                        )
-                    } else {
-                        format!(
-                            "Annotation keywords like `{}` should be all upper case, followed by a space, then a note describing the problem.",
-                            kw_upper,
-                        )
-                    };
+                // At this point, keyword_appearance is true (has_colon or has_space),
+                // it's not just a keyword in a sentence, and it's not correctly formatted.
+                let msg = if !has_note {
+                    format!(
+                        "Annotation comment, with keyword `{}`, is missing a note.",
+                        kw_upper
+                    )
+                } else if require_colon {
+                    format!(
+                        "Annotation keywords like `{}` should be all upper case, followed by a colon, and a space, then a note describing the problem.",
+                        kw_upper,
+                    )
+                } else {
+                    format!(
+                        "Annotation keywords like `{}` should be all upper case, followed by a space, then a note describing the problem.",
+                        kw_upper,
+                    )
+                };
 
-                    // Column of the keyword within the comment
-                    let (_, comment_col) = source.offset_to_line_col(comment_start_offset);
-                    let kw_col = comment_col + 1 + margin_len;
-                    diagnostics.push(self.diagnostic(source, comment_line, kw_col, msg));
-                    break;
-                }
+                // Column of the keyword within the comment
+                let (_, comment_col) = source.offset_to_line_col(comment_start_offset);
+                let kw_col = comment_col + 1 + margin_len;
+                diagnostics.push(self.diagnostic(source, comment_line, kw_col, msg));
+                break;
             }
         }
     }
