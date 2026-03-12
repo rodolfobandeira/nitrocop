@@ -73,6 +73,25 @@ use crate::parse::source::SourceFile;
 /// or inside rescue blocks). 409 FNs from prior cycle partially addressed
 /// by file-level variable detection; remaining FNs likely from VariableForce's
 /// comprehensive scope tracking that we don't fully replicate.
+///
+/// ## Investigation (FP=53, FN=75, 2026-03-12)
+///
+/// **FN fix: operator-write nodes (`x += 1`, `x -= 1`, etc.)**
+/// `LocalVariableOperatorWriteNode` was not handled in `node_references_var`,
+/// `node_reads_var`, or `collect_assignments_in_scope`. Operator-writes both
+/// read and write the variable (`x += 1` is `x = x + 1`). Inside example
+/// blocks, `x += 1` was invisible as a reference to outer `x`. At group
+/// level, `x += 1` was not collected as an assignment. Added handling for
+/// all three functions.
+///
+/// **FN fix: interpolated regular expressions (`/#{x}/`)**
+/// `InterpolatedRegularExpressionNode` was not handled in `node_references_var`.
+/// Variables used only in regex interpolation inside example blocks were missed.
+///
+/// **FN fix: `for` loops in `node_references_var`**
+/// `ForNode` was handled in `collect_assignments_in_scope` but not in
+/// `node_references_var`, so variable references inside for-loop bodies
+/// were invisible.
 pub struct LeakyLocalVariable;
 
 impl Cop for LeakyLocalVariable {
@@ -229,6 +248,15 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
         assigns.push(VarAssign {
             name: aw.name().as_slice().to_vec(),
             offset: aw.location().start_offset(),
+        });
+        return;
+    }
+
+    // operator-write: `x += expr`, `x -= expr`, etc.
+    if let Some(ow) = node.as_local_variable_operator_write_node() {
+        assigns.push(VarAssign {
+            name: ow.name().as_slice().to_vec(),
+            offset: ow.location().start_offset(),
         });
         return;
     }
@@ -541,6 +569,15 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
         assigns.push(VarAssign {
             name: aw.name().as_slice().to_vec(),
             offset: aw.location().start_offset(),
+        });
+        return;
+    }
+
+    // operator-write: `x += expr`, `x -= expr`, etc.
+    if let Some(ow) = node.as_local_variable_operator_write_node() {
+        assigns.push(VarAssign {
+            name: ow.name().as_slice().to_vec(),
+            offset: ow.location().start_offset(),
         });
         return;
     }
@@ -1348,6 +1385,13 @@ fn node_reads_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
             return node_reads_var(&lw.value(), var_name);
         }
     }
+    // Operator-write (`x += expr`) always reads the variable first
+    if let Some(opw) = node.as_local_variable_operator_write_node() {
+        if opw.name().as_slice() == var_name {
+            return true;
+        }
+        return node_reads_var(&opw.value(), var_name);
+    }
     // For all other node types, delegate to the full reference checker
     // (this is a conservative check - any reference counts as a read)
     node_references_var(node, var_name)
@@ -1464,6 +1508,16 @@ fn node_references_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
         return node_references_var(&aw.value(), var_name);
     }
 
+    // Local variable operator-write: `x += expr`, `x -= expr`, etc.
+    // These implicitly read the variable AND write to it. If the variable
+    // name matches, it's a reference. Also check the RHS value.
+    if let Some(opw) = node.as_local_variable_operator_write_node() {
+        if opw.name().as_slice() == var_name {
+            return true;
+        }
+        return node_references_var(&opw.value(), var_name);
+    }
+
     // Multi-write
     if let Some(mw) = node.as_multi_write_node() {
         return node_references_var(&mw.value(), var_name);
@@ -1570,6 +1624,22 @@ fn node_references_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
         return false;
     }
     if let Some(interp) = node.as_interpolated_symbol_node() {
+        for part in interp.parts().iter() {
+            if let Some(embedded) = part.as_embedded_statements_node() {
+                if let Some(stmts) = embedded.statements() {
+                    for s in stmts.body().iter() {
+                        if node_references_var(&s, var_name) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Interpolated regular expressions: /#{x}/
+    if let Some(interp) = node.as_interpolated_regular_expression_node() {
         for part in interp.parts().iter() {
             if let Some(embedded) = part.as_embedded_statements_node() {
                 if let Some(stmts) = embedded.statements() {
@@ -1818,6 +1888,23 @@ fn node_references_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
         }
         return false;
     }
+
+    // For loop: `for x in items do ... end`
+    if let Some(for_node) = node.as_for_node() {
+        if node_references_var(&for_node.collection(), var_name) {
+            return true;
+        }
+        if let Some(stmts) = for_node.statements() {
+            for s in stmts.body().iter() {
+                if node_references_var(&s, var_name) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Ternary / inline conditionals (same node type as if in Prism, already handled above)
 
     false
 }

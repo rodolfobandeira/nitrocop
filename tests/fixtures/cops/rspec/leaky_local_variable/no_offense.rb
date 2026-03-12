@@ -183,3 +183,25 @@ describe Outer do
     end
   end
 end
+
+# Variable assigned inside iterator block param, NOT a group-level assignment
+describe SomeClass do
+  items.each do |item|
+    item = transform(item)
+    process(item)
+  end
+
+  it 'works' do
+    expect(result).to eq(true)
+  end
+end
+
+# Operator-assign at group level, variable NOT used in example scope
+describe SomeClass do
+  counter = 0
+  counter += items.size
+
+  it 'does something unrelated' do
+    expect(1 + 2).to eq(3)
+  end
+end

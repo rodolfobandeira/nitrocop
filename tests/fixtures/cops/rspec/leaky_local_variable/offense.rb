@@ -185,3 +185,38 @@ describe SomeClass do
     expect(count).to eq(5)
   end
 end
+
+# Variable used via operator-assign (+=) inside example block
+describe SomeClass do
+  total = 10
+  ^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+  it 'increments the total' do
+    total += 5
+    expect(total).to eq(15)
+  end
+end
+
+# Variable used via operator-assign (-=) inside hook
+describe SomeClass do
+  counter = 100
+  ^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+  before do
+    counter -= 1
+  end
+
+  it 'checks counter' do
+    expect(counter).to eq(99)
+  end
+end
+
+# Variable used in interpolated regex inside example
+describe SomeClass do
+  pattern = 'foo'
+  ^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+  it 'matches the pattern' do
+    expect('foobar').to match(/#{pattern}/)
+  end
+end
