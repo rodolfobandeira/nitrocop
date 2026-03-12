@@ -232,7 +232,6 @@
 {"id": "trailblazer__cells__716700c", "repo_url": "https://github.com/trailblazer/cells", "sha": "716700caf57eb688691ff829093ab571777f9ece", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3077 stars"}
 {"id": "nathanvda__cocoon__b3f4e6d", "repo_url": "https://github.com/nathanvda/cocoon", "sha": "b3f4e6d1920937063cba2a4472dc4508bbac00f3", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3075 stars"}
 {"id": "mustache__mustache__9fefaab", "repo_url": "https://github.com/mustache/mustache", "sha": "9fefaabd2b1e68ef8186a210af1f0e18ef48bb55", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3074 stars"}
-{"id": "collabnix__kubelabs__d43118c", "repo_url": "https://github.com/collabnix/kubelabs", "sha": "d43118c4af2adeb708d26658615319d6493e6077", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3074 stars"}
 {"id": "inspec__inspec__965502e", "repo_url": "https://github.com/inspec/inspec", "sha": "965502e4054eb4980b4b466a03419d99ec7975c0", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3051 stars"}
 {"id": "zombocom__derailed_benchmarks__e8b29db", "repo_url": "https://github.com/zombocom/derailed_benchmarks", "sha": "e8b29db93acf7d3318b9afb42d8516b905020afb", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3050 stars"}
 {"id": "hashie__hashie__3988742", "repo_url": "https://github.com/hashie/hashie", "sha": "3988742ebc7edb0500c67c4463ce54cd318d7af9", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 3027 stars"}
@@ -998,3 +997,4 @@
 {"id": "Envek__after_commit_everywhere__4df8efa", "repo_url": "https://github.com/Envek/after_commit_everywhere", "sha": "4df8efaea036a909779e1df2792296a4a804370c", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 779 stars"}
 {"id": "dradis__dradis-ce__87cf070", "repo_url": "https://github.com/dradis/dradis-ce", "sha": "87cf07064838f2244e11adaa0c491d5757c081a4", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 779 stars"}
 {"id": "platanus__activeadmin_addons__d56e1bb", "repo_url": "https://github.com/platanus/activeadmin_addons", "sha": "d56e1bbd83cf6be7936cb031585904be41c44ae3", "source": "github_stars", "set": "frozen", "notes": "auto-discovered, 778 stars"}
+{"id": "scinote-eln__scinote-web__8435988", "repo_url": "https://github.com/scinote-eln/scinote-web", "sha": "843598836399294bf2ce0b23644caa4c385612e4", "source": "manual", "set": "frozen", "notes": "manually added"}

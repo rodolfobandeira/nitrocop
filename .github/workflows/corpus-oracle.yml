@@ -57,7 +57,7 @@ jobs:
           python3 << 'PYEOF'
           import json, os, sys
 
-          BATCH_SIZE = 4
+          BATCH_SIZE = 10
 
           repos = []
           with open('bench/corpus/manifest.jsonl') as f:
@@ -101,7 +101,7 @@ jobs:
   oracle-repo:
     needs: [build-nitrocop, compute-matrix]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.compute-matrix.outputs.matrix) }}
@@ -137,11 +137,27 @@ jobs:
       - name: Export nitrocop cop list
         run: bin/nitrocop --list-cops > nitrocop-cops.txt
 
+      - name: Compute rubocop cache key
+        id: rubocop-cache-key
+        run: |
+          # Rubocop results are deterministic for a given (repo SHA, rubocop version, config).
+          # Cache key = hash of Gemfile + baseline config. Repo SHAs are in the manifest.
+          # Per-batch key since each runner processes different repos.
+          KEY_HASH=$(cat bench/corpus/Gemfile bench/corpus/baseline_rubocop.yml | sha256sum | cut -c1-16)
+          echo "hash=${KEY_HASH}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached rubocop results
+        uses: actions/cache/restore@v4
+        id: rubocop-cache
+        with:
+          path: rubocop-cache/
+          key: rubocop-batch-${{ matrix.batch_id }}-${{ steps.rubocop-cache-key.outputs.hash }}
+
       - name: Run batch
         env:
           REPOS_JSON: ${{ matrix.repos_json }}
         run: |
-          mkdir -p results/nitrocop results/rubocop
+          mkdir -p results/nitrocop results/rubocop rubocop-cache
 
           echo "$REPOS_JSON" | jq -c '.[]' | while IFS= read -r row; do
             REPO_ID=$(echo "$row" | jq -r '.id')
@@ -150,20 +166,26 @@ jobs:
 
             echo "::group::${REPO_ID}"
 
-            # Clone
+            # Check for cached rubocop result
+            RUBOCOP_CACHED=false
+            if [ -f "rubocop-cache/${REPO_ID}.json" ]; then
+              echo "Using cached rubocop result for ${REPO_ID}"
+              cp "rubocop-cache/${REPO_ID}.json" "results/rubocop/${REPO_ID}.json"
+              RUBOCOP_CACHED=true
+            fi
+
+            # Clone — fetch exactly the pinned SHA at depth 1
             DEST="repos/${REPO_ID}"
             echo "Cloning ${REPO_ID} at ${REPO_SHA:0:7}..."
-            git clone --depth 50 --no-recurse-submodules --single-branch "$REPO_URL" "$DEST" || { echo "Clone failed for ${REPO_ID}"; echo "::endgroup::"; continue; }
-
-            if ! git -C "$DEST" checkout "$REPO_SHA" 2>/dev/null; then
-              echo "Shallow clone missing SHA, fetching deeper..."
-              git -C "$DEST" fetch --depth 200
-              git -C "$DEST" checkout "$REPO_SHA" || echo "WARNING: checkout failed, using HEAD"
-            fi
+            git init "$DEST" --quiet || { echo "Init failed for ${REPO_ID}"; echo "::endgroup::"; continue; }
+            git -C "$DEST" fetch --depth 1 "$REPO_URL" "$REPO_SHA" --quiet 2>/dev/null \
+              || git -C "$DEST" fetch --depth 1 "$REPO_URL" --quiet \
+              || { echo "Fetch failed for ${REPO_ID}"; rm -rf "$DEST"; echo "::endgroup::"; continue; }
+            git -C "$DEST" checkout FETCH_HEAD --quiet 2>/dev/null \
+              || echo "WARNING: checkout failed for ${REPO_ID}, using fetched HEAD"
 
             # Per-repo timeout (15 min each tool).
             # Keeps one slow repo from killing the whole batch.
-            # Largest legit repos (discourse, openproject) take ~12 min for rubocop.
             REPO_TIMEOUT=900  # 15 minutes
 
             # nitrocop
@@ -184,23 +206,24 @@ jobs:
               echo "::warning::nitrocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
             fi
 
-            # rubocop (always runs fresh — no cross-run caching to avoid
-            # environment drift causing non-deterministic baselines)
-            echo "=== rubocop: ${REPO_ID} ==="
-            rc=0
-            timeout "${REPO_TIMEOUT}" \
-            env BUNDLE_GEMFILE=$PWD/bench/corpus/Gemfile \
-                BUNDLE_PATH=$PWD/bench/corpus/vendor/bundle \
-            bundle exec rubocop \
-              --config bench/corpus/baseline_rubocop.yml \
-              --format json \
-              --force-exclusion \
-              --cache false \
-              "$DEST" \
-              > "results/rubocop/${REPO_ID}.json" 2>"results/rubocop/${REPO_ID}.err" || rc=$?
+            # rubocop — skip if we have a cached result
+            if [ "$RUBOCOP_CACHED" = false ]; then
+              echo "=== rubocop: ${REPO_ID} ==="
+              rc=0
+              timeout "${REPO_TIMEOUT}" \
+              env BUNDLE_GEMFILE=$PWD/bench/corpus/Gemfile \
+                  BUNDLE_PATH=$PWD/bench/corpus/vendor/bundle \
+              bundle exec rubocop \
+                --config bench/corpus/baseline_rubocop.yml \
+                --format json \
+                --force-exclusion \
+                --cache false \
+                "$DEST" \
+                > "results/rubocop/${REPO_ID}.json" 2>"results/rubocop/${REPO_ID}.err" || rc=$?
 
-            if [ "$rc" -eq 124 ]; then
-              echo "::warning::rubocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+              if [ "$rc" -eq 124 ]; then
+                echo "::warning::rubocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+              fi
             fi
 
             # Resolve symlink paths in JSON output before deleting the repo.
@@ -225,11 +248,23 @@ jobs:
               --context-lines 7 \
               2>/dev/null || true
 
+            # Save rubocop result to cache dir (will be persisted after the batch)
+            if [ "$RUBOCOP_CACHED" = false ] && [ -f "results/rubocop/${REPO_ID}.json" ]; then
+              cp "results/rubocop/${REPO_ID}.json" "rubocop-cache/${REPO_ID}.json"
+            fi
+
             # Free disk space between repos
             rm -rf "$DEST"
 
             echo "::endgroup::"
           done
+
+      - name: Save rubocop results cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: rubocop-cache/
+          key: rubocop-batch-${{ matrix.batch_id }}-${{ steps.rubocop-cache-key.outputs.hash }}
 
       - name: Upload results
         uses: actions/upload-artifact@v4

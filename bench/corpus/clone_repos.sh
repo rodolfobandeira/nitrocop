@@ -7,10 +7,10 @@
 #   bench/corpus/clone_repos.sh --jobs 8     # parallel clones (default: 4)
 #   bench/corpus/clone_repos.sh --dry-run    # show what would be cloned
 #
-# Repos are shallow-cloned (--depth 50) at the exact SHA from the manifest,
+# Repos are cloned at depth 1 using the exact pinned SHA from the manifest,
 # with no submodules. Already-cloned repos are skipped (safe to re-run).
 #
-# Estimated disk usage: ~5GB for all repos.
+# Estimated disk usage: ~12GB for all repos.
 
 set -euo pipefail
 
@@ -130,19 +130,25 @@ clone_one() {
         return 0
     fi
 
-    # Shallow clone + checkout exact SHA
-    if ! run_git_with_timeout "$CLONE_TIMEOUT" \
-        git clone --depth 50 --no-recurse-submodules --single-branch -q "$repo_url" "$dest"; then
-        echo "FAIL  $id (clone failed)" >&2
+    # Fetch exactly the pinned SHA at depth 1 (minimal clone)
+    if ! run_git_with_timeout "$CLONE_TIMEOUT" git init -q "$dest"; then
+        echo "FAIL  $id (init failed)" >&2
         echo "$id" >> "$FAILED_FILE"
         return 1
     fi
 
-    if ! run_git_with_timeout "$FETCH_TIMEOUT" git -C "$dest" checkout -q "$sha"; then
-        run_git_with_timeout "$FETCH_TIMEOUT" git -C "$dest" fetch --depth 200 -q || true
-        if ! run_git_with_timeout "$FETCH_TIMEOUT" git -C "$dest" checkout -q "$sha"; then
-            echo "WARN  $id (checkout ${sha:0:7} failed, using HEAD)" >&2
+    if ! run_git_with_timeout "$CLONE_TIMEOUT" git -C "$dest" fetch --depth 1 -q "$repo_url" "$sha"; then
+        # Fallback: some hosts don't allow fetching arbitrary SHAs
+        if ! run_git_with_timeout "$CLONE_TIMEOUT" git -C "$dest" fetch --depth 1 -q "$repo_url"; then
+            echo "FAIL  $id (fetch failed)" >&2
+            echo "$id" >> "$FAILED_FILE"
+            rm -rf "$dest"
+            return 1
         fi
+    fi
+
+    if ! run_git_with_timeout "$FETCH_TIMEOUT" git -C "$dest" checkout -q FETCH_HEAD; then
+        echo "WARN  $id (checkout failed, using fetched HEAD)" >&2
     fi
 
     echo "OK    $id (${sha:0:7})"

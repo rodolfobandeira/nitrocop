@@ -26,7 +26,9 @@ from pathlib import Path
 
 MANIFEST_PATH = Path(__file__).parent / "manifest.jsonl"
 
-# Repos too large for the 30-minute CI job timeout (RuboCop step alone exceeds it).
+# Repos excluded from the corpus.
+# - Too large: RuboCop step alone exceeds the CI job timeout.
+# - Not Ruby: repo is miscategorized or contains no meaningful Ruby source.
 DENYLIST = {
     "rapid7/metasploit-framework",
     "gitlabhq/gitlabhq",
@@ -35,6 +37,7 @@ DENYLIST = {
     "instructure/canvas-lms",
     "googleapis/google-cloud-ruby",
     "Shopify/shopify-api-ruby",
+    "collabnix/kubelabs",  # Kubernetes tutorials, zero Ruby source (only vendored gems)
 }
 
 
