@@ -1,6 +1,6 @@
 ---
 name: fix-continue
-description: Tell a fix-department/fix-cops/fix-repo session to continue working on the next batch.
+description: Tell a fix-department session to continue working on the next batch.
 ---
 
 # Fix Continue — Resume a Fix Session

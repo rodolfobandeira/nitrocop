@@ -1,12 +1,11 @@
 ---
 name: fix-wrapup
-description: Signal running fix-department/fix-cops/fix-repo agents to wrap up after the current phase, commit, and push.
+description: Signal running fix-department agents to wrap up after the current phase, commit, and push.
 ---
 
 # Fix Wrapup — Signal Fix Agents to Stop
 
-This skill tells a running `/fix-department`, `/fix-cops`, or `/fix-repo` session
-to wrap up. Use the team messaging tools to communicate with teammates.
+This skill tells a running `/fix-department` session to wrap up. Use the team messaging tools to communicate with teammates.
 
 ## Default: `/fix-wrapup` (graceful)
 

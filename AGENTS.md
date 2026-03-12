@@ -280,11 +280,7 @@ See [docs/rubygem.md](docs/rubygem.md) for the gem build/release pipeline, platf
 
 ## Corpus Fix Loop
 
-After a corpus oracle CI run, use `/fix-cops` to auto-fix a batch of high-divergence cops in parallel. It triages by total FP+FN (prioritizing biggest conformance impact), investigates, spawns worktree-isolated teammates to fix each cop, and collects results. See `.claude/skills/fix-cops/SKILL.md`.
-
 Use `/fix-department <gem-name>` to bring all cops in a specific gem to 100% corpus conformance. This is the preferred approach for incremental adoption — completing one gem at a time (e.g., `rubocop-performance`) so users can adopt it with confidence. See `.claude/skills/fix-department/SKILL.md`.
-
-Use `/fix-repo <name>` to improve a specific repo's conformance (e.g., `/fix-repo rails`). It shows the repo's top diverging cops, lets you pick which to fix, and dispatches parallel teammates. See `.claude/skills/fix-repo/SKILL.md`.
 
 Use `/triage` to just view the ranked cop list without fixing. See `.claude/skills/triage/SKILL.md`.
 
@@ -316,8 +312,6 @@ python3 scripts/investigate-repo.py --list                   # list all repos by
 python3 scripts/investigate-repo.py --input f.json rails     # use local corpus-results.json
 python3 scripts/investigate-repo.py rails --no-git-exclude       # skip auto-exclusion of fixed cops
 ```
-
-Use `/fix-repo <name>` to fix the top diverging cops for a specific repo. See `.claude/skills/fix-repo/SKILL.md`.
 
 To **reduce a corpus mismatch to a minimal reproduction**, use `reduce-mismatch.py`. It takes a specific FP/FN example (from `investigate-cop.py` output) and automatically shrinks the source file using delta debugging until only the triggering pattern remains:
 
@@ -359,8 +353,8 @@ With `--verbose`, it uses enriched per-repo data from `corpus-results.json` when
 - **Don't remove or move test cases unless they are factually incorrect.** Existing offense and no_offense fixtures represent verified correct behavior. If a code change causes existing tests to fail, the change is likely too aggressive and introduces regressions (FPs or FNs on other repos). Fix the approach rather than deleting tests. The exception: if a test case is provably wrong (e.g., nitrocop was flagging something RuboCop doesn't flag), it should be moved to the correct fixture file (offense → no_offense or vice versa) with a clear explanation.
 - **NEVER use `git stash` or `git stash pop`.** Work has been lost in the past from stash conflicts and forgotten stashes. Instead, commit work-in-progress to a branch, or use a worktree for parallel work. If you need to switch context, commit first with a WIP message.
 - **Do not pause for unrelated working-tree changes.** If you see modified files unrelated to your current task, continue the task, do not edit those files, do not stage/commit them, and do not revert them. Treat unrelated changes as off-limits unless explicitly asked to work on them.
-- **Document all cop investigation findings** as `///` doc comments on the cop's struct. This applies to all cop investigation work, not just `/fix-cops` runs. Document root causes, fixes applied, remaining gaps, and whether issues are cop logic bugs vs config resolution problems. This prevents future investigators from repeating the same analysis.
+- **Document all cop investigation findings** as `///` doc comments on the cop's struct. This applies to all cop investigation work, not just `/fix-department` runs. Document root causes, fixes applied, remaining gaps, and whether issues are cop logic bugs vs config resolution problems. This prevents future investigators from repeating the same analysis.
 - **Do not run local benchmark regeneration by default during cop-fix loops.**
   Use per-cop corpus gates (`scripts/check-cop.py ... --verbose [--rerun]`) as the default count-based acceptance check, and `scripts/verify-cop-locations.py` when you need location-level confirmation.
   Only run `cargo run --release --bin bench_nitrocop -- conform` when explicitly requested or when closing out `/fix-department`, since it rewrites `bench/results.md`.
-- **When editing a skill, check for related skills that share conventions or interact with it.** Skills in `.claude/skills/` often form workflows (e.g., fix-cops/fix-department/fix-repo create branches, land-branch-commits lands them). Changes to shared conventions (commit message format, Co-Authored-By trailers, branch naming) must be applied consistently across all related skills.
+- **When editing a skill, check for related skills that share conventions or interact with it.** Skills in `.claude/skills/` often form workflows (e.g., fix-department creates branches, land-branch-commits lands them). Changes to shared conventions (commit message format, Co-Authored-By trailers, branch naming) must be applied consistently across all related skills.
