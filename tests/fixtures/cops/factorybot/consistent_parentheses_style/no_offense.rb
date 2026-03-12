@@ -11,3 +11,8 @@ create foo: :bar
 sign_in create :user
 sign_in create :moderator
 described_class.add attributes_for :item, name: 'attribute'
+
+# Factory call as sole statement in if body (ambiguous in Parser: parent is :if)
+if condition
+  create :item, name: 'test'
+end

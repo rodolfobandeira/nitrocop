@@ -5,6 +5,25 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-12)
+///
+/// Corpus oracle (run 22998123880) reported FP=0, FN=7. All 7 FN in
+/// scinote-eln/scinote-web, a newly added corpus repo.
+///
+/// Root cause: `parent_is_ambiguous` propagated recursively through the entire
+/// AST subtree. RuboCop checks only the immediate parent via `node.parent.type`.
+///
+/// FN fix 1 (4 FN): `visit_parentheses_node` only cleared ambiguity for
+/// `AmbiguityKind::Array`. Parenthesized expressions map to `begin` in Parser
+/// (not in AMBIGUOUS_TYPES), so they should always clear ambiguity. Pattern:
+/// `archived_by: (create :user)` — factory call in parens inside assoc value.
+///
+/// FN fix 2 (3 FN): `visit_if_node` propagated ambiguity to ALL descendants.
+/// Factory calls inside `lvasgn` inside `if` body have parent `lvasgn` in
+/// Parser (not `if`), so not ambiguous. Pattern: `if foo; x = create :sym; end`.
+/// Single-statement if bodies with a CallNode as the sole statement are treated
+/// as ambiguous (matching Parser's direct-child behavior), but when the statement
+/// is something else (lvasgn, etc.), the body is non-ambiguous.
 pub struct ConsistentParenthesesStyle;
 
 impl Cop for ConsistentParenthesesStyle {
@@ -230,9 +249,41 @@ impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         let saved = self.parent_is_ambiguous;
         let saved_kind = self.ambiguity_kind;
+
+        // Predicate: ambiguous (factory call in if condition has parent `if` in Parser)
         self.parent_is_ambiguous = true;
         self.ambiguity_kind = Some(AmbiguityKind::If);
-        ruby_prism::visit_if_node(self, node);
+        self.visit(&node.predicate());
+
+        // Body: In Parser, single-statement if bodies have the statement as a
+        // direct child of `if` (no `begin` wrapper). Multi-statement bodies wrap
+        // in `begin`. In Prism, StatementsNode always interposes. We match
+        // Parser by treating single-statement bodies as ambiguous only when the
+        // statement itself is a CallNode (the factory call IS the if child).
+        // When it's something else (lvasgn, etc.), the factory call inside has
+        // a non-ambiguous parent in Parser too (e.g., lvasgn).
+        if let Some(stmts) = node.statements() {
+            let body: Vec<_> = stmts.body().iter().collect();
+            if body.len() == 1 && body[0].as_call_node().is_some() {
+                self.parent_is_ambiguous = true;
+                self.ambiguity_kind = Some(AmbiguityKind::If);
+            } else {
+                self.parent_is_ambiguous = false;
+                self.ambiguity_kind = None;
+            }
+            for stmt in &body {
+                self.visit(stmt);
+            }
+        }
+
+        // Subsequent (elsif/else): same treatment — single-statement else
+        // bodies with a call node as the sole statement are ambiguous in Parser.
+        if let Some(sub) = node.subsequent() {
+            self.parent_is_ambiguous = false;
+            self.ambiguity_kind = None;
+            self.visit(&sub);
+        }
+
         self.parent_is_ambiguous = saved;
         self.ambiguity_kind = saved_kind;
     }
@@ -240,10 +291,11 @@ impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
     fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
         let saved = self.parent_is_ambiguous;
         let saved_kind = self.ambiguity_kind;
-        if self.ambiguity_kind == Some(AmbiguityKind::Array) {
-            self.parent_is_ambiguous = false;
-            self.ambiguity_kind = None;
-        }
+        // Parenthesized expressions map to `begin` in Parser AST, which is NOT
+        // in RuboCop's AMBIGUOUS_TYPES. Always clear ambiguity: `(create :user)`
+        // inside an assoc value or or-expression is not ambiguous.
+        self.parent_is_ambiguous = false;
+        self.ambiguity_kind = None;
         ruby_prism::visit_parentheses_node(self, node);
         self.parent_is_ambiguous = saved;
         self.ambiguity_kind = saved_kind;

@@ -15,3 +15,18 @@ build_stubbed :user
   (build :discord_server_role_response, position: 2),
    ^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
 ]
+
+# Factory call inside parentheses in hash value (assoc)
+create :item, owner: (create :user)
+^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
+                      ^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
+
+# Factory call inside parentheses in or expression
+x = foo || (create :user)
+            ^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
+
+# Factory call inside assignment in if body
+if condition
+  result = create :item
+           ^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
+end
