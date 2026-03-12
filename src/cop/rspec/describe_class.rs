@@ -38,6 +38,14 @@ use std::collections::HashMap;
 /// directly. Fixed by adding a `stmts.len() == 1` guard before recursing into
 /// module/class wrappers. Same pattern as SpecFilePathFormat's
 /// `collect_top_level_spec_groups`.
+///
+/// ## Corpus investigation (2026-03-12)
+///
+/// FP=4 remaining. Root cause: `check_top_level_describe` did not verify the
+/// describe call has a block. RuboCop's `TopLevelGroup` only fires for block
+/// nodes wrapping describe calls (`(block (send ...))` pattern). A bare
+/// `describe 'foo'` without `do...end` is not a spec group. Fixed by adding
+/// `call.block().is_none()` guard.
 pub struct DescribeClass;
 
 impl Cop for DescribeClass {
@@ -185,6 +193,12 @@ fn check_top_level_describe(
 
     let name = call.name().as_slice();
     if name != b"describe" {
+        return;
+    }
+
+    // RuboCop's TopLevelGroup only fires for block nodes (describe ... do/end).
+    // A bare `describe 'foo'` without a block is not a spec group.
+    if call.block().is_none() {
         return;
     }
 

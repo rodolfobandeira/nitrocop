@@ -21,6 +21,14 @@ use crate::parse::source::SourceFile;
 ///    `:sym` and `:"dsym_#{x}"`. Added `as_interpolated_symbol_node()` check for `strings` style.
 ///    Note: RuboCop's `str_type?` does NOT match `dstr` (interpolated strings), so we correctly
 ///    skip `InterpolatedStringNode` for `symbols` style.
+///
+/// ## Corpus investigation (2026-03-12)
+///
+/// FP=1 remaining. Without example locations, root cause cannot be confirmed.
+/// Possible cause: RuboCop checks `inside_example_group?` scope, while nitrocop
+/// flags any bare `let`/`subject` call. However, the cop's Include pattern limits
+/// to spec files where `let`/`subject` are almost always RSpec helpers. No code
+/// fix applied without reproduction case.
 pub struct VariableDefinition;
 
 impl Cop for VariableDefinition {

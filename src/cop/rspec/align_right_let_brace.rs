@@ -33,6 +33,14 @@ use crate::parse::source::SourceFile;
 /// `block.closing_loc()` for precise closing brace column. Groups by
 /// consecutive source lines using the same `adjacent_let_chunks` algorithm
 /// that mirrors RuboCop's `Enumerable#chunk` pattern.
+///
+/// ## Corpus investigation (2026-03-12)
+///
+/// FP=1 remaining. Fixed trailing period in message ("Align right let brace."
+/// → "Align right let brace") to match RuboCop's MSG. Note: message text
+/// doesn't affect corpus FP counting (count-based), so FP=1 may be from
+/// a different edge case (e.g., numblock handling). Without example locations,
+/// root cause cannot be confirmed.
 pub struct AlignRightLetBrace;
 
 impl Cop for AlignRightLetBrace {
@@ -87,7 +95,7 @@ impl Cop for AlignRightLetBrace {
                             source,
                             line_num,
                             brace_col,
-                            "Align right let brace.".to_string(),
+                            "Align right let brace".to_string(),
                         ));
                     }
                 }

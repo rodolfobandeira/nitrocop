@@ -1,12 +1,12 @@
 RSpec.describe 'test' do
   let(:foo)      { a }
-                     ^ RSpec/AlignRightLetBrace: Align right let brace.
+                     ^ RSpec/AlignRightLetBrace: Align right let brace
   let(:hi)       { ab }
-                      ^ RSpec/AlignRightLetBrace: Align right let brace.
+                      ^ RSpec/AlignRightLetBrace: Align right let brace
   let(:blahblah) { abcd }
 
   let(:blahblah) { a }
   let(:blah)     { bc }
-                      ^ RSpec/AlignRightLetBrace: Align right let brace.
+                      ^ RSpec/AlignRightLetBrace: Align right let brace
   let(:a)        { abc }
 end

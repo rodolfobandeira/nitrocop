@@ -25,6 +25,14 @@ use crate::parse::source::SourceFile;
 ///
 /// Also fixed message to remove trailing period (RuboCop uses "Align left let brace"
 /// without period).
+///
+/// ## Corpus investigation (2026-03-12)
+///
+/// FP=1 remaining. Without example locations, root cause cannot be confirmed.
+/// Possible causes: (1) numblock handling — RuboCop's `each_node(:block)` skips
+/// `numblock` nodes (numbered params `_1`), but Prism's `BlockNode` covers both;
+/// (2) edge case in let grouping across nested scopes. No code fix applied without
+/// reproduction case.
 pub struct AlignLeftLetBrace;
 
 impl Cop for AlignLeftLetBrace {

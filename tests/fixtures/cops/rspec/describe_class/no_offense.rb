@@ -88,3 +88,7 @@ module Beta
     end
   end
 end
+
+# Bare describe without a block is not a spec group — RuboCop skips it
+describe 'not a spec group'
+describe '#method_name'
