@@ -196,10 +196,31 @@ use crate::parse::source::SourceFile;
 /// bypassing `visit_leaf_node_enter`. Fix: override `visit_block_parameter_node`
 /// in AbcCounter.
 ///
-/// Remaining FN=5: Near-threshold methods where nitrocop scores slightly below
-/// 17.0 but RuboCop scores above. Root causes not yet identified — likely
-/// subtle counting differences in `for` loops, chained method calls, or
-/// rescue variable handling.
+/// Bug 4 (FN): `compound_assignment_extra` skipped block_pass calls. In Parser,
+/// `x ||= items.map(&:strip)` has `block_pass` as a child of the send (not a
+/// `:block` wrapper). RuboCop's compound_assignment DOES count this as A+1. In
+/// Prism, `map(&:strip)` has `block: BlockArgumentNode` (not BlockNode). Fix:
+/// only skip compound_extra when `.block()` is a `BlockNode`, not `BlockArgumentNode`.
+///
+/// Bug 5 (FN): `IndexOrWriteNode` / `IndexAndWriteNode` compound_assignment
+/// undercounted. In Parser, `@h[k] ||= v` produces `(or_asgn (send :[] k) v)`.
+/// RuboCop's `compound_assignment` counts BOTH children: the `[]` target (A+1)
+/// and the value (A+1 if non-setter call). Our old code only counted the value
+/// side via `compound_assignment_extra`. Fix: `compound_assignment_extra` now
+/// returns +1 for the target `[]` plus +1 for the value. The `count_node` arm
+/// for IndexOrWriteNode was also changed to NOT add A+1 (matching RuboCop's
+/// `assignment?` returning false for `shorthand_asgn?` nodes).
+///
+/// Bug 6 (FN): `ForNode` undercounted assignments by 1. In Parser, `for x in
+/// items` is `(for (lvasgn :x) (send nil :items) body)`. Both `for_type?` (A+1)
+/// and the child `(lvasgn :x)` (A+1 via `simple_assignment?`) are counted. In
+/// Prism, the index is `LocalVariableTargetNode` which has no `count_node` arm.
+/// Fix: ForNode handler now does A+=2 instead of A+=1.
+///
+/// Remaining FN=3: Near-threshold methods where nitrocop scores slightly below
+/// 17.0 but RuboCop scores above. Root causes are subtle counting differences
+/// in backtick xstring handling, regex =~ receiver handling, or chained method
+/// call counting in the actual (non-reduced) corpus files.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
@@ -395,12 +416,18 @@ impl AbcCounter {
             Some(n.value())
         } else if let Some(n) = node.as_constant_path_operator_write_node() {
             Some(n.value())
+        // Index compound assignments: hash["key"] ||= v
+        // In Parser, these are (or_asgn (send obj :[] key) (send Hash :new)).
+        // compound_assignment counts ALL send children: both the target [] send
+        // and the value send. The target [] is always a non-setter (+1), and the
+        // value may or may not be a non-setter call (+0 or +1).
         } else if let Some(n) = node.as_index_or_write_node() {
-            Some(n.value())
+            // target [] is always non-setter → +1, plus check value
+            return 1 + self.value_compound_extra(&n.value());
         } else if let Some(n) = node.as_index_and_write_node() {
-            Some(n.value())
+            return 1 + self.value_compound_extra(&n.value());
         } else if let Some(n) = node.as_index_operator_write_node() {
-            Some(n.value())
+            return 1 + self.value_compound_extra(&n.value());
         // Call compound assignments: obj.foo ||= v, obj.foo &&= v, obj.foo += v
         // In Parser, these are (or_asgn (send obj :foo) v) — compound_assignment
         // counts ALL non-setter send children (both target and value). The target
@@ -415,25 +442,35 @@ impl AbcCounter {
         };
 
         match value {
-            Some(v) => {
-                if let Some(call) = v.as_call_node() {
-                    // In Parser AST, a call with a block is wrapped in a :block node
-                    // (e.g., `x ||= items.detect { |i| ... }` → (or_asgn lvasgn (block (send ...) ...))).
-                    // RuboCop's compound_assignment checks direct children of or_asgn for
-                    // setter_method?, but :block nodes don't respond to setter_method?, so
-                    // they are NOT counted. In Prism, the .value() is the CallNode directly
-                    // (block is a child of the call). Skip calls with blocks to match.
-                    if call.block().is_some() {
-                        return 0;
-                    }
-                    if !is_setter_method(call.name().as_slice()) {
-                        return 1;
-                    }
-                }
-                0
-            }
+            Some(v) => self.value_compound_extra(&v),
             None => 0,
         }
+    }
+
+    /// Check if a value node in a compound assignment is a non-setter call,
+    /// returning 1 if it should count as an extra assignment.
+    fn value_compound_extra(&self, v: &ruby_prism::Node<'_>) -> usize {
+        if let Some(call) = v.as_call_node() {
+            // In Parser AST, a call with a do/end or {} block is wrapped in a :block node
+            // (e.g., `x ||= items.detect { |i| ... }` → (or_asgn lvasgn (block (send ...) ...))).
+            // RuboCop's compound_assignment checks direct children of or_asgn for
+            // setter_method?, but :block nodes don't respond to setter_method?, so
+            // they are NOT counted. In Prism, the .value() is the CallNode directly
+            // (block is a child of the call). Skip calls with actual BlockNode to match.
+            //
+            // BUT: block_pass (`&:symbol` or `&block`) is NOT a :block wrapper in Parser —
+            // it's a child of the :send node. So `x ||= items.map(&:strip)` IS counted
+            // as A+1 in RuboCop. Only skip when block() is a BlockNode, not BlockArgumentNode.
+            if let Some(block) = call.block() {
+                if block.as_block_node().is_some() {
+                    return 0;
+                }
+            }
+            if !is_setter_method(call.name().as_slice()) {
+                return 1;
+            }
+        }
+        0
     }
 
     fn count_node(&mut self, node: &ruby_prism::Node<'_>) {
@@ -551,20 +588,30 @@ impl AbcCounter {
             // In the Parser gem these are (or_asgn (send :[] ...) v) — the send child counts as
             // a branch, and compound_assignment counts a non-setter send child as an assignment.
             // The ||=/&&= also counts as a condition (or_asgn/and_asgn in CONDITION_NODES).
+            //
+            // RuboCop's compound_assignment counts BOTH children of or_asgn/and_asgn/op_asgn:
+            // 1. Target: (send obj :[] key) — `[]` is not a setter → A+1 from compound_assignment
+            // 2. Value: (send Hash :new) — `new` is not a setter → A+1 from compound_assignment
+            // The target [] A+1 is handled by compound_assignment_extra (which returns +1 for
+            // Index*WriteNode target in addition to the value-side check). The value-side A+1
+            // is also handled there. Neither counts through count_node's assignment field.
+            //
+            // Note: RuboCop's assignment? returns FALSE for shorthand_asgn nodes (the
+            // compound_assignment call replaces the normal counting). So count_node does NOT
+            // add A+1 here — compound_assignment_extra handles ALL assignment counting for
+            // index compound nodes.
             ruby_prism::Node::IndexOrWriteNode { .. }
             | ruby_prism::Node::IndexAndWriteNode { .. } => {
-                // A: assignment from the indexed write
                 // B: implicit [] call (receiver lookup)
                 // C: the ||=/&&= conditional
-                self.assignments += 1;
+                // A: handled entirely by compound_assignment_extra (target[] + value)
                 self.branches += 1;
                 self.conditions += 1;
             }
             ruby_prism::Node::IndexOperatorWriteNode { .. } => {
-                // A: assignment from the indexed write
                 // B: implicit [] call (receiver lookup)
                 // (no condition — op_asgn is not in CONDITION_NODES)
-                self.assignments += 1;
+                // A: handled entirely by compound_assignment_extra (target[] + value)
                 self.branches += 1;
             }
 
@@ -785,10 +832,15 @@ impl AbcCounter {
             // NOT add an extra condition — unlike `if/unless` where `else` does.
             // (RuboCop's else_branch? filters for :case/:if types but case is
             //  never reached since it's not in CONDITION_NODES.)
-            // ForNode counts as BOTH a condition and an assignment (for the loop variable)
+            // ForNode counts as BOTH a condition and an assignment (for the loop variable).
+            // In Parser, `for x in items` is `(for (lvasgn :x) (send nil :items) body)`.
+            // `for_type?` gives A+1, and the child `(lvasgn :x)` also gives A+1 via
+            // `simple_assignment?`. Total A=2 in RuboCop.
+            // In Prism, the index is a `LocalVariableTargetNode` which has no count_node
+            // arm (to avoid double-counting in MultiWriteNode). So we add A=2 here.
             ruby_prism::Node::ForNode { .. } => {
                 self.conditions += 1;
-                self.assignments += 1;
+                self.assignments += 2;
             }
             // WhileNode/UntilNode: only pre-condition loops count.
             // `begin...end while cond` produces :while_post in Parser (NOT in
@@ -1749,6 +1801,90 @@ mod tests {
             "begin..end until: post-condition should NOT count. Got: {}",
             diags[0].message
         );
+    }
+
+    /// Helper to compute ABC counter values for a method body.
+    /// Parses source, finds the first DefNode, and returns (A, B, C).
+    #[cfg(test)]
+    fn abc_counter_for_source(source: &[u8]) -> (usize, usize, usize) {
+        use ruby_prism::Visit;
+        let result = ruby_prism::parse(source);
+        // Find the first DefNode
+        struct DefFinder<'pr> {
+            body: Option<ruby_prism::Node<'pr>>,
+        }
+        impl<'pr> Visit<'pr> for DefFinder<'pr> {
+            fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+                if self.body.is_none() {
+                    self.body = node.body();
+                }
+            }
+        }
+        let mut finder = DefFinder { body: None };
+        finder.visit(&result.node());
+        let body = finder.body.expect("No def node found in source");
+        let mut counter = AbcCounter::new(true);
+        counter.visit(&body);
+        (counter.assignments, counter.branches, counter.conditions)
+    }
+
+    /// Bug 4: compound_assignment_extra skipped block_pass calls.
+    /// `x ||= items.map(&:strip)` — the value `items.map(&:strip)` has block:
+    /// BlockArgumentNode (not BlockNode). Should count as A+1 (non-setter send).
+    #[test]
+    fn compound_extra_block_pass_not_skipped() {
+        // @x ||= items.map(&:strip)
+        // In count_node: B+1 (ivar []) — wait, this is InstanceVariableOrWriteNode
+        // A+1 (assignment), C+1 (||= condition)
+        // compound_assignment_extra: value is map(&:strip), block is BlockArgumentNode
+        // → not skipped → A+1
+        // Visitor: items (B+1), map (B+1)
+        // Total: A=2, B=2, C=1 => sqrt(4+4+1) = 3.0
+        let (a, b, c) = abc_counter_for_source(b"def foo\n  @x ||= items.map(&:strip)\nend\n");
+        // C=2: ||= (condition) + map with block_pass (iterating method condition)
+        assert_eq!(
+            (a, b, c),
+            (2, 2, 2),
+            "block_pass should not block compound_extra"
+        );
+    }
+
+    /// Bug 5: IndexOrWriteNode compound_assignment undercounted.
+    /// In Parser, `@styles[cl] ||= Hash.new` produces (or_asgn (send :[] cl) (send Hash :new)).
+    /// compound_assignment counts BOTH children as A+1 each. Our old code only counted
+    /// the value side, missing the target [] A+1.
+    #[test]
+    fn index_or_write_compound_counts_both_target_and_value() {
+        // @h[k] ||= Foo.new
+        // compound_assignment_extra: target [] → A+1, value Foo.new → A+1
+        // count_node IndexOrWriteNode: B+1 ([]), C+1 (||=)
+        // Visitor visits Foo.new as CallNode → B+1, k as local var → no B
+        // Total: A=2, B=2, C=1 => sqrt(4+4+1) = 3.0
+        let (a, b, c) = abc_counter_for_source(b"def foo\n  k = 1\n  @h[k] ||= Foo.new\nend\n");
+        // k=1 adds A+1, so total A=3 (k + index[] + Foo.new), B=3 ([] + Foo.new + Foo), C=1
+        // Wait — Foo is a ConstantReadNode, not a CallNode. .new is the CallNode.
+        // B: [] (IndexOrWrite) + new (CallNode) = 2
+        // But Foo is ConstantReadNode → no B. The receiver of .new is Foo (const), not a call.
+        // A: k=1 (lvar write) + [] target (compound) + Foo.new (compound value) = 3
+        // C: ||= = 1
+        assert_eq!(a, 3, "A should count k=1, [] target, and Foo.new value");
+        assert_eq!(b, 2, "B should count [] and .new");
+        assert_eq!(c, 1, "C should count ||=");
+    }
+
+    /// Bug 6: ForNode undercounted assignments by 1.
+    /// In Parser, `for x in items` produces (for (lvasgn :x) ...). Both for_type? (A+1)
+    /// and the child lvasgn (A+1) are counted. In Prism, ForNode index is
+    /// LocalVariableTargetNode which has no count_node arm. Fix: A+=2 in ForNode handler.
+    #[test]
+    fn for_loop_counts_double_assignment() {
+        // for x in items; x; end
+        // A=2 (ForNode: for_type A+1 + lvasgn child A+1)
+        // B=1 (items — receiverless call)
+        // C=1 (ForNode condition)
+        let (a, b, c) = abc_counter_for_source(b"def foo\n  for x in items\n    x\n  end\nend\n");
+        assert_eq!(a, 2, "for loop should count A=2 (for_type + lvasgn)");
+        assert_eq!(c, 1, "for loop should count C=1 (condition)");
     }
 
     /// BlockParameterNode in nested def: Prism's visit_parameters_node calls
