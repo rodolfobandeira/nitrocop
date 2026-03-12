@@ -52,3 +52,16 @@ end
 it 'modifier unless' do
   expect(result) unless condition
 end
+# Explicit begin..end without rescue/ensure creates kwbegin in Parser AST.
+# kwbegin is NOT begin_type?, so multi-statement begin..end is NOT void.
+it 'explicit begin multi-stmt' do
+  begin
+    setup
+    expect(result)
+  end
+end
+it 'explicit begin sole stmt' do
+  begin
+    expect(result)
+  end
+end

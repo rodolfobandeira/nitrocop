@@ -42,6 +42,19 @@ use ruby_prism::Visit;
 /// 2. `visit_statements_node` only flags expects in multi-statement contexts (begin_type?)
 ///
 /// Single-statement conditionals/loops are no longer flagged since they don't match either case.
+///
+/// Investigation (12 FP, 0 FN -> 0 FP, 0 FN):
+///
+/// Root cause of 12 FPs: Explicit `begin..end` blocks map to `kwbegin` in Parser AST, NOT
+/// `begin`. RuboCop's `void?` checks `parent.begin_type?` which is false for `kwbegin`. So
+/// multi-statement expects inside explicit `begin..end` (without rescue/ensure) are NOT void.
+/// nitrocop was flagging multi-statement StatementsNodes inside BeginNode as void, but should
+/// only flag when the BeginNode has rescue/ensure (which creates an implicit `begin` wrapper
+/// in Parser AST, where `begin_type?` returns true).
+///
+/// Fix: Added `visit_begin_node` with `pending_begin_body` counter. Only pure `begin..end`
+/// blocks (no rescue/ensure/else) suppress multi-statement void detection. BeginNodes with
+/// rescue/ensure still correctly flag multi-statement bodies.
 pub struct VoidExpect;
 
 /// Matcher methods that chain on expect
@@ -101,6 +114,7 @@ impl Cop for VoidExpect {
             chained_expect_offsets: Vec::new(),
             in_example: 0,
             pending_block_body: 0,
+            pending_begin_body: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -119,6 +133,12 @@ struct VoidExpectVisitor<'a> {
     /// decremented when the first StatementsNode inside it is visited.
     /// Used to distinguish block body StatementsNode from conditional branch StatementsNode.
     pending_block_body: usize,
+    /// Counter for explicit begin..end body depth. Incremented when entering a BeginNode,
+    /// decremented when the first StatementsNode inside it is visited.
+    /// In Parser AST, explicit begin..end creates `kwbegin` (NOT `begin`), and
+    /// `void?` checks `parent.begin_type?` which is false for `kwbegin`. So
+    /// multi-statement expects inside explicit begin..end are NOT void.
+    pending_begin_body: usize,
 }
 
 /// If the node is a DIRECT receiverless `expect` call (NOT wrapped in parentheses),
@@ -268,10 +288,36 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
         ruby_prism::visit_lambda_node(self, node);
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'_>) {
+        // Explicit begin..end blocks map to `kwbegin` in Parser AST.
+        // In RuboCop, void? checks `parent.begin_type?` which is false for kwbegin.
+        // So multi-statement expects inside explicit begin..end are NOT void.
+        //
+        // However, when a begin..end (or block body) has rescue/ensure, Parser wraps
+        // the multi-statement body before rescue/ensure in an implicit `begin` node.
+        // So `begin; a; b; rescue; end` -> the parent of `b` IS `begin` (void).
+        // Only suppress when the BeginNode is a pure begin..end (no rescue/ensure).
+        let is_pure_begin = node.rescue_clause().is_none()
+            && node.ensure_clause().is_none()
+            && node.else_clause().is_none();
+        if is_pure_begin {
+            self.pending_begin_body += 1;
+        }
+        ruby_prism::visit_begin_node(self, node);
+    }
+
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'_>) {
         // Track whether this StatementsNode is a block/lambda body
         let is_block_body = if self.pending_block_body > 0 {
             self.pending_block_body -= 1;
+            true
+        } else {
+            false
+        };
+
+        // Track whether this StatementsNode is an explicit begin..end body
+        let is_begin_body = if self.pending_begin_body > 0 {
+            self.pending_begin_body -= 1;
             true
         } else {
             false
@@ -285,6 +331,8 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
             // RuboCop's void? logic:
             // - parent.begin_type? -> true (multi-statement body in Parser AST)
             //   Maps to: multiple statements in a StatementsNode
+            //   BUT: explicit begin..end creates kwbegin (NOT begin) in Parser,
+            //   so multi-statement begin..end is NOT void.
             // - parent.block_type? && parent.body == expect -> true (sole statement in block)
             //   Handled by visit_block_node/visit_lambda_node above
             // - Single statement in an if/case/etc is NOT void (parent is if/case type)
@@ -293,7 +341,8 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
             // For block bodies with a single statement, visit_block_node already handled it.
             // For block bodies with multiple statements, multi_statement is true.
             // For non-block contexts (if/case/etc), only multi_statement triggers void.
-            if multi_statement {
+            // For explicit begin..end bodies, skip (kwbegin is NOT begin_type? in Parser).
+            if multi_statement && !is_begin_body {
                 for stmt in &stmts {
                     self.check_void_expect_stmt(stmt);
                 }
@@ -311,4 +360,29 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(VoidExpect, "cops/rspec/void_expect");
+
+    #[test]
+    fn explicit_begin_end_not_void() {
+        // In Parser AST, explicit begin..end creates kwbegin (NOT begin).
+        // void? checks parent.begin_type? which is false for kwbegin.
+        // Multi-statement begin..end should NOT be flagged.
+        use crate::testutil::run_cop_full;
+        let cop = VoidExpect;
+
+        let d = run_cop_full(
+            &cop,
+            b"it 'test' do\n  begin\n    setup\n    expect(result)\n  end\nend\n",
+        );
+        assert!(
+            d.is_empty(),
+            "multi-stmt explicit begin..end should not be void: {d:?}"
+        );
+
+        // But begin..end WITH rescue DOES flag (rescue body is begin_type? in Parser)
+        let d = run_cop_full(
+            &cop,
+            b"it 'test' do\n  begin\n    setup\n    expect(result)\n  rescue\n    nil\n  end\nend\n",
+        );
+        assert_eq!(d.len(), 1, "multi-stmt begin..rescue should be void: {d:?}");
+    }
 }
