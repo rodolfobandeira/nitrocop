@@ -6,32 +6,27 @@ use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-11)
 ///
-/// Corpus oracle reported FP=6, FN=5.
-///
 /// Fixed FP=6 and FN=4 with two behavior corrections:
 /// - Top-level `ParenthesesNode` returns are treated as `Opaque`, matching
-///   Parser's `:begin` wrappers. This fixed the corpus FPs where
-///   non-predicate methods returned parenthesized comparisons or boolean
-///   chains, and it also fixed `archive?`, whose final parenthesized `||`
-///   chain should not count as a known boolean return.
-/// - Missing `else` branches in Prism conditionals are no longer synthesized as
-///   literal `nil` returns. On live corpus examples, RuboCop still treats
-///   boolean-only `if`/`elsif` bodies as predicate returns, while the synthetic
-///   `nil` branch produced FNs (`to_boolean`, `jruby` parse helpers) and an FP
-///   for `read_node?`.
+///   Parser's `:begin` wrappers.
 ///
-/// Remaining local verify issue:
-/// - `scripts/verify-cop-locations.py` still shows the `discourse` example as
-///   remaining, but local nitrocop now flags the same `invite` method at line
-///   1276 while the CI oracle example points to line 1282. The local
-///   `vendor/corpus/discourse__discourse__9c8f125` checkout is at
-///   `a135e21d...`, not the manifest SHA `9c8f125f...`, so this is local
-///   corpus line drift rather than current cop logic.
+/// ## Corpus investigation (2026-03-13)
 ///
-/// `check-cop.py --rerun` remains count-only and is still noisy here because
-/// `--corpus-check` includes file-drop adjustments from a `jruby` parser-crash
-/// repo. Use `verify-cop-locations.py` plus the final `bench_nitrocop -- conform`
-/// gate for department completion.
+/// Corpus oracle reported FP=137, FN=51.
+///
+/// Root cause: RuboCop's `extract_conditional_branches` synthesizes `s(:nil)`
+/// for conditionals without an else branch (`branches.push(s(:nil)) unless
+/// node.else_branch`). Our code was not doing this, causing methods like
+/// `def foo; true if bar; end` to appear all-boolean (returns=[true]) when
+/// RuboCop sees (returns=[true, nil]) and does NOT flag them.
+///
+/// Fix: push `NonBooleanLiteral` (representing implicit nil) when IfNode,
+/// UnlessNode, CaseNode, or CaseMatchNode has no else branch. This matches
+/// RuboCop's behavior exactly.
+///
+/// Previous doc comment said nil synthesis was removed because it "produced
+/// FNs". That analysis was wrong — RuboCop clearly does synthesize nil.
+/// The FP=137 was a direct consequence of not doing so.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
@@ -427,6 +422,10 @@ fn collect_implicit_return(
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
+        } else {
+            // Missing else branch: implicit nil return (matches RuboCop's
+            // `branches.push(s(:nil)) unless node.else_branch`)
+            returns.push(ReturnType::NonBooleanLiteral);
         }
         return;
     }
@@ -455,6 +454,9 @@ fn collect_implicit_return(
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
+        } else {
+            // Missing else branch: implicit nil return
+            returns.push(ReturnType::NonBooleanLiteral);
         }
         return;
     }
@@ -486,6 +488,9 @@ fn collect_implicit_return(
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
+        } else {
+            // Missing else branch: implicit nil return
+            returns.push(ReturnType::NonBooleanLiteral);
         }
         return;
     }
@@ -517,6 +522,9 @@ fn collect_implicit_return(
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
+        } else {
+            // Missing else branch: implicit nil return
+            returns.push(ReturnType::NonBooleanLiteral);
         }
         return;
     }

@@ -107,20 +107,34 @@ def self.auto_bump_topic!
   Category.shuffle.any?(&:auto_bump_topic!)
 end
 
-# If/elsif boolean chain with no final else still counts as predicate
-def to_boolean
-    ^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
-  if ["true", true].include? value
-    true
-  elsif ["false", false].include? value
-    false
-  end
-end
-
 # Predicate name with explicit nil return and parenthesized boolean expression
 def archive?(filename)
     ^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
   return nil unless filename
   archive_type = get_archive_type(filename)
   (archive_type.include?("tar") || archive_type.include?("gzip") || archive_type.include?("zip"))
+end
+
+# Predicate with modifier-if assignment and no else — implicit nil is non-boolean literal
+def valid_event_payload?
+    ^^^^^^^^^^^^^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
+  @channel = Channel::Line.find_by(line_channel_id: @params[:line_channel_id]) if @params[:line_channel_id]
+end
+
+# Predicate with opaque branch value and no else — implicit nil is non-boolean literal
+def instance_type?(type)
+    ^^^^^^^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
+  if type.is_a?(Types::Name::Instance)
+    type
+  end
+end
+
+# If/elsif with yields and no final else — implicit nil is non-boolean literal
+def read_node?(node, block_pass)
+    ^^^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
+  if block_pass.any?
+    yield(node)
+  elsif file_open_read?(node.parent)
+    yield(node.parent)
+  end
 end
