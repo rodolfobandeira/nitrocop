@@ -26,3 +26,9 @@ end
 var.class.name == "String#{interpolation}"
 var.class.to_s == "#{some_class}"
 var.class.name == "#{mod}::#{cls}"
+
+# Safe navigation &.class — RuboCop skips these since instance_of? doesn't preserve nil-safety
+foo&.class == Bar
+obj&.class == Ticket
+e&.class&.to_s == "Errno::EACCES"
+saved_only&.class == Ticket && attribute[:name] == 'owner_id'

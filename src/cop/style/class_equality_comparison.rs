@@ -14,16 +14,16 @@ use ruby_prism::Visit;
 ///
 /// ## Corpus investigation (2026-03-12)
 ///
-/// Corpus oracle reported FP=3, FN=0.
+/// Corpus oracle reported FP=3, FN=0. All 3 FPs used `&.class` (safe navigation
+/// on the `.class` call itself). RuboCop skips these because `instance_of?` doesn't
+/// preserve nil-safety semantics.
 ///
-/// Attempted fix: require the matched `.class` and optional `.name` / `.to_s` /
-/// `.inspect` calls to use plain `.` rather than `&.`.
-/// Acceptance gate before: expected=526, actual=516, excess=0, missing=10.
-/// Acceptance gate after: expected=526, actual=513, excess=0, missing=13.
-/// Reverted because the change removed the 3 target false positives but also
-/// dropped 3 additional true positives on the current local corpus rerun.
-/// A correct fix needs a narrower distinction than simply checking the matched
-/// call operators for `&.`.
+/// First attempt (reverted): checked all call operators for `&.`, which was too
+/// broad and dropped 3 true positives alongside the 3 FPs.
+///
+/// Fix: only skip when the `.class` call itself uses `&.` — not when intermediate
+/// calls like `.name` or `.to_s` use `&.`. This preserves true positives like
+/// `foo.class&.name == "Bar"` while correctly skipping `foo&.class == Bar`.
 pub struct ClassEqualityComparison;
 
 impl Cop for ClassEqualityComparison {
@@ -98,6 +98,12 @@ impl<'a, 'pr> Visit<'pr> for ClassEqVisitor<'a> {
             // Receiver must be a `.class` call or `.class.name` call
             if let Some(receiver) = node.receiver() {
                 if let Some(recv_call) = receiver.as_call_node() {
+                    // Helper: check if a call node uses safe navigation (&.)
+                    let is_safe_nav = |c: &ruby_prism::CallNode<'_>| {
+                        c.call_operator_loc()
+                            .is_some_and(|op| op.as_slice() == b"&.")
+                    };
+
                     let is_class_call = recv_call.name().as_slice() == b"class";
                     let is_class_name_call = if !is_class_call {
                         let name = recv_call.name().as_slice();
@@ -112,6 +118,24 @@ impl<'a, 'pr> Visit<'pr> for ClassEqVisitor<'a> {
                     } else {
                         false
                     };
+
+                    // Skip if .class uses safe navigation (&.class) — RuboCop
+                    // doesn't flag these since instance_of? doesn't preserve
+                    // nil-safety semantics.
+                    if is_class_call && is_safe_nav(&recv_call) {
+                        ruby_prism::visit_call_node(self, node);
+                        return;
+                    }
+                    if is_class_name_call {
+                        if let Some(class_node) =
+                            recv_call.receiver().and_then(|ir| ir.as_call_node())
+                        {
+                            if is_safe_nav(&class_node) {
+                                ruby_prism::visit_call_node(self, node);
+                                return;
+                            }
+                        }
+                    }
 
                     if is_class_call || is_class_name_call {
                         // Check AllowedPatterns against the enclosing def name (like RuboCop)
