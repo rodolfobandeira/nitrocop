@@ -10,3 +10,8 @@ str.match(%r{=foo})
 # %r with inner slashes is always fine (even in 'slashes' style)
 %r{foo/bar}
 /foo/
+# Slashes inside interpolation should not count as inner slashes
+/#{Regexp.quote(">" + content + "</")}/
+/#{path + "/" + file}/
+/#{a}/
+/prefix#{"/middle"}/

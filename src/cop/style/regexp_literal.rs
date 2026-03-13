@@ -3,6 +3,11 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FP fix (2026-03): slashes inside `#{}` interpolation segments were wrongly
+/// counted as inner slashes, causing false "Use %r" suggestions on regexps like
+/// `/#{Regexp.quote("</")}/ `. RuboCop's `node_body` only examines `:str` children,
+/// so interpolation content is excluded. Fixed by iterating over Prism's `parts()`
+/// and only collecting `StringNode` content for the slash check.
 pub struct RegexpLiteral;
 
 impl Cop for RegexpLiteral {
@@ -42,18 +47,17 @@ impl Cop for RegexpLiteral {
                 )
             } else if let Some(re) = node.as_interpolated_regular_expression_node() {
                 let opening = re.opening_loc();
-                let closing = re.closing_loc();
                 let loc = re.location();
                 let open = opening.as_slice();
-                // Content is between opening and closing delimiters
-                let content_start = opening.end_offset() - loc.start_offset();
-                let content_end = closing.start_offset() - loc.start_offset();
-                let full = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
-                let content = if content_end > content_start {
-                    full[content_start..content_end].to_vec()
-                } else {
-                    Vec::new()
-                };
+                // Only collect content from string literal parts, skipping interpolation.
+                // RuboCop's `node_body` only examines `:str` children, so slashes
+                // inside `#{}` interpolation are not counted as inner slashes.
+                let mut content = Vec::new();
+                for part in re.parts().iter() {
+                    if let Some(s) = part.as_string_node() {
+                        content.extend_from_slice(s.location().as_slice());
+                    }
+                }
                 (open.to_vec(), content, loc.start_offset(), loc.end_offset())
             } else {
                 return;
