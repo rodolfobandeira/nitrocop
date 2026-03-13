@@ -1,7 +1,14 @@
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
+use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// Style/BlockComments: Do not use block comments (`=begin`/`=end`).
+///
+/// Investigation: 19 FPs were caused by `=begin` appearing inside heredoc
+/// strings (e.g., test files for rdoc/yard/coderay parsers). Fixed by
+/// switching from `check_lines` to `check_source` to access the CodeMap
+/// and skip `=begin` lines that fall within heredoc byte ranges.
 pub struct BlockComments;
 
 impl Cop for BlockComments {
@@ -9,9 +16,11 @@ impl Cop for BlockComments {
         "Style/BlockComments"
     }
 
-    fn check_lines(
+    fn check_source(
         &self,
         source: &SourceFile,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        code_map: &CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -19,6 +28,12 @@ impl Cop for BlockComments {
         for (i, line) in source.lines().enumerate() {
             // =begin must be at the start of a line
             if line.starts_with(b"=begin") && (line.len() == 6 || line[6].is_ascii_whitespace()) {
+                // Skip =begin inside heredocs (e.g., test files for rdoc/yard)
+                if let Some(offset) = source.line_col_to_offset(i + 1, 0) {
+                    if code_map.is_heredoc(offset) {
+                        continue;
+                    }
+                }
                 diagnostics.push(self.diagnostic(
                     source,
                     i + 1,
