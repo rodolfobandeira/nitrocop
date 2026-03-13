@@ -207,7 +207,7 @@ def _try_curl_api(repo: str | None) -> tuple[Path, int, str] | None:
             result = subprocess.run(
                 ["gh", "auth", "token"], capture_output=True, text=True, timeout=5
             )
-            if result.returncode == 0 and result.stdout.strip():
+            if result.stdout.strip():
                 token = result.stdout.strip()
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
