@@ -7,3 +7,9 @@ u = 0o777
 t = 0xDEADBEEF
 s = 123
 r = 1
+# Implicit octal literals (leading 0) should not be flagged
+a = 00644
+b = 00444
+c = 02744
+d = 00744
+e = 0100644

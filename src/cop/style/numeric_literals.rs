@@ -3,6 +3,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// FP fix: implicit octal literals (leading `0` followed by digits, e.g. `00644`, `02744`)
+/// were flagged for missing underscores. RuboCop exempts all non-decimal bases including
+/// implicit octals. 199/404 FPs were from puppet's acceptance tests with file permission modes.
+/// Other FP repos: jruby (98), ffi (30), peritor (27), natalie (20).
 pub struct NumericLiterals;
 
 /// Check if a numeric string has underscores at every 3-digit grouping from the right.
@@ -63,7 +67,9 @@ impl Cop for NumericLiterals {
 
         let text = std::str::from_utf8(source_text).unwrap_or("");
 
-        // Skip non-decimal literals (0x, 0b, 0o, 0d prefixed)
+        // Skip non-decimal literals:
+        // - Explicit prefixes: 0x (hex), 0b (binary), 0o (octal), 0d (decimal)
+        // - Implicit octal: leading 0 followed by digits (e.g., 00644, 02744)
         if text.starts_with("0x")
             || text.starts_with("0X")
             || text.starts_with("0b")
@@ -73,6 +79,11 @@ impl Cop for NumericLiterals {
             || text.starts_with("0d")
             || text.starts_with("0D")
         {
+            return;
+        }
+
+        // Skip implicit octal literals (leading 0 followed by at least one digit)
+        if text.starts_with('0') && text.len() > 1 && text.as_bytes()[1].is_ascii_digit() {
             return;
         }
 
