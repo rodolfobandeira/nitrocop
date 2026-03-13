@@ -33,3 +33,11 @@ $global_var_1 += 10
 @@class_var_2 ||= nil
 ^^^^^^^^^^^^^ Naming/VariableNumber: Use normalcase for variable numbers.
 
+# Sigiled variables with implicit-param-like names are NOT implicit params
+# RuboCop's \A_\d+\z regex checks the full name including sigil
+@_1 = 1
+^^^ Naming/VariableNumber: Use normalcase for variable numbers.
+@@_1 = 1
+^^^^ Naming/VariableNumber: Use normalcase for variable numbers.
+$_1 = 1
+^^^ Naming/VariableNumber: Use normalcase for variable numbers.

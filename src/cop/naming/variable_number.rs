@@ -42,21 +42,15 @@ use crate::parse::source::SourceFile;
 /// given 16,625 matches with 99.99% match rate. Local `check-cop.py --rerun`
 /// needed to confirm.
 ///
-/// ## Corpus rerun (2026-03-11)
+/// ## Corpus fix (2026-03-13)
 ///
-/// Local acceptance gate `python3 scripts/check-cop.py Naming/VariableNumber
-/// --verbose --rerun` matched RuboCop exactly (0 FP, 0 FN), confirming the
-/// oracle's single FN row was stale artifact noise.
-///
-/// Investigation notes:
-/// - The reported `hexapdf` FN points at a hash literal line with no numbered
-///   identifiers, so there is no live cop repro to fix.
-/// - The local `hexapdf` corpus checkout matches the manifest SHA
-///   `f1176c6413df266cd07e27c17aa76e6264bd86dc`, so this row is stale oracle
-///   data rather than local repo drift.
-/// - The batch gate still prints a large raw delta because
-///   `--corpus-check` includes 1,285 file-drop offenses from a `jruby` parser
-///   crash repo; the RuboCop-aligned comparison is exact.
+/// Corpus oracle reported FN=1 (confirmed fresh, not stale). Root cause:
+/// the implicit-param exemption (`_1`, `_2`, etc.) was applied after sigil
+/// stripping, so `@_1`, `@@_1`, `$_1` were incorrectly exempted. RuboCop's
+/// `\A_\d+\z` implicit_param regex is applied to the FULL name including
+/// sigils (`@_1` starts with `@`, not `_`, so it doesn't match). Fix: only
+/// apply the implicit-param exemption to bare names (local variables and
+/// parameters), not to sigiled variables.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -181,10 +175,17 @@ impl Cop for VariableNumber {
             let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
             // Strip sigils: @@ for class vars, @ for instance vars, $ for globals
             let bare = name_str.trim_start_matches('@').trim_start_matches('$');
+            let is_bare = bare.len() == name_str.len(); // no sigil stripped
             if !is_allowed(bare, &allowed_ids, &allowed_pats) {
-                if let Some(diag) =
-                    check_number_style(self, source, bare, &loc, enforced_style, "variable")
-                {
+                if let Some(diag) = check_number_style(
+                    self,
+                    source,
+                    bare,
+                    &loc,
+                    enforced_style,
+                    "variable",
+                    is_bare,
+                ) {
                     diagnostics.push(diag);
                 }
             }
@@ -204,6 +205,7 @@ impl Cop for VariableNumber {
                         &def_node.name_loc(),
                         enforced_style,
                         "method name",
+                        true,
                     ) {
                         diagnostics.push(diag);
                     }
@@ -224,9 +226,15 @@ impl Cop for VariableNumber {
                         Some(vloc) if !vloc.as_slice().is_empty() => vloc,
                         _ => sym.location(),
                     };
-                    if let Some(diag) =
-                        check_number_style(self, source, name_str, &loc, enforced_style, "symbol")
-                    {
+                    if let Some(diag) = check_number_style(
+                        self,
+                        source,
+                        name_str,
+                        &loc,
+                        enforced_style,
+                        "symbol",
+                        true,
+                    ) {
                         diagnostics.push(diag);
                     }
                 }
@@ -245,6 +253,7 @@ impl Cop for VariableNumber {
                     &param.location(),
                     enforced_style,
                     "variable",
+                    true,
                 ) {
                     diagnostics.push(diag);
                 }
@@ -274,6 +283,7 @@ fn check_number_style(
     loc: &ruby_prism::Location<'_>,
     enforced_style: &str,
     identifier_type: &str,
+    is_bare_name: bool,
 ) -> Option<Diagnostic> {
     // Find if name contains digits.
     // Empty names (e.g. `:""`  empty-string symbol) are skipped — RuboCop's
@@ -283,8 +293,11 @@ fn check_number_style(
         return None;
     }
 
-    // Implicit params like _1, _2 are always allowed
-    if name.starts_with('_') && name[1..].bytes().all(|b| b.is_ascii_digit()) {
+    // Implicit params like _1, _2 are always allowed, but only for bare names
+    // (local variables, parameters). Instance/class/global variables like @_1
+    // are NOT implicit params — RuboCop's regex checks the full name including
+    // sigil, so \A_\d+\z won't match @_1.
+    if is_bare_name && name.starts_with('_') && name[1..].bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
 
@@ -385,6 +398,33 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(VariableNumber, "cops/naming/variable_number");
+
+    #[test]
+    fn instance_var_implicit_param_name_is_offense() {
+        // RuboCop's implicit_param regex (\A_\d+\z) only matches bare _1, not @_1.
+        // So @_1 should be flagged as an offense in normalcase.
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"@_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected @_1 to be flagged");
+    }
+
+    #[test]
+    fn class_var_implicit_param_name_is_offense() {
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"@@_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected @@_1 to be flagged");
+    }
+
+    #[test]
+    fn global_var_implicit_param_name_is_offense() {
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"$_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected $_1 to be flagged");
+    }
+
+    #[test]
+    fn local_var_implicit_param_is_no_offense() {
+        // Bare _1 is an implicit param and should NOT be flagged
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"_1 = 1\n");
+        assert_eq!(diags.len(), 0, "expected _1 to NOT be flagged");
+    }
 
     #[test]
     fn empty_string_symbol_is_not_offense() {
