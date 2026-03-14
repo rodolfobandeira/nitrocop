@@ -1,8 +1,16 @@
-use crate::cop::node_type::{CASE_NODE, WHEN_NODE};
+use crate::cop::node_type::{CASE_MATCH_NODE, CASE_NODE, WHEN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Investigation findings:
+/// - **FN root cause (109 FNs):** Cop only handled `CaseNode` (case/when) but not
+///   `CaseMatchNode` (case/in pattern matching, Ruby 3.0+). Prism uses separate node
+///   types: `CaseNode` for `case/when` and `CaseMatchNode` for `case/in`.
+/// - **Fix:** Added `CASE_MATCH_NODE` to `interested_node_types` and handle `InNode`
+///   conditions with `.in_loc()` for the `in` keyword location, using `in` instead of
+///   `when` in diagnostic messages.
+/// - **FP (4):** Small count from jruby/natalie edge cases, not addressed here.
 pub struct CaseIndentation;
 
 impl Cop for CaseIndentation {
@@ -11,7 +19,7 @@ impl Cop for CaseIndentation {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CASE_NODE, WHEN_NODE]
+        &[CASE_NODE, CASE_MATCH_NODE, WHEN_NODE]
     }
 
     fn check_node(
@@ -26,46 +34,83 @@ impl Cop for CaseIndentation {
         let style = config.get_str("EnforcedStyle", "case");
         let indent_one_step = config.get_bool("IndentOneStep", false);
         let indent_width = config.get_usize("IndentationWidth", 2);
-        let case_node = match node.as_case_node() {
-            Some(c) => c,
-            None => return,
-        };
 
-        let case_loc = case_node.case_keyword_loc();
-        let (_, case_col) = source.offset_to_line_col(case_loc.start_offset());
+        // Handle both CaseNode (case/when) and CaseMatchNode (case/in pattern matching)
+        if let Some(case_node) = node.as_case_node() {
+            let case_loc = case_node.case_keyword_loc();
+            let (_, case_col) = source.offset_to_line_col(case_loc.start_offset());
 
-        // EnforcedStyle "end": align `when` with `end` keyword
-        // EnforcedStyle "case" (default): align `when` with `case` keyword
-        let base_col = if style == "end" {
-            source
-                .offset_to_line_col(case_node.end_keyword_loc().start_offset())
-                .1
-        } else {
-            case_col
-        };
+            let base_col = if style == "end" {
+                source
+                    .offset_to_line_col(case_node.end_keyword_loc().start_offset())
+                    .1
+            } else {
+                case_col
+            };
 
-        // When IndentOneStep is true, `when` should be indented one step from the base
-        let expected_col = if indent_one_step {
-            base_col + indent_width
-        } else {
-            base_col
-        };
+            let expected_col = if indent_one_step {
+                base_col + indent_width
+            } else {
+                base_col
+            };
 
-        let message = if indent_one_step {
-            "Indent `when` one step more than `case`.".to_string()
-        } else if style == "end" {
-            "Indent `when` as deep as `end`.".to_string()
-        } else {
-            "Indent `when` as deep as `case`.".to_string()
-        };
+            let message = if indent_one_step {
+                "Indent `when` one step more than `case`.".to_string()
+            } else if style == "end" {
+                "Indent `when` as deep as `end`.".to_string()
+            } else {
+                "Indent `when` as deep as `case`.".to_string()
+            };
 
-        for condition in case_node.conditions().iter() {
-            if let Some(when_node) = condition.as_when_node() {
-                let when_loc = when_node.keyword_loc();
-                let (when_line, when_col) = source.offset_to_line_col(when_loc.start_offset());
+            for condition in case_node.conditions().iter() {
+                if let Some(when_node) = condition.as_when_node() {
+                    let when_loc = when_node.keyword_loc();
+                    let (when_line, when_col) = source.offset_to_line_col(when_loc.start_offset());
 
-                if when_col != expected_col {
-                    diagnostics.push(self.diagnostic(source, when_line, when_col, message.clone()));
+                    if when_col != expected_col {
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            when_line,
+                            when_col,
+                            message.clone(),
+                        ));
+                    }
+                }
+            }
+        } else if let Some(case_match_node) = node.as_case_match_node() {
+            let case_loc = case_match_node.case_keyword_loc();
+            let (_, case_col) = source.offset_to_line_col(case_loc.start_offset());
+
+            let base_col = if style == "end" {
+                source
+                    .offset_to_line_col(case_match_node.end_keyword_loc().start_offset())
+                    .1
+            } else {
+                case_col
+            };
+
+            let expected_col = if indent_one_step {
+                base_col + indent_width
+            } else {
+                base_col
+            };
+
+            let message = if indent_one_step {
+                "Indent `in` one step more than `case`.".to_string()
+            } else if style == "end" {
+                "Indent `in` as deep as `end`.".to_string()
+            } else {
+                "Indent `in` as deep as `case`.".to_string()
+            };
+
+            for condition in case_match_node.conditions().iter() {
+                if let Some(in_node) = condition.as_in_node() {
+                    let in_loc = in_node.in_loc();
+                    let (in_line, in_col) = source.offset_to_line_col(in_loc.start_offset());
+
+                    if in_col != expected_col {
+                        diagnostics.push(self.diagnostic(source, in_line, in_col, message.clone()));
+                    }
                 }
             }
         }
