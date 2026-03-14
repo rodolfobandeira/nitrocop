@@ -189,37 +189,27 @@ def enabled
   status == :ok
 end
 
-# Parenthesized top-level comparisons are wrapped as :begin in Parser
-def color_contrast(color)
-  _, bright = find_color_diff 0x000000, color
-  (bright > 128)
+# If/elsif with yields and no final else — yield is call_type? in RuboCop,
+# so conservative mode treats method as acceptable (unknown return type)
+def read_node?(node, block_pass)
+  if block_pass.any?
+    yield(node)
+  elsif file_open_read?(node.parent)
+    yield(node.parent)
+  end
 end
 
-# Parenthesized top-level boolean chains are also wrapped as :begin
-def check_both
-  (x.present? && y.present?)
-end
-
-def check_either
-  (a > b || c < d)
-end
-
-def check_not
-  (!disabled?)
+# Predicate name with explicit nil return and parenthesized boolean body —
+# in conservative mode, if any return value is boolean, the name is acceptable
+def archive?(filename)
+  return nil unless filename
+  archive_type = get_archive_type(filename)
+  (archive_type.include?("tar") || archive_type.include?("gzip") || archive_type.include?("zip"))
 end
 
 # If with boolean return and no else — implicit nil makes it not all-boolean
 def has_feature
   true if condition
-end
-
-# If/elsif returning booleans but no else — implicit nil
-def to_boolean
-  if ["true", true].include? value
-    true
-  elsif ["false", false].include? value
-    false
-  end
 end
 
 # Unless with boolean return and no else — implicit nil

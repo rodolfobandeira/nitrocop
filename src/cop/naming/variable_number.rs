@@ -51,6 +51,17 @@ use crate::parse::source::SourceFile;
 /// sigils (`@_1` starts with `@`, not `_`, so it doesn't match). Fix: only
 /// apply the implicit-param exemption to bare names (local variables and
 /// parameters), not to sigiled variables.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=0, FN=1 on hexapdf test_serializer.rb:101.
+/// The offense is on `"":` (empty string hash key). With TargetRubyVersion: 4.0
+/// (the corpus baseline), Parser gem treats `"":` as a `:sym` node instead of
+/// `:dsym`, causing RuboCop's `on_sym` to fire. With default Ruby version,
+/// it's `:dsym` and the cop skips it. Prism always creates a SymbolNode with
+/// empty `unescaped()`, which our code correctly skips. Fixing this would
+/// require special-casing TargetRubyVersion-dependent parsing behavior for a
+/// single edge case. Given 15,524 matches at 99.99%, deferred.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[

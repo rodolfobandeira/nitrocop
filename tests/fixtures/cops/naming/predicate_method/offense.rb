@@ -107,14 +107,6 @@ def self.auto_bump_topic!
   Category.shuffle.any?(&:auto_bump_topic!)
 end
 
-# Predicate name with explicit nil return and parenthesized boolean expression
-def archive?(filename)
-    ^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
-  return nil unless filename
-  archive_type = get_archive_type(filename)
-  (archive_type.include?("tar") || archive_type.include?("gzip") || archive_type.include?("zip"))
-end
-
 # Predicate with modifier-if assignment and no else — implicit nil is non-boolean literal
 def valid_event_payload?
     ^^^^^^^^^^^^^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
@@ -129,12 +121,52 @@ def instance_type?(type)
   end
 end
 
-# If/elsif with yields and no final else — implicit nil is non-boolean literal
-def read_node?(node, block_pass)
-    ^^^^^^^^^^ Naming/PredicateMethod: Non-predicate method names should not end with `?`.
-  if block_pass.any?
-    yield(node)
-  elsif file_open_read?(node.parent)
-    yield(node.parent)
+# Method returning parenthesized comparison should end with ?
+def success_from(response)
+    ^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (response[:response_code] == '0')
+end
+
+# Method returning parenthesized negation should end with ?
+def no_errors(response)
+    ^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (!response['error'])
+end
+
+# Method returning parenthesized boolean chain should end with ?
+def check_both
+    ^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (x.present? && y.present?)
+end
+
+# Method returning parenthesized or-chain should end with ?
+def check_either
+    ^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (a > b || c < d)
+end
+
+# Method returning parenthesized negation of predicate should end with ?
+def check_not
+    ^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  (!disabled?)
+end
+
+# Method returning parenthesized comparison (multi-statement body) should end with ?
+def color_contrast(color)
+    ^^^^^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  _, bright = find_color_diff 0x000000, color
+  (bright > 128)
+end
+
+# If/elsif returning booleans but no else — RuboCop's IfNode#branches
+# flattens elsif chains but EXCLUDES nil for missing else on inner elsifs,
+# and extract_conditional_branches only pushes nil if node.else_branch is nil
+# (which it isn't when there's an elsif, since elsif IS the else_branch).
+def to_boolean
+    ^^^^^^^^^^ Naming/PredicateMethod: Predicate method names should end with `?`.
+  if ["true", true].include? value
+    true
+  elsif ["false", false].include? value
+    false
   end
 end

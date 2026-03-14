@@ -27,6 +27,31 @@ use crate::parse::source::SourceFile;
 /// Previous doc comment said nil synthesis was removed because it "produced
 /// FNs". That analysis was wrong — RuboCop clearly does synthesize nil.
 /// The FP=137 was a direct consequence of not doing so.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=1, FN=19. All verified fixed.
+///
+/// FP=1: `read_node?` method containing `yield` calls. RuboCop treats
+/// `:yield` as `call_type?`, so conservative mode skips it. Our code was
+/// classifying YieldNode as Opaque instead of Unknown.
+/// Fix: classify YieldNode as Unknown in `classify_node`.
+///
+/// FN=15 (parenthesized expressions): Methods returning `(x == y)` etc.
+/// RuboCop's `return_values` unwraps `:begin` (from parens) via `begin_type?`
+/// check, exposing the inner boolean expression. Our code treated
+/// ParenthesesNode as Opaque at ALL levels. Fix: unwrap ParenthesesNode in
+/// `collect_implicit_return` (method body level) while keeping it Opaque in
+/// `collect_and_or_leaves` (leaf level in ||/&& chains).
+///
+/// FN=4 (if/elsif without else): Methods like `if c1; true; elsif c2; false; end`.
+/// RuboCop's `IfNode#branches` flattens elsif chains but EXCLUDES nil for the
+/// missing else on inner elsifs (`!else?` returns `[if_branch]` only). And
+/// `extract_conditional_branches` only pushes nil based on the OUTER if's
+/// `else_branch`, which is the elsif node (truthy). So nil is NOT pushed for
+/// `if/elsif/end` chains, making all-boolean branches an offense.
+/// Fix: iterate through if/elsif chain instead of recursing, push nil only
+/// when top-level if has no subsequent.
 pub struct PredicateMethod;
 
 const MSG_PREDICATE: &str = "Predicate method names should end with `?`.";
@@ -371,12 +396,18 @@ fn collect_implicit_return(
         return;
     }
 
-    // ParenthesesNode -- treat as Opaque. In Parser gem, top-level parenthesized
-    // expressions become :begin wrappers, and PredicateMethod does not unwrap
-    // those :begin nodes before boolean/non-boolean classification.
+    // ParenthesesNode -- unwrap and recurse into body. In Parser gem,
+    // parenthesized expressions become :begin nodes. RuboCop's `return_values`
+    // and `last_value` check `begin_type?` and take the last child, effectively
+    // unwrapping the parentheses at method-body level. Note: in `collect_and_or_leaves`
+    // and `classify_node`, ParenthesesNode is still treated as Opaque because
+    // RuboCop's `extract_and_or_clauses` and `boolean_return?` do NOT unwrap :begin.
     if let Some(paren) = node.as_parentheses_node() {
-        let _ = paren;
-        returns.push(ReturnType::Opaque);
+        if let Some(body) = paren.body() {
+            collect_implicit_return(&body, returns, wayward);
+        } else {
+            returns.push(ReturnType::NonBooleanLiteral); // empty parens = nil
+        }
         return;
     }
 
@@ -392,39 +423,62 @@ fn collect_implicit_return(
         return;
     }
 
-    // IfNode -- recurse into branches
+    // IfNode -- iterate through if/elsif chain, collecting branch values.
+    // Matches RuboCop's extract_conditional_branches which uses node.branches
+    // (a flat list excluding nil for missing else on inner elsifs) plus
+    // `branches.push(s(:nil)) unless node.else_branch`. Since node.else_branch
+    // returns the elsif node (truthy) when there's an elsif, nil is NOT pushed
+    // for `if/elsif/end` chains — only for plain `if/end` with no subsequent.
     if let Some(if_node) = node.as_if_node() {
-        if let Some(stmts) = if_node.statements() {
-            let body: Vec<_> = stmts.body().iter().collect();
-            if let Some(last) = body.last() {
-                collect_implicit_return(last, returns, wayward);
-            } else {
-                returns.push(ReturnType::NonBooleanLiteral);
-            }
-        } else {
-            returns.push(ReturnType::NonBooleanLiteral);
-        }
+        let top_has_subsequent = if_node.subsequent().is_some();
+        let mut current: Option<ruby_prism::IfNode<'_>> = Some(if_node);
+        let mut has_final_else = false;
 
-        if let Some(subsequent) = if_node.subsequent() {
-            if let Some(elsif) = subsequent.as_if_node() {
-                collect_implicit_return(&elsif.as_node(), returns, wayward);
-            } else if let Some(else_node) = subsequent.as_else_node() {
-                if let Some(stmts) = else_node.statements() {
-                    let body: Vec<_> = stmts.body().iter().collect();
-                    if let Some(last) = body.last() {
-                        collect_implicit_return(last, returns, wayward);
-                    } else {
-                        returns.push(ReturnType::NonBooleanLiteral);
-                    }
+        while let Some(current_if) = current {
+            // Collect from the if/elsif's then-branch
+            if let Some(stmts) = current_if.statements() {
+                let body: Vec<_> = stmts.body().iter().collect();
+                if let Some(last) = body.last() {
+                    collect_implicit_return(last, returns, wayward);
                 } else {
                     returns.push(ReturnType::NonBooleanLiteral);
                 }
             } else {
                 returns.push(ReturnType::NonBooleanLiteral);
             }
-        } else {
-            // Missing else branch: implicit nil return (matches RuboCop's
-            // `branches.push(s(:nil)) unless node.else_branch`)
+
+            // Advance to next in chain
+            match current_if.subsequent() {
+                Some(sub) => {
+                    if let Some(next_if) = sub.as_if_node() {
+                        current = Some(next_if);
+                    } else if let Some(else_node) = sub.as_else_node() {
+                        has_final_else = true;
+                        if let Some(stmts) = else_node.statements() {
+                            let body: Vec<_> = stmts.body().iter().collect();
+                            if let Some(last) = body.last() {
+                                collect_implicit_return(last, returns, wayward);
+                            } else {
+                                returns.push(ReturnType::NonBooleanLiteral);
+                            }
+                        } else {
+                            returns.push(ReturnType::NonBooleanLiteral);
+                        }
+                        current = None;
+                    } else {
+                        current = None;
+                    }
+                }
+                None => {
+                    current = None;
+                }
+            }
+        }
+
+        // Push nil for missing else ONLY if the top-level if has no subsequent.
+        // When there's an elsif, RuboCop's node.else_branch returns the elsif
+        // node (truthy), so nil is NOT pushed — matching RuboCop's behavior.
+        if !has_final_else && !top_has_subsequent {
             returns.push(ReturnType::NonBooleanLiteral);
         }
         return;
@@ -733,7 +787,14 @@ fn classify_node(node: &ruby_prism::Node<'_>, wayward: &[String]) -> ReturnType 
         return ReturnType::Opaque;
     }
 
-    // Everything else (variables, constants, yield, etc.)
+    // YieldNode — yield IS call_type? in RuboCop (CALL_TYPES includes :yield),
+    // so it triggers the conservative-mode acceptable? check. Classify as Unknown
+    // to match RuboCop behavior.
+    if node.as_yield_node().is_some() {
+        return ReturnType::Unknown;
+    }
+
+    // Everything else (variables, constants, etc.)
     // Not call_type? in RuboCop, so should NOT trigger conservative skip.
     ReturnType::Opaque
 }
@@ -743,4 +804,34 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(PredicateMethod, "cops/naming/predicate_method");
+
+    #[test]
+    fn if_elsif_no_else_all_boolean_is_offense() {
+        // RuboCop's IfNode#branches excludes nil for missing else on inner elsifs.
+        // So if/elsif/end with all-boolean branches IS an offense.
+        let code =
+            b"def to_boolean(value)\n  if cond1\n    true\n  elsif cond2\n    false\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&PredicateMethod, code);
+        assert_eq!(diags.len(), 1, "if/elsif/end all-boolean should be offense");
+    }
+
+    #[test]
+    fn if_no_else_boolean_is_no_offense() {
+        // Simple if/end with boolean and implicit nil → NOT all boolean
+        let code = b"def has_feature\n  true if condition\nend\n";
+        let diags = crate::testutil::run_cop_full(&PredicateMethod, code);
+        assert_eq!(
+            diags.len(),
+            0,
+            "if/end with implicit nil should NOT be offense"
+        );
+    }
+
+    #[test]
+    fn yield_in_conservative_mode_is_acceptable() {
+        // yield is call_type? in RuboCop, so conservative mode treats it as acceptable
+        let code = b"def read_node?(node, block_pass)\n  if block_pass.any?\n    yield(node)\n  elsif file_open_read?(node.parent)\n    yield(node.parent)\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&PredicateMethod, code);
+        assert_eq!(diags.len(), 0, "yield should trigger conservative skip");
+    }
 }
