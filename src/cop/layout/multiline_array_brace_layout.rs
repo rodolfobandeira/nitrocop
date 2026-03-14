@@ -3,6 +3,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/MultilineArrayBraceLayout
+///
+/// ## Investigation findings
+///
+/// **FN root cause (83 FNs):** The cop only handled `[...]` bracket arrays,
+/// skipping percent literal arrays (`%w()`, `%i()`, `%W()`, `%I()`, etc.).
+/// Many corpus repos (especially devdocs) use `%w(` with the closing `)` on
+/// the same line as the last element when the opening is on a separate line.
+/// Fixed by removing the `[`/`]` check and accepting all explicit array types.
+///
+/// **FP root cause (3 FPs):** Arrays containing heredocs in the last element
+/// (e.g., `[<<~MSG, ...]`) have a Prism end_offset on the opening delimiter
+/// line, not the heredoc body end. This made the cop think the closing brace
+/// was on a different line than the last element. RuboCop skips arrays where
+/// the last element contains a heredoc. Fixed by adding `contains_heredoc`
+/// check matching the sibling `MultilineHashBraceLayout` cop.
 pub struct MultilineArrayBraceLayout;
 
 impl Cop for MultilineArrayBraceLayout {
@@ -30,22 +46,27 @@ impl Cop for MultilineArrayBraceLayout {
             None => return,
         };
 
+        // Implicit arrays have no opening/closing braces
         let opening = match array.opening_loc() {
             Some(loc) => loc,
-            None => return, // Implicit array
+            None => return,
         };
         let closing = match array.closing_loc() {
             Some(loc) => loc,
             None => return,
         };
 
-        // Only check bracket arrays
-        if opening.as_slice() != b"[" || closing.as_slice() != b"]" {
+        let elements = array.elements();
+        if elements.is_empty() {
             return;
         }
 
-        let elements = array.elements();
-        if elements.is_empty() {
+        let last_elem = elements.iter().last().unwrap();
+
+        // Skip arrays where the last element contains a heredoc — the heredoc
+        // body forces the closing brace placement and adjusting it would
+        // produce invalid code.
+        if contains_heredoc(&last_elem) {
             return;
         }
 
@@ -54,7 +75,6 @@ impl Cop for MultilineArrayBraceLayout {
 
         // Get first and last element lines
         let first_elem = elements.iter().next().unwrap();
-        let last_elem = elements.iter().last().unwrap();
         let (first_elem_line, _) = source.offset_to_line_col(first_elem.location().start_offset());
         let (last_elem_line, _) =
             source.offset_to_line_col(last_elem.location().end_offset().saturating_sub(1));
@@ -112,6 +132,36 @@ impl Cop for MultilineArrayBraceLayout {
             _ => {}
         }
     }
+}
+
+/// Check if an array element node contains a heredoc string.
+/// Walks into method call receivers/arguments.
+fn contains_heredoc(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(s) = node.as_interpolated_string_node() {
+        if let Some(open) = s.opening_loc() {
+            return open.as_slice().starts_with(b"<<");
+        }
+    }
+    if let Some(s) = node.as_string_node() {
+        if let Some(open) = s.opening_loc() {
+            return open.as_slice().starts_with(b"<<");
+        }
+    }
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            if contains_heredoc(&recv) {
+                return true;
+            }
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                if contains_heredoc(&arg) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
