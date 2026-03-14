@@ -56,6 +56,41 @@ def ensure_binary():
     sys.exit(1)
 
 
+def check_corpus_bundle():
+    """Warn if corpus bundle is not installed for the active Ruby version.
+
+    Without the bundle, `bundle info rubocop` fails and config resolution
+    falls back to hardcoded defaults, producing wildly incorrect offense
+    counts (often 5-10x higher than expected).
+    """
+    bundle_dir = PROJECT_ROOT / "bench" / "corpus" / "vendor" / "bundle"
+    if not bundle_dir.exists():
+        print(
+            "WARNING: corpus bundle not installed. Offense counts will be wrong!\n"
+            "  Fix: cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle install\n",
+            file=sys.stderr,
+        )
+        return
+    # Check that rubocop gem is findable
+    env = corpus_env()
+    try:
+        result = subprocess.run(
+            ["bundle", "info", "--path", "rubocop"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(PROJECT_ROOT / "bench" / "corpus"),
+            env=env,
+        )
+        if result.returncode != 0:
+            print(
+                "WARNING: corpus bundle exists but `bundle info rubocop` failed.\n"
+                f"  stderr: {result.stderr.strip()}\n"
+                "  Fix: cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle install\n",
+                file=sys.stderr,
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # bundle not on PATH or too slow — skip check
+
+
 def latest_source_mtime() -> float:
     """Return latest mtime across files that affect the release binary."""
     latest = 0.0
@@ -389,6 +424,7 @@ def main():
     # Validate local corpus matches manifest (warns about stale/missing repos)
     if args.rerun:
         validate_corpus()
+        check_corpus_bundle()
 
     print(f"Checking {args.cop} against corpus")
     print("Gate: count-only cop-level regression check")

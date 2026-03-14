@@ -115,6 +115,34 @@ def main():
             cwd=project_root, check=True,
         )
 
+    # Check corpus bundle is installed
+    bundle_dir = project_root / "bench" / "corpus" / "vendor" / "bundle"
+    if not bundle_dir.exists():
+        print(
+            "WARNING: corpus bundle not installed. Results will be wrong!\n"
+            "  Fix: cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle install\n",
+            file=sys.stderr,
+        )
+    else:
+        env = os.environ.copy()
+        env["BUNDLE_GEMFILE"] = str(project_root / "bench" / "corpus" / "Gemfile")
+        env["BUNDLE_PATH"] = str(bundle_dir)
+        try:
+            result = subprocess.run(
+                ["bundle", "info", "--path", "rubocop"],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(project_root / "bench" / "corpus"), env=env,
+            )
+            if result.returncode != 0:
+                print(
+                    "WARNING: corpus bundle exists but `bundle info rubocop` failed.\n"
+                    f"  stderr: {result.stderr.strip()}\n"
+                    "  Fix: cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle install\n",
+                    file=sys.stderr,
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
     # Load corpus results
     if args.input:
         input_path = args.input
