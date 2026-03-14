@@ -32,7 +32,12 @@ impl Cop for SpecFilePathSuffix {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, PROGRAM_NODE]
+        &[
+            CALL_NODE,
+            CONSTANT_PATH_NODE,
+            CONSTANT_READ_NODE,
+            PROGRAM_NODE,
+        ]
     }
 
     fn check_node(
@@ -142,7 +147,8 @@ mod tests {
     #[test]
     fn constant_receiver_describe_not_flagged() {
         // FP fix: SomeModule.describe has a receiver (constant) — not an RSpec example group
-        let source = b"WebsocketRails::EventMap.describe do\n  subscribe :foo, to: SomeController\nend\n";
+        let source =
+            b"WebsocketRails::EventMap.describe do\n  subscribe :foo, to: SomeController\nend\n";
         let diags = crate::testutil::run_cop_full_internal(
             &SpecFilePathSuffix,
             source,
