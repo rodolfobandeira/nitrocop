@@ -73,6 +73,18 @@ use crate::parse::source::SourceFile;
 /// Root cause of remaining 94 FNs is not definitively identified; may require
 /// corpus-level debugging with `investigate-cop.py --context` once corpus data
 /// with example locations is available.
+///
+/// ## FP fix (2026-03-14)
+///
+/// Corpus oracle reported FP=14, FN=94. 14 FPs in jruby, natalie, BetterErrors,
+/// hexapdf traced to `alias :'method' other` patterns. RuboCop has an `in_alias?`
+/// check (`node.parent&.alias_type?`) that skips all symbols inside alias
+/// statements. Since nitrocop's cop framework doesn't provide parent node info,
+/// implemented `is_in_alias()` which scans source bytes backwards from the
+/// symbol position, skipping whitespace and possibly a preceding symbol argument,
+/// to detect the `alias` keyword. This matches RuboCop's behavior: alias
+/// arguments are not flagged because a symbol requiring quoting is not a valid
+/// method identifier.
 pub struct SymbolConversion;
 
 const BARE_OPERATOR_SYMBOLS: &[&[u8]] = &[
@@ -253,6 +265,78 @@ fn value_starts_with_identifier(value: &[u8]) -> bool {
         .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Check if a symbol node is an argument to the `alias` keyword.
+/// RuboCop skips alias arguments because a symbol requiring quoting is not a
+/// valid method identifier, so flagging it would be unhelpful.
+///
+/// Scans backwards from the symbol's start offset, skipping whitespace and
+/// possibly one preceding quoted/bare symbol (the first alias argument),
+/// to see if the `alias` keyword precedes it.
+fn is_in_alias(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
+    let start = sym.location().start_offset();
+    let src = source.as_bytes();
+    if start == 0 {
+        return false;
+    }
+
+    // Skip backwards over whitespace
+    let mut pos = start;
+    while pos > 0 && (src[pos - 1] == b' ' || src[pos - 1] == b'\t') {
+        pos -= 1;
+    }
+
+    // Check if preceded directly by `alias` (this is the first alias argument)
+    if pos >= 5 && &src[pos - 5..pos] == b"alias" {
+        // Make sure `alias` is at start of token (not part of a longer identifier)
+        return pos == 5 || !is_identifier_continue(src[pos - 6]);
+    }
+
+    // Maybe this is the second alias argument — skip over the first argument
+    // First argument can be: bare symbol (identifier chars), or quoted symbol (:'...' or :"...")
+    if pos > 0 {
+        let end_char = src[pos - 1];
+        if end_char == b'\'' || end_char == b'"' {
+            // Quoted symbol: scan back to find matching :'  or :"
+            let quote = end_char;
+            if pos < 3 {
+                return false;
+            }
+            // Find the opening :' or :"
+            let mut p = pos - 2; // skip closing quote
+            while p > 0 && src[p] != quote {
+                p -= 1;
+            }
+            // p should now be at the opening quote, preceded by ':'
+            if p > 0 && src[p] == quote && src[p - 1] == b':' {
+                pos = p - 1; // move before ':'
+            } else {
+                return false;
+            }
+        } else if is_identifier_continue(end_char) {
+            // Bare symbol (identifier): scan back over identifier chars
+            let mut p = pos - 1;
+            while p > 0 && is_identifier_continue(src[p - 1]) {
+                p -= 1;
+            }
+            pos = p;
+        } else {
+            return false;
+        }
+
+        // Skip whitespace again
+        while pos > 0 && (src[pos - 1] == b' ' || src[pos - 1] == b'\t') {
+            pos -= 1;
+        }
+
+        // Now check for `alias`
+        if pos >= 5 && &src[pos - 5..pos] == b"alias" {
+            return pos == 5 || !is_identifier_continue(src[pos - 6]);
+        }
+    }
+
+    false
+}
+
 /// Check if a symbol node is used as a rocket-style hash key (e.g., `:'foo' => val`).
 /// Looks at the source bytes after the symbol to see if `=>` follows (after whitespace).
 fn is_rocket_hash_key(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
@@ -365,6 +449,13 @@ impl SymbolConversion {
         match opening {
             Some(b":\"" | b":'") => {}
             _ => return,
+        }
+
+        // Skip symbols that are arguments to `alias` — a symbol requiring
+        // quoting is not a valid method identifier, so flagging it is unhelpful.
+        // Matches RuboCop's `in_alias?` check.
+        if is_in_alias(source, sym) {
+            return;
         }
 
         // Check if this is a rocket-style hash key (:'foo' => val).
@@ -812,6 +903,13 @@ mod tests {
             // Numeric-start hash key (needs quotes)
             "{ '7_days': 1 }",
             "{ \"7_days\": 1 }",
+            // Alias arguments — RuboCop skips these (in_alias? check)
+            "alias :'foo' bar",
+            "alias :\"foo\" bar",
+            "alias bar :'foo'",
+            "alias bar :\"foo\"",
+            "alias :'foo' :'bar'",
+            "alias :\"foo\" :\"bar\"",
         ];
         for source in &no_offense_cases {
             let diags = crate::testutil::run_cop_full(&cop, source.as_bytes());

@@ -63,6 +63,18 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: expanded `has_parser_rejected_escape` to reject any `\[A-Z]` sequence except
 /// `\C-` (control) and `\M-` (meta) prefixes.
+///
+/// Round 5 (56 FP from `%q{...}` strings):
+///
+/// FP root cause: All 56 FPs were from `%q{...}` multiline strings containing
+/// `#{...}` on subsequent lines. RuboCop v1.85+ added `processed_source.ast.dstr_type?`
+/// to `valid_syntax?`: after `gsub(/\A'|'\z/, '"')`, `%q{...}` is unchanged (no
+/// leading/trailing `'`), so parsing produces a `str` node (not `dstr`), causing
+/// `valid_syntax?` to return false. Affected repos: slim-template (28), opal (7),
+/// backup (5), fluentd (4), rails (4), and 6 others.
+///
+/// Fix: skip `%q` strings entirely in `check_node` — they can never contain real
+/// Ruby interpolation, so flagging them is always a false positive.
 pub struct InterpolationCheck;
 
 impl Cop for InterpolationCheck {
@@ -100,10 +112,17 @@ impl Cop for InterpolationCheck {
         };
 
         let open_slice = opening.as_slice();
-        // Single-quoted: starts with ' or %q
-        let is_single_quoted = open_slice == b"'" || open_slice.starts_with(b"%q");
 
-        if !is_single_quoted {
+        // Skip %q{...} strings — RuboCop (v1.85+) does not flag these.
+        // RuboCop's valid_syntax? does gsub(/\A'|'\z/, '"') which doesn't modify
+        // %q{...} (no leading/trailing '), then checks parsed_result.ast.dstr_type?.
+        // Parsing %q{...} as-is produces a str node (not dstr), so the check fails.
+        if open_slice.starts_with(b"%q") {
+            return;
+        }
+
+        // Single-quoted: starts with '
+        if open_slice != b"'" {
             return;
         }
 
@@ -186,11 +205,7 @@ fn valid_syntax_as_double_quoted(source: &[u8]) -> bool {
         Err(_) => return false,
     };
 
-    // For %q strings, RuboCop's gsub doesn't change the source (no leading/trailing '),
-    // so it parses %q{...} as-is which is always valid Ruby. Match this behavior.
-    if source_str.starts_with("%q") {
-        return true;
-    }
+    // Note: %q strings are now filtered out in check_node before reaching here.
 
     let double_quoted = if source_str.starts_with('\'') && source_str.ends_with('\'') {
         // Simple single-quoted: 'content' -> "content"
@@ -293,16 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn test_pctq_always_valid() {
-        // For %q strings, RuboCop's gsub(/\A'|'\z/, '"') doesn't change
-        // the source (no leading/trailing '), so it parses %q{...} as-is.
-        // This means valid_syntax? ALWAYS returns true for %q strings.
-        assert!(valid_syntax_as_double_quoted(b"%q{text \"#{name}\"}"));
-        assert!(valid_syntax_as_double_quoted(b"%q(#{foo})"));
-        assert!(valid_syntax_as_double_quoted(b"%q[#{bar}]"));
-        assert!(valid_syntax_as_double_quoted(b"%q|#{baz}|"));
-        // Even patterns that would be invalid as double-quoted should pass for %q
-        assert!(valid_syntax_as_double_quoted(b"%q{#{%<var>s}}"));
+    fn test_pctq_skipped_in_check_node() {
+        // %q strings are now filtered out in check_node before reaching
+        // valid_syntax_as_double_quoted. The function returns false for %q
+        // since it doesn't start with ' and end with '.
+        assert!(!valid_syntax_as_double_quoted(b"%q{text \"#{name}\"}"));
+        assert!(!valid_syntax_as_double_quoted(b"%q(#{foo})"));
+        assert!(!valid_syntax_as_double_quoted(b"%q[#{bar}]"));
+        assert!(!valid_syntax_as_double_quoted(b"%q|#{baz}|"));
     }
 
     #[test]

@@ -44,3 +44,11 @@ name.to_sym
 # Setter-like operator symbols (ends with =) are left alone
 :"!="
 :"=="
+# Alias arguments — quoted symbols in alias are not flaggable
+# because a symbol requiring quotes is not a valid method identifier
+alias :'foo' bar
+alias :"foo" bar
+alias foo :'bar'
+alias foo :"bar"
+alias :'foo' :'bar'
+alias :"foo" :"bar"

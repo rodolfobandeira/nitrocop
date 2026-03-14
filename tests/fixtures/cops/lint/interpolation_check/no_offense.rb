@@ -81,3 +81,14 @@ t = '\W #{name}'
 u = '\X #{name}'
 v = '\Y #{name}'
 w = '\Z #{name}'
+
+# %q{} strings — RuboCop (v1.85+) does not flag these because after
+# gsub(/\A'|'\z/, '"'), %q{...} is unchanged, and parsing it produces
+# a str node (not dstr), so valid_syntax? returns false.
+x = %q{text "#{name}"}
+y = %q{
+p id="#{id_helper}" class="hello world" = hello_world
+}
+z = %q(#{foo})
+aa = %q[#{bar}]
+bb = %q|#{baz}|
