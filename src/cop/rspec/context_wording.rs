@@ -174,9 +174,12 @@ impl Cop for ContextWording {
         // is non-word), but "whenever" does not (e is a word char).
         for prefix in &prefixes {
             if let Some(after) = content_str.strip_prefix(prefix) {
+                if after.is_empty() {
+                    return;
+                }
                 let next_is_word_char =
                     after.as_bytes()[0].is_ascii_alphanumeric() || after.as_bytes()[0] == b'_';
-                if after.is_empty() || !next_is_word_char {
+                if !next_is_word_char {
                     return;
                 }
             }

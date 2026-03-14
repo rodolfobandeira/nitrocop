@@ -32,3 +32,17 @@ end
 
 context 'without:colons' do
 end
+
+# Prefix exactly matching the description (no trailing characters) should not be flagged
+context 'when' do
+end
+
+context 'with' do
+end
+
+context 'without' do
+end
+
+# Interpolated string where leading text exactly matches a prefix
+context "with#{flag ? ' C-' : 'out '}acceleration" do
+end
