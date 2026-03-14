@@ -33,3 +33,11 @@ shared_context "scattered in shared context" do
   before { prepare }
   let(:other) { create(:other) }
 end
+
+# let with &proc block argument is not a standard let block (RuboCop's `lets?`
+# requires a BlockNode, not BlockArgumentNode). Should not be flagged.
+describe Connection do
+  let(:connection) { described_class.new }
+  before { setup }
+  let :fresh_connection, &NEW_PG_CONNECTION
+end

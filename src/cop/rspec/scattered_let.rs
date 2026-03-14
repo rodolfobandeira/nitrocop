@@ -12,6 +12,14 @@ use crate::parse::source::SourceFile;
 /// shared_context blocks. RuboCop's `example_group_with_body?` matcher only matches
 /// ExampleGroups (describe/context/feature), NOT SharedGroups. Fixed by skipping
 /// shared group method names.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// FP=1 (que-rb): `let :fresh_connection, &NEW_PG_CONNECTION` was counted as a "let"
+/// definition even though RuboCop's `lets?` pattern `(block (send nil? {:let :let!}) ...)`
+/// requires a BlockNode. When using `&proc` form, the block argument is stored as a
+/// BlockArgumentNode (not BlockNode) in Prism. Fixed by requiring a BlockNode for the
+/// let call to count as a "scattered" let.
 pub struct ScatteredLet;
 
 impl Cop for ScatteredLet {
@@ -89,7 +97,10 @@ impl Cop for ScatteredLet {
         for stmt in stmts.body().iter() {
             if let Some(c) = stmt.as_call_node() {
                 let name = c.name().as_slice();
-                if c.receiver().is_none() && is_rspec_let(name) {
+                // RuboCop's `lets?` pattern requires a BlockNode: `(block (send nil? {:let :let!}) ...)`.
+                // `let :name, &proc` uses BlockArgumentNode (not BlockNode) and should NOT count.
+                let has_block_node = c.block().is_some_and(|b| b.as_block_node().is_some());
+                if c.receiver().is_none() && is_rspec_let(name) && has_block_node {
                     if seen_non_let {
                         // This let is after a non-let statement
                         let loc = stmt.location();
