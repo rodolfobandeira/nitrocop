@@ -26,3 +26,19 @@ parent.each_child_node.inject(false) do |if_type, child|
   break if_type if condition
   child.if_type?
 end
+
+# Accumulator returned via next in another branch (FP fix)
+types.inject do |type1, type2|
+  next type2 if type1.is_a?(Foo)
+  next type1 if type2.is_a?(Foo)
+  type1
+end
+
+# next with accumulator makes element return acceptable
+values.reduce(nil) do |result, value|
+  next value if something?
+  result
+end
+
+# Returning accumulator index with element key is acceptable
+foo.reduce { |result, key| result[key] }

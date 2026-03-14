@@ -8,6 +8,18 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Looks for `reduce` or `inject` blocks where the value returned (implicitly or
+/// explicitly) does not include the accumulator. A block is considered valid as
+/// long as at least one return value includes the accumulator.
+///
+/// Also catches instances where an index of the accumulator is returned, as
+/// this may change the type of object being retained.
+///
+/// FP fix: `next <accumulator>` in any branch makes element-only returns in
+/// other branches acceptable (matches RuboCop's `returns_accumulator_anywhere?`).
+///
+/// FN fix: Added accumulator index detection (`acc[foo]` and `acc[foo] = bar`)
+/// matching RuboCop's `accumulator_index?` / MSG_INDEX pattern.
 pub struct UnmodifiedReduceAccumulator;
 
 impl Cop for UnmodifiedReduceAccumulator {
@@ -167,6 +179,18 @@ fn extract_reduce_params(params_node: &ruby_prism::Node<'_>) -> Option<(String, 
     }
 }
 
+/// Analyzed info about a return value in a reduce block.
+struct ReturnInfo {
+    /// Byte offset start for diagnostic reporting
+    start_offset: usize,
+    /// Whether this return value uses the accumulator (lvar_used? match)
+    uses_acc: bool,
+    /// Whether this return value is an accumulator index access (acc[foo])
+    is_acc_index: bool,
+    /// Whether this return value is element-only (flaggable)
+    is_element_only: bool,
+}
+
 fn check_return_values(
     cop: &UnmodifiedReduceAccumulator,
     source: &SourceFile,
@@ -176,38 +200,59 @@ fn check_return_values(
     method_name: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Check `next` and `break` statements
+    // Collect ALL return values with their analysis: last expression + next/break arguments.
+    // This matches RuboCop's return_values method which collects all return points first,
+    // then checks if ANY return value references the accumulator before flagging.
+    let mut return_infos: Vec<ReturnInfo> = Vec::new();
+
+    // Collect next/break arguments from all statements (including nested conditionals)
     for stmt in stmts {
-        check_next_break(
-            cop,
-            source,
-            stmt,
-            acc_name,
-            el_name,
-            method_name,
-            diagnostics,
-        );
+        collect_next_break_infos(stmt, acc_name, el_name, &mut return_infos);
     }
 
-    // Check the last expression (implicit return value)
+    // Add the last expression as implicit return (unless it's a next/break)
     if let Some(last) = stmts.last() {
-        // Skip if it's a next/break (already handled)
-        if last.as_next_node().is_some() || last.as_break_node().is_some() {
-            return;
+        if last.as_next_node().is_none() && last.as_break_node().is_none() {
+            return_infos.push(analyze_return_value(last, acc_name, el_name));
         }
+    }
 
-        // Check if any return point (next/break, including inside conditionals)
-        // returns the accumulator.
-        let has_acc_return = stmts.iter().any(|s| returns_accumulator(s, acc_name));
+    if return_infos.is_empty() {
+        return;
+    }
 
-        if has_acc_return {
-            // If some branch returns the accumulator, the element return is OK
-            return;
+    // Phase 1: Check for accumulator index returns (always an offense)
+    // acc[foo] or acc[foo] = bar (except acc[el])
+    for ri in &return_infos {
+        if ri.is_acc_index {
+            let (line, column) = source.offset_to_line_col(ri.start_offset);
+            diagnostics.push(cop.diagnostic(
+                source,
+                line,
+                column,
+                format!(
+                    "Do not return an element of the accumulator in `{}`.",
+                    method_name
+                ),
+            ));
+            return; // RuboCop only reports the first accumulator index offense
         }
+    }
 
-        if !references_var(last, acc_name) && is_only_element_expr(last, acc_name, el_name) {
-            let loc = last.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
+    // Phase 2: Check if element is modified in the body
+    if element_modified_in_body(stmts, el_name) {
+        return;
+    }
+
+    // Phase 3: Check if ANY return value references the accumulator
+    if return_infos.iter().any(|ri| ri.uses_acc) {
+        return;
+    }
+
+    // Phase 4: Flag individual return values that are element-only
+    for ri in &return_infos {
+        if ri.is_element_only {
+            let (line, column) = source.offset_to_line_col(ri.start_offset);
             diagnostics.push(cop.diagnostic(
                 source,
                 line,
@@ -221,183 +266,112 @@ fn check_return_values(
     }
 }
 
-fn check_next_break(
-    cop: &UnmodifiedReduceAccumulator,
-    source: &SourceFile,
-    node: &ruby_prism::Node<'_>,
-    acc_name: &str,
-    el_name: &str,
-    method_name: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    if let Some(next) = node.as_next_node() {
-        if let Some(args) = next.arguments() {
-            let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-            for arg in &arg_list {
-                if !references_var(arg, acc_name) && is_only_element_expr(arg, acc_name, el_name) {
-                    let loc = arg.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(cop.diagnostic(
-                        source,
-                        line,
-                        column,
-                        format!(
-                            "Ensure the accumulator `{}` will be modified by `{}`.",
-                            acc_name, method_name
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-
-    if let Some(brk) = node.as_break_node() {
-        if let Some(args) = brk.arguments() {
-            let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-            for arg in &arg_list {
-                if !references_var(arg, acc_name) && is_only_element_expr(arg, acc_name, el_name) {
-                    let loc = arg.location();
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    diagnostics.push(cop.diagnostic(
-                        source,
-                        line,
-                        column,
-                        format!(
-                            "Ensure the accumulator `{}` will be modified by `{}`.",
-                            acc_name, method_name
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-
-    // Check if nodes inside conditionals
-    if let Some(if_node) = node.as_if_node() {
-        if let Some(body) = if_node.statements() {
-            for stmt in body.body().iter() {
-                check_next_break(
-                    cop,
-                    source,
-                    &stmt,
-                    acc_name,
-                    el_name,
-                    method_name,
-                    diagnostics,
-                );
-            }
-        }
-        if let Some(else_clause) = if_node.subsequent() {
-            check_next_break(
-                cop,
-                source,
-                &else_clause,
-                acc_name,
-                el_name,
-                method_name,
-                diagnostics,
-            );
-        }
-    }
-
-    if let Some(unless_node) = node.as_unless_node() {
-        if let Some(body) = unless_node.statements() {
-            for stmt in body.body().iter() {
-                check_next_break(
-                    cop,
-                    source,
-                    &stmt,
-                    acc_name,
-                    el_name,
-                    method_name,
-                    diagnostics,
-                );
-            }
-        }
+/// Analyze a single return value node and produce a ReturnInfo.
+fn analyze_return_value(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &str) -> ReturnInfo {
+    ReturnInfo {
+        start_offset: node.location().start_offset(),
+        uses_acc: lvar_used(node, acc_name),
+        is_acc_index: is_accumulator_index(node, acc_name, el_name),
+        is_element_only: !references_var(node, acc_name)
+            && is_only_element_expr(node, acc_name, el_name),
     }
 }
 
-/// Check if a statement or any nested conditional contains a next/break
-/// that returns the accumulator.
-fn returns_accumulator(node: &ruby_prism::Node<'_>, acc_name: &str) -> bool {
+/// Collect next/break argument return infos from a node tree,
+/// recursing into conditionals but NOT into inner blocks.
+fn collect_next_break_infos(
+    node: &ruby_prism::Node<'_>,
+    acc_name: &str,
+    el_name: &str,
+    infos: &mut Vec<ReturnInfo>,
+) {
     if let Some(next) = node.as_next_node() {
         if let Some(args) = next.arguments() {
-            let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-            if arg_list.iter().any(|a| references_var(a, acc_name)) {
-                return true;
+            for arg in args.arguments().iter() {
+                infos.push(analyze_return_value(&arg, acc_name, el_name));
             }
         }
+        return;
     }
+
     if let Some(brk) = node.as_break_node() {
         if let Some(args) = brk.arguments() {
-            let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
-            if arg_list.iter().any(|a| references_var(a, acc_name)) {
-                return true;
+            for arg in args.arguments().iter() {
+                infos.push(analyze_return_value(&arg, acc_name, el_name));
             }
         }
+        return;
     }
-    // Check inside conditionals
+
+    // Recurse into conditionals
     if let Some(if_node) = node.as_if_node() {
         if let Some(body) = if_node.statements() {
-            if body
-                .body()
-                .iter()
-                .any(|s| returns_accumulator(&s, acc_name))
-            {
-                return true;
+            for stmt in body.body().iter() {
+                collect_next_break_infos(&stmt, acc_name, el_name, infos);
             }
         }
         if let Some(else_clause) = if_node.subsequent() {
-            if returns_accumulator(&else_clause, acc_name) {
-                return true;
-            }
+            collect_next_break_infos(&else_clause, acc_name, el_name, infos);
         }
     }
+
     if let Some(unless_node) = node.as_unless_node() {
         if let Some(body) = unless_node.statements() {
-            if body
-                .body()
-                .iter()
-                .any(|s| returns_accumulator(&s, acc_name))
-            {
-                return true;
+            for stmt in body.body().iter() {
+                collect_next_break_infos(&stmt, acc_name, el_name, infos);
             }
         }
     }
+
     if let Some(else_node) = node.as_else_node() {
         if let Some(stmts) = else_node.statements() {
-            if stmts
-                .body()
-                .iter()
-                .any(|s| returns_accumulator(&s, acc_name))
-            {
-                return true;
+            for stmt in stmts.body().iter() {
+                collect_next_break_infos(&stmt, acc_name, el_name, infos);
             }
         }
     }
-    // Check inside case/when
+
     if let Some(case_node) = node.as_case_node() {
         for condition in case_node.conditions().iter() {
             if let Some(when_node) = condition.as_when_node() {
                 if let Some(body) = when_node.statements() {
-                    if body
-                        .body()
-                        .iter()
-                        .any(|s| returns_accumulator(&s, acc_name))
-                    {
-                        return true;
+                    for stmt in body.body().iter() {
+                        collect_next_break_infos(&stmt, acc_name, el_name, infos);
                     }
                 }
             }
         }
         if let Some(else_clause) = case_node.else_clause() {
             if let Some(stmts) = else_clause.statements() {
-                if stmts
-                    .body()
-                    .iter()
-                    .any(|s| returns_accumulator(&s, acc_name))
-                {
-                    return true;
+                for stmt in stmts.body().iter() {
+                    collect_next_break_infos(&stmt, acc_name, el_name, infos);
+                }
+            }
+        }
+    }
+}
+
+/// Check if a node is an accumulator index access: `acc[foo]` or `acc[foo] = bar`
+/// Returns false for `acc[el]` (element used as index key).
+fn is_accumulator_index(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &str) -> bool {
+    if let Some(call) = node.as_call_node() {
+        let method = call.name().as_slice();
+        if method == b"[]" || method == b"[]=" {
+            if let Some(recv) = call.receiver() {
+                if let Some(read) = recv.as_local_variable_read_node() {
+                    let name = std::str::from_utf8(read.name().as_slice()).unwrap_or("");
+                    if name == acc_name {
+                        // acc[el] = ... is always an offense
+                        if method == b"[]=" {
+                            return true;
+                        }
+                        // For acc[], check if any argument uses the element
+                        if let Some(args) = call.arguments() {
+                            let has_el = args.arguments().iter().any(|a| lvar_used(&a, el_name));
+                            return !has_el;
+                        }
+                        return true;
+                    }
                 }
             }
         }
@@ -405,7 +379,184 @@ fn returns_accumulator(node: &ruby_prism::Node<'_>, acc_name: &str) -> bool {
     false
 }
 
-/// Check if an expression references a variable by name.
+/// Check if the element variable is modified in the block body
+/// (assigned, op-assigned, or mutated with other variables).
+/// Matches RuboCop's element_modified? node search.
+fn element_modified_in_body(stmts: &[ruby_prism::Node<'_>], el_name: &str) -> bool {
+    for stmt in stmts {
+        if element_modified_recursive(stmt, el_name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn element_modified_recursive(node: &ruby_prism::Node<'_>, el_name: &str) -> bool {
+    // el = ...
+    if let Some(write) = node.as_local_variable_write_node() {
+        let name = std::str::from_utf8(write.name().as_slice()).unwrap_or("");
+        if name == el_name {
+            return true;
+        }
+    }
+    // el += ...
+    if let Some(op_write) = node.as_local_variable_operator_write_node() {
+        let name = std::str::from_utf8(op_write.name().as_slice()).unwrap_or("");
+        if name == el_name {
+            return true;
+        }
+    }
+    // el ||= ...
+    if let Some(or_write) = node.as_local_variable_or_write_node() {
+        let name = std::str::from_utf8(or_write.name().as_slice()).unwrap_or("");
+        if name == el_name {
+            return true;
+        }
+    }
+    // el &&= ...
+    if let Some(and_write) = node.as_local_variable_and_write_node() {
+        let name = std::str::from_utf8(and_write.name().as_slice()).unwrap_or("");
+        if name == el_name {
+            return true;
+        }
+    }
+
+    // el.method(arg, ...) where args contain any local variable
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            if let Some(read) = recv.as_local_variable_read_node() {
+                let name = std::str::from_utf8(read.name().as_slice()).unwrap_or("");
+                if name == el_name {
+                    if let Some(args) = call.arguments() {
+                        for arg in args.arguments().iter() {
+                            if has_any_local_var(&arg) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // method(acc, foo, el) — bare method with el and other vars
+        if call.receiver().is_none() {
+            if let Some(args) = call.arguments() {
+                let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
+                let has_el = arg_list.iter().any(|a| references_var(a, el_name));
+                let has_other = arg_list.iter().any(|a| has_any_local_var(a));
+                if has_el && has_other {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Recurse into children via known container types (avoid inner blocks)
+    if node.as_block_node().is_some() {
+        return false;
+    }
+
+    if let Some(if_node) = node.as_if_node() {
+        if let Some(body) = if_node.statements() {
+            for stmt in body.body().iter() {
+                if element_modified_recursive(&stmt, el_name) {
+                    return true;
+                }
+            }
+        }
+        if let Some(sub) = if_node.subsequent() {
+            if element_modified_recursive(&sub, el_name) {
+                return true;
+            }
+        }
+    }
+
+    if let Some(unless_node) = node.as_unless_node() {
+        if let Some(body) = unless_node.statements() {
+            for stmt in body.body().iter() {
+                if element_modified_recursive(&stmt, el_name) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    if let Some(else_node) = node.as_else_node() {
+        if let Some(stmts) = else_node.statements() {
+            for stmt in stmts.body().iter() {
+                if element_modified_recursive(&stmt, el_name) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    if let Some(stmts_node) = node.as_statements_node() {
+        for stmt in stmts_node.body().iter() {
+            if element_modified_recursive(&stmt, el_name) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a node matches RuboCop's lvar_used? pattern (shallow, top-level only):
+/// - `(lvar %1)` — bare variable read
+/// - `(lvasgn %1 ...)` — variable assignment
+/// - `(send (lvar %1) :<< ...)` — shovel operator
+/// - `(dstr (begin (lvar %1)))` — interpolation
+/// Does NOT match op/or/and-assignment due to NodePattern arity mismatch.
+fn lvar_used(node: &ruby_prism::Node<'_>, var_name: &str) -> bool {
+    // Direct variable read
+    if let Some(read) = node.as_local_variable_read_node() {
+        if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name {
+            return true;
+        }
+    }
+    // Variable assignment (lvasgn)
+    if let Some(write) = node.as_local_variable_write_node() {
+        if std::str::from_utf8(write.name().as_slice()).unwrap_or("") == var_name {
+            return true;
+        }
+    }
+    // acc << ... (shovel)
+    if let Some(call) = node.as_call_node() {
+        if call.name().as_slice() == b"<<" {
+            if let Some(recv) = call.receiver() {
+                if let Some(read) = recv.as_local_variable_read_node() {
+                    if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // Interpolation: "#{var}"
+    if let Some(interp) = node.as_interpolated_string_node() {
+        for part in interp.parts().iter() {
+            if let Some(embedded) = part.as_embedded_statements_node() {
+                if let Some(stmts) = embedded.statements() {
+                    for stmt in stmts.body().iter() {
+                        if let Some(read) = stmt.as_local_variable_read_node() {
+                            if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // NOTE: RuboCop's lvar_used? does NOT match op-assignment (acc += ...),
+    // or-assignment (acc ||= ...), or and-assignment (acc &&= ...) due to
+    // NodePattern arity mismatch with SHORTHAND_ASSIGNMENTS. These are 3-child
+    // nodes but the pattern expects only 1 child: (%SHORTHAND_ASSIGNMENTS (lvasgn %1)).
+    false
+}
+
+/// Check if an expression references a variable by name (deep recursive check).
 fn references_var(node: &ruby_prism::Node<'_>, var_name: &str) -> bool {
     if let Some(read) = node.as_local_variable_read_node() {
         if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name {
