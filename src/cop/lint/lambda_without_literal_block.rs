@@ -1,8 +1,31 @@
-use crate::cop::node_type::{BLOCK_ARGUMENT_NODE, BLOCK_NODE, CALL_NODE, SYMBOL_NODE};
+use ruby_prism::Visit;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks uses of `lambda` without a literal block.
+///
+/// ## Investigation findings (2026-03-14)
+///
+/// Root causes of corpus FP/FN (FP=6, FN=3):
+///
+/// 1. **FP (jruby 3, natalie 3):** nitrocop flagged `lambda(&pr)` inside block
+///    bodies like `-> { lambda(&proc{}) }` and `suppress_warning { lambda(&body) }`.
+///    RuboCop skips these because in parser gem's AST, the `send` node's parent is
+///    a `block` node (`node.parent&.block_type?`). In Prism, the CallNode is inside
+///    a StatementsNode inside a BlockNode/LambdaNode. Fix: use `check_source` with
+///    a visitor that tracks block body context.
+///
+/// 2. **FN (awspec 2):** `describe lambda('my-func') do...end` — nitrocop only
+///    checked for `&` block arguments, but RuboCop flags ANY `lambda` call with
+///    arguments that doesn't have a literal block (the check is `!node.first_argument`).
+///    Fix: flag when lambda has any arguments OR a non-symbol block pass, and no
+///    literal block.
+///
+/// 3. **FN (slim 1):** `@parent.lambda(name, &block)` — nitrocop required no
+///    receiver, but RuboCop's `RESTRICT_ON_SEND` only filters by method name and
+///    doesn't check receiver. Fix: remove receiver check.
 pub struct LambdaWithoutLiteralBlock;
 
 impl Cop for LambdaWithoutLiteralBlock {
@@ -14,116 +37,167 @@ impl Cop for LambdaWithoutLiteralBlock {
         Severity::Warning
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_ARGUMENT_NODE, BLOCK_NODE, CALL_NODE, SYMBOL_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Look for `lambda(&something)` -- lambda called with a block argument
-        // instead of a literal block.
-        //
-        // In Prism, `lambda(&pr)` parses as a CallNode where:
-        // - method name is "lambda"
-        // - no receiver
-        // - block() returns a BlockArgumentNode (not a BlockNode)
-        //
-        // `lambda { ... }` parses with block() returning a BlockNode.
-        // `lambda(&:do_something)` should NOT be flagged (symbol proc).
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
+        let mut walker = LambdaWalker {
+            source,
+            cop: self,
+            parent_is_block_body: false,
+            saved_flags: Vec::new(),
+            diagnostics,
         };
+        walker.visit(&parse_result.node());
+    }
+}
 
-        if call.name().as_slice() != b"lambda" {
-            return;
+/// Visitor that tracks whether the current position is a direct child of a
+/// block body. In parser gem's AST, `node.parent&.block_type?` checks if the
+/// send node's immediate parent is a block node. In Prism, block bodies are
+/// wrapped in StatementsNode, so we track when we enter a StatementsNode that
+/// belongs to a BlockNode or LambdaNode.
+struct LambdaWalker<'a> {
+    source: &'a SourceFile,
+    cop: &'a LambdaWithoutLiteralBlock,
+    parent_is_block_body: bool,
+    /// Stack for save/restore of parent_is_block_body across branch nodes.
+    saved_flags: Vec<bool>,
+    diagnostics: &'a mut Vec<Diagnostic>,
+}
+
+impl<'pr> Visit<'pr> for LambdaWalker<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if node.name().as_slice() == b"lambda" {
+            self.check_lambda_call(node);
         }
 
-        // Must have no receiver (bare `lambda`)
-        if call.receiver().is_some() {
-            return;
+        // Visit children manually. The call's block (if BlockNode) creates a new
+        // block body context; arguments and receiver do not.
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
         }
-
-        // Check if block() is a BlockArgumentNode (not a literal block)
-        let block = match call.block() {
-            Some(b) => b,
-            None => {
-                // No block at all -- check arguments for &something
-                diagnostics.extend(self.check_arguments(call, source));
-                return;
-            }
-        };
-
-        // If it's a literal block (BlockNode), that's fine
-        if block.as_block_node().is_some() {
-            return;
+        if let Some(args) = node.arguments() {
+            self.visit(&args.as_node());
         }
-
-        // If it's a BlockArgumentNode, check what's inside
-        if let Some(block_arg) = block.as_block_argument_node() {
-            // Skip symbol procs like `lambda(&:do_something)`
-            if let Some(expr) = block_arg.expression() {
-                if expr.as_symbol_node().is_some() {
-                    return;
+        if let Some(block) = node.block() {
+            if let Some(block_node) = block.as_block_node() {
+                // Entering a block body — direct children are in block body context
+                let saved = self.parent_is_block_body;
+                self.parent_is_block_body = true;
+                if let Some(body) = block_node.body() {
+                    self.visit(&body);
                 }
+                if let Some(params) = block_node.parameters() {
+                    self.parent_is_block_body = false;
+                    self.visit(&params);
+                }
+                self.parent_is_block_body = saved;
             }
+            // BlockArgumentNode children don't need visiting for this cop
+        }
+    }
 
-            let loc = call.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                "lambda without a literal block is deprecated; use the proc without lambda instead."
-                    .to_string(),
-            ));
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        // Lambda literal `-> { ... }` — body is in block body context
+        let saved = self.parent_is_block_body;
+        self.parent_is_block_body = true;
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        if let Some(params) = node.parameters() {
+            self.parent_is_block_body = false;
+            self.visit(&params);
+        }
+        self.parent_is_block_body = saved;
+    }
+
+    // For all non-transparent compound nodes (if, while, def, class, begin,
+    // etc.), their children are NOT direct children of a block body. We save
+    // and clear the flag on enter, and restore on leave.
+    //
+    // CallNode and LambdaNode handle their own save/restore above.
+    // StatementsNode and ProgramNode are transparent (parser gem has no
+    // equivalent wrapper — the block body IS the statement list).
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.saved_flags.push(self.parent_is_block_body);
+        if node.as_call_node().is_some()
+            || node.as_lambda_node().is_some()
+            || node.as_statements_node().is_some()
+            || node.as_program_node().is_some()
+        {
+            // Transparent or handled explicitly — don't change the flag
+        } else {
+            // Non-transparent compound node breaks the "direct child of block body"
+            // relationship, matching parser gem's behavior
+            self.parent_is_block_body = false;
+        }
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        if let Some(saved) = self.saved_flags.pop() {
+            self.parent_is_block_body = saved;
         }
     }
 }
 
-impl LambdaWithoutLiteralBlock {
-    fn check_arguments(
-        &self,
-        call: ruby_prism::CallNode<'_>,
-        source: &SourceFile,
-    ) -> Vec<Diagnostic> {
-        let arguments = match call.arguments() {
-            Some(a) => a,
-            None => return Vec::new(),
-        };
-
-        let args = arguments.arguments();
-        let has_block_arg = args.iter().any(|a| {
-            if let Some(block_arg) = a.as_block_argument_node() {
-                // Skip symbol procs
-                if let Some(expr) = block_arg.expression() {
-                    return expr.as_symbol_node().is_none();
-                }
-                return true;
-            }
-            false
-        });
-
-        if !has_block_arg {
-            return Vec::new();
+impl LambdaWalker<'_> {
+    fn check_lambda_call(&mut self, call: &ruby_prism::CallNode<'_>) {
+        // In parser gem, RuboCop checks: node.parent&.block_type?
+        // This skips lambda calls that are direct children of a block body.
+        if self.parent_is_block_body {
+            return;
         }
 
+        // Check if the call has a literal block (BlockNode) — that's fine
+        if let Some(block) = call.block() {
+            if block.as_block_node().is_some() {
+                return;
+            }
+
+            // BlockArgumentNode — check for symbol procs
+            if let Some(block_arg) = block.as_block_argument_node() {
+                if let Some(expr) = block_arg.expression() {
+                    if expr.as_symbol_node().is_some() {
+                        // lambda(&:do_something) — allowed
+                        return;
+                    }
+                }
+                // lambda(&pr) — offense
+                self.add_offense(call);
+                return;
+            }
+        }
+
+        // No block — check if there are any arguments
+        // RuboCop: `!node.first_argument` returns true when no arguments → skip
+        // If there ARE arguments (string, variable, etc.), it's an offense
+        let has_arguments = call
+            .arguments()
+            .is_some_and(|args| !args.arguments().is_empty());
+        if !has_arguments {
+            return;
+        }
+
+        // lambda('string'), lambda(var), etc. — no literal block
+        self.add_offense(call);
+    }
+
+    fn add_offense(&mut self, call: &ruby_prism::CallNode<'_>) {
         let loc = call.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
-        vec![self.diagnostic(
-            source,
+        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
             line,
             column,
             "lambda without a literal block is deprecated; use the proc without lambda instead."
                 .to_string(),
-        )]
+        ));
     }
 }
 
