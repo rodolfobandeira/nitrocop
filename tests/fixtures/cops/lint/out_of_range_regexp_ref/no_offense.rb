@@ -214,3 +214,10 @@ $1
 $2
 $3
 $4
+
+# Pattern matching with regexp in posts (after splat in ArrayPatternNode)
+case ["/fbcdn/", "akamaihd.net", "sub1", "12345_67890_12345_n.jpg"]
+in /fbcdn/, String, *subdirs, /^\d+_(\d+)_(?:\d+_){1,3}[no]\.(jpg|png)$/
+  $1
+  $2
+end

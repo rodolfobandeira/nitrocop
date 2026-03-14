@@ -84,6 +84,17 @@ use ruby_prism::Visit;
 /// **Fix:** Removed save/restore of `current_capture_count` in both
 /// `visit_case_node` and `visit_case_match_node`, matching RuboCop's behavior
 /// where the last clause's capture state leaks out.
+///
+/// ## Investigation (2026-03-14, round 5)
+///
+/// **Root cause of remaining 1 FP:** `has_regexp_in_pattern` only checked
+/// `ArrayPatternNode.requireds()` (elements before the splat) but not
+/// `posts()` (elements after the splat). In Prism, `in /a/, *rest, /b/`
+/// places `/a/` in requireds and `/b/` in posts. The regexp with capture
+/// groups was in posts and never examined, causing `current_capture_count`
+/// to be set to the requireds regexp's 0 captures.
+///
+/// **Fix:** Added iteration over `arr.posts()` in `has_regexp_in_pattern`.
 pub struct OutOfRangeRegexpRef;
 
 impl Cop for OutOfRangeRegexpRef {
@@ -505,9 +516,14 @@ fn has_regexp_in_pattern(node: &ruby_prism::Node<'_>) -> (bool, usize) {
         max = max.max(count);
     }
 
-    // Check array patterns
+    // Check array patterns (requireds before splat, posts after splat)
     if let Some(arr) = node.as_array_pattern_node() {
         for elem in arr.requireds().iter() {
+            let (f, c) = has_regexp_in_pattern(&elem);
+            found |= f;
+            max = max.max(c);
+        }
+        for elem in arr.posts().iter() {
             let (f, c) = has_regexp_in_pattern(&elem);
             found |= f;
             max = max.max(c);
