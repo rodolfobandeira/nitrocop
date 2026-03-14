@@ -55,6 +55,17 @@ use ruby_prism::Visit;
 /// Fix: Added `visit_begin_node` with `pending_begin_body` counter. Only pure `begin..end`
 /// blocks (no rescue/ensure/else) suppress multi-statement void detection. BeginNodes with
 /// rescue/ensure still correctly flag multi-statement bodies.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=12, FN=0.
+///
+/// FP=12: Fixed. Root cause: `it ..., &(proc do end)` uses BlockArgumentNode in
+/// `call.block()`, not BlockNode. `is_example` was true for these calls, causing
+/// expects inside the proc block to be flagged as void. In RuboCop,
+/// `inside_example?` uses `node.each_ancestor(:block)` which only matches actual
+/// block nodes, not block_pass. Fix: require `block.as_block_node().is_some()` in
+/// the `is_example` check.
 pub struct VoidExpect;
 
 /// Matcher methods that chain on expect
@@ -238,8 +249,14 @@ impl Visit<'_> for VoidExpectVisitor<'_> {
             }
         }
 
-        // Check if this call has a block and is an example method
-        let is_example = node.block().is_some()
+        // Check if this call has a block and is an example method.
+        // Require the block to be an actual BlockNode (not BlockArgumentNode).
+        // `it '...', &(proc do end)` has a BlockArgumentNode in call.block(),
+        // which RuboCop does NOT treat as an example block (it uses `each_ancestor(:block)`
+        // which only matches actual block nodes, not block_pass).
+        let is_example = node
+            .block()
+            .is_some_and(|b| b.as_block_node().is_some())
             && node.receiver().is_none()
             && EXAMPLE_METHODS.iter().any(|m| name.as_slice() == *m);
 

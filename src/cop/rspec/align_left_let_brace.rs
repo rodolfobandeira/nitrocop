@@ -176,4 +176,57 @@ fn chunk_adjacent_lets(lets: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AlignLeftLetBrace, "cops/rspec/align_left_let_brace");
+
+    #[test]
+    fn debug_interpolated_string_let() {
+        use ruby_prism::Visit;
+        let source = "let(\"foo\x23{1}\") { 1 }\nlet!(\"foo\x23{1}\") { 1 }\n";
+        eprintln!("Source: {:?}", source);
+        let parse_result = ruby_prism::parse(source.as_bytes());
+
+        struct DebugVisitor {
+            source_bytes: Vec<u8>,
+            calls: Vec<(String, usize, usize)>, // name, open_offset, close_offset
+        }
+
+        impl<'pr> Visit<'pr> for DebugVisitor {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                let name = String::from_utf8_lossy(node.name().as_slice()).to_string();
+                let call_start = node.location().start_offset();
+                eprintln!("CallNode name={:?} at start_offset={}", name, call_start);
+
+                if node.receiver().is_none() && (name == "let" || name == "let!") {
+                    if let Some(block) = node.block() {
+                        if let Some(block_node) = block.as_block_node() {
+                            let open_offset = block_node.opening_loc().start_offset();
+                            let close_offset = block_node.closing_loc().start_offset();
+                            let open_char = self.source_bytes.get(open_offset).copied().unwrap_or(0) as char;
+                            let close_char = self.source_bytes.get(close_offset).copied().unwrap_or(0) as char;
+                            eprintln!("  -> let/let! block: open_offset={} ({:?}), close_offset={} ({:?})",
+                                open_offset, open_char, close_offset, close_char);
+                            self.calls.push((name, open_offset, close_offset));
+                        }
+                    }
+                }
+
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+
+        let mut visitor = DebugVisitor {
+            source_bytes: source.as_bytes().to_vec(),
+            calls: Vec::new(),
+        };
+        visitor.visit(&parse_result.node());
+
+        eprintln!("Collected calls: {:?}", visitor.calls);
+        // Print column positions
+        for (name, open_off, close_off) in &visitor.calls {
+            // Find line start for open_off
+            let before = &source.as_bytes()[..*open_off];
+            let line_start = before.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+            let col = open_off - line_start;
+            eprintln!("  {} open col={} (offset={})", name, col, open_off);
+        }
+    }
 }
