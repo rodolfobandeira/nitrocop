@@ -37,7 +37,13 @@ use crate::parse::source::SourceFile;
 ///    `" => ".length` = 4 (includes both surrounding spaces). Fixed to use `+ 2` instead
 ///    of `+ 1` to account for spaces on both sides of `=>`.
 ///
-/// 3. **Remaining gap:** `is_call_arg` heuristic for `EnforcedLastArgumentHashStyle`
+/// 3. **Kwsplat inline with pairs (FP, 2026-03-14):** When a keyword splat (`**options`)
+///    appears on the same line as other keyword args (e.g., `**options, method:,\n collection:,`),
+///    `check_kwsplat_alignment()` was incorrectly comparing the kwsplat's column against the
+///    first non-kwsplat pair's column. But when they share a line, column alignment is meaningless.
+///    Fixed by skipping kwsplats that share a line with any non-kwsplat pair.
+///
+/// 4. **Remaining gap:** `is_call_arg` heuristic for `EnforcedLastArgumentHashStyle`
 ///    uses `!begins_its_line` as a proxy for "is last argument of call," which is
 ///    imprecise for hashes on their own line inside calls. This only matters for
 ///    non-default `always_ignore`/`ignore_explicit` configurations.
@@ -791,6 +797,12 @@ fn check_kwsplat_alignment(source: &SourceFile, pairs: &[PairInfo]) -> Vec<Align
 
     for pair in pairs {
         if !pair.is_kwsplat || !pair.begins_line {
+            continue;
+        }
+        // Skip kwsplats that share a line with a non-kwsplat pair (e.g., `**options, method:,`).
+        // Alignment is not meaningful when elements are on the same line.
+        let shares_line_with_pair = pairs.iter().any(|p| !p.is_kwsplat && p.line == pair.line);
+        if shares_line_with_pair {
             continue;
         }
         if pair.col != first_ref.col {

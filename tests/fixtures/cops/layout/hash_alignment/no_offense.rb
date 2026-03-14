@@ -58,3 +58,20 @@ func(a:,
   a: 1,
   b: 2
 }
+
+# Keyword splat on the same line as other keyword args (no offense)
+# The subsequent args are aligned with each other after the splat.
+@template.render(
+  "decidim/shared/filters/type",
+  **options, method:,
+             collection:,
+             label:,
+             id:,
+             form: self
+)
+
+context.send(config.helper_method,
+             **options, document: document,
+                        field: config.field,
+                        config: config,
+                        value: values)
