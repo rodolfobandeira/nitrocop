@@ -29,6 +29,26 @@ use crate::parse::source::SourceFile;
 ///   correctly for most cases because `call.location().end_offset()` ends at the
 ///   closing paren of arguments, so `foo(Time.now).utc` correctly sees `)` (not
 ///   `.utc`) after `Time.now`. Edge cases with complex nesting may still diverge.
+///
+/// ## Investigation (2026-03-14): FP=25
+///
+/// Two root causes addressed:
+///
+/// **1. Interpolated string timezone specifier (ManageIQ/feedjira, ~4 FPs):**
+/// `Time.parse("#{ts} UTC", ...)` — the first argument is a dstr (interpolated string)
+/// ending with a timezone indicator. RuboCop's `attach_timezone_specifier?` checks
+/// `date.respond_to?(:value)`. In RuboCop's AST, dstr nodes for `"#{expr} UTC"` have
+/// a last child of `str(" UTC")`. The check implicitly covers this via the last part.
+/// Fix: added explicit check of the last string literal part of InterpolatedStringNode.
+///
+/// **2. Time.now inside Time.utc(...) arguments (ice_cube, ~4 FPs):**
+/// `Time.utc(Time.now.year - 1, ...)` — RuboCop's parent-chain walking traverses
+/// through the argument position into the enclosing call, making chain = [now, year, -, utc].
+/// `utc` is in ACCEPTED_METHODS → not_danger_chain? returns true → no offense.
+/// Nitrocop's forward byte scanner stops at the `)` following `Time.now.year-1` and
+/// doesn't see the outer `Time.utc(...)` call.
+/// Fix: added `enclosing_call_is_safe()` backward scan: if Time.now is directly preceded
+/// by `safe_method(`, suppress the offense.
 pub struct TimeZone;
 
 impl Cop for TimeZone {
@@ -93,6 +113,8 @@ impl Cop for TimeZone {
         // RuboCop skips Time.parse/new/at when the first string argument already has
         // a timezone specifier (e.g., "2023-05-29 00:00:00 UTC", "2015-03-02T19:05:37Z",
         // "2015-03-02T19:05:37+05:00"). Pattern: /([A-Za-z]|[+-]\d{2}:?\d{2})\z/
+        // Also handles interpolated strings like "#{ts} UTC" by checking the last
+        // string literal part (RuboCop's `dstr.value` implicitly returns last str part).
         if let Some(args) = call.arguments() {
             let first_arg = args.arguments().iter().next();
             if let Some(arg) = first_arg {
@@ -100,6 +122,20 @@ impl Cop for TimeZone {
                     let content = str_node.unescaped();
                     if has_timezone_specifier(content) {
                         return;
+                    }
+                }
+                // Handle interpolated strings: check the last literal string part.
+                // `"#{ts} UTC"` has last part " UTC" which ends with a letter → safe.
+                if let Some(dstr) = arg.as_interpolated_string_node() {
+                    let last_str = dstr
+                        .parts()
+                        .iter()
+                        .filter_map(|p| p.as_string_node())
+                        .last();
+                    if let Some(last) = last_str {
+                        if has_timezone_specifier(last.unescaped()) {
+                            return;
+                        }
                     }
                 }
             }
@@ -131,6 +167,17 @@ impl Cop for TimeZone {
             let bytes = source.as_bytes();
             let end = call.location().end_offset();
             if chain_contains_tz_safe_method(bytes, end) {
+                return;
+            }
+
+            // RuboCop also walks UP via node.parent, which means it considers the
+            // enclosing call context. For `Time.utc(Time.now.year - 1, ...)`, the
+            // chain becomes [now, year, -, utc] and `utc` makes it safe.
+            //
+            // Detect this by checking if `Time.now` is an immediate argument to a
+            // safe method: scan backwards from Time.now's start for `safe_method(`.
+            let start = call.location().start_offset();
+            if enclosing_call_is_safe(bytes, start) {
                 return;
             }
         }
@@ -230,6 +277,82 @@ fn has_timezone_specifier(bytes: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// Check if the byte at `start` (beginning of `Time.now` etc.) is immediately
+/// inside the argument list of a timezone-safe method call.
+///
+/// This handles the case where RuboCop's parent-chain walking finds a safe method
+/// in the enclosing context. For `Time.utc(Time.now.year - 1, ...)`:
+/// - Walking backwards from `Time.now` finds `(` preceded by `utc`
+/// - `utc` is in the safe methods list → suppress offense
+///
+/// This matches RuboCop's behavior where `not_danger_chain?` returns true when
+/// the parent-chain (now, year, -, utc) includes an ACCEPTED_METHOD.
+fn enclosing_call_is_safe(bytes: &[u8], start: usize) -> bool {
+    const SAFE_METHODS: &[&[u8]] = &[
+        b"utc",
+        b"getlocal",
+        b"in_time_zone",
+        b"localtime",
+        b"iso8601",
+        b"xmlschema",
+        b"jisx0301",
+        b"rfc3339",
+        b"httpdate",
+        b"to_i",
+        b"to_f",
+        b"zone",
+        b"current",
+    ];
+
+    if start == 0 {
+        return false;
+    }
+    let mut i = start.saturating_sub(1);
+
+    // Skip whitespace before Time.now
+    while i > 0 && bytes[i].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    // Must be directly preceded by `(` (argument position)
+    if bytes[i] != b'(' {
+        return false;
+    }
+    if i == 0 {
+        return false;
+    }
+    i -= 1;
+
+    // Skip whitespace before `(`
+    while i > 0 && bytes[i].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    // Read method name backwards (alphanumeric + underscore + ? + !)
+    let end_of_method = i;
+    while i > 0
+        && (bytes[i].is_ascii_alphanumeric()
+            || bytes[i] == b'_'
+            || bytes[i] == b'?'
+            || bytes[i] == b'!')
+    {
+        i -= 1;
+    }
+    // Adjust for the loop decrement
+    let method_start = if bytes[i].is_ascii_alphanumeric()
+        || bytes[i] == b'_'
+        || bytes[i] == b'?'
+        || bytes[i] == b'!'
+    {
+        i
+    } else {
+        i + 1
+    };
+    let method_name = &bytes[method_start..=end_of_method];
+
+    SAFE_METHODS.contains(&method_name)
 }
 
 /// Scan forward through a method chain starting at `pos` in `bytes`, returning

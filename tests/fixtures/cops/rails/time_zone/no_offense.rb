@@ -31,3 +31,12 @@ Foo::Bar::Time.at(0)
 Some::Time.new(2023, 1, 1)
 Some::Time.local(2023, 1, 1)
 Some::Time.now(0).strftime('%H:%M')
+
+# Time.parse with interpolated string ending in timezone specifier
+Time.parse("#{ts} UTC")
+Time.parse("#{string}Z", true)
+Time.parse("#{val} +05:00")
+
+# Time.now/local inside arguments of a safe method (RuboCop parent-chain walk)
+Time.utc(Time.now.year - 1, 7, 1, 0, 0, 0)
+Time.utc(Time.now.year, 1, 1)
