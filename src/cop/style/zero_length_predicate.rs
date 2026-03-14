@@ -3,10 +3,42 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/ZeroLengthPredicate: Checks for `size == 0`, `length.zero?`, etc.
+///
+/// ## Investigation findings (2026-03-14)
+/// FP=2, FN=0. Two false positive patterns found:
+/// 1. Safe navigation chains (e.g., `values&.length&.> 0`) — `empty?` is not equivalent
+///    because nil handling differs. Fixed by checking `call_operator()` for `&.` on any
+///    call in the chain.
+/// 2. Non-collection `.size`/`.length` (e.g., `File.stat(path).size.zero?`) — the receiver
+///    returns an integer (file size), not a collection. Fixed by checking if the receiver
+///    of `.size`/`.length` is a call on a constant (e.g., `File.stat`), which indicates
+///    a non-collection context.
 pub struct ZeroLengthPredicate;
 
 impl ZeroLengthPredicate {
-    /// Check if a call is `.length` or `.size`
+    /// Check if a CallNode uses safe navigation (`&.`)
+    fn uses_safe_navigation(call: &ruby_prism::CallNode<'_>) -> bool {
+        call.call_operator_loc()
+            .is_some_and(|op: ruby_prism::Location<'_>| op.as_slice() == b"&.")
+    }
+
+    /// Check if the receiver of `.size`/`.length` is a call on a constant,
+    /// indicating a non-collection return type (e.g., `File.stat(path).size`).
+    fn is_non_collection_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
+        if let Some(receiver) = call.receiver() {
+            if let Some(recv_call) = receiver.as_call_node() {
+                if let Some(recv_recv) = recv_call.receiver() {
+                    return recv_recv.as_constant_read_node().is_some()
+                        || recv_recv.as_constant_path_node().is_some();
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a call is `.length` or `.size` on a collection receiver
+    /// (excludes safe navigation and non-collection receivers)
     fn is_length_or_size(node: &ruby_prism::Node<'_>) -> bool {
         if let Some(call) = node.as_call_node() {
             let name = call.name();
@@ -14,6 +46,8 @@ impl ZeroLengthPredicate {
             if (name_bytes == b"length" || name_bytes == b"size")
                 && call.arguments().is_none()
                 && call.receiver().is_some()
+                && !Self::uses_safe_navigation(&call)
+                && !Self::is_non_collection_receiver(&call)
             {
                 return true;
             }
@@ -61,7 +95,10 @@ impl Cop for ZeroLengthPredicate {
         let method_bytes = method_name.as_slice();
 
         // Pattern: x.length.zero? or x.size.zero?
-        if method_bytes == b"zero?" && call.arguments().is_none() {
+        if method_bytes == b"zero?"
+            && call.arguments().is_none()
+            && !Self::uses_safe_navigation(&call)
+        {
             if let Some(receiver) = call.receiver() {
                 if Self::is_length_or_size(&receiver) {
                     let loc = node.location();
@@ -78,7 +115,8 @@ impl Cop for ZeroLengthPredicate {
         }
 
         // Pattern: x.length == 0, x.size == 0, 0 == x.length, x.length < 1, etc.
-        if matches!(method_bytes, b"==" | b"!=" | b">" | b"<") {
+        if matches!(method_bytes, b"==" | b"!=" | b">" | b"<") && !Self::uses_safe_navigation(&call)
+        {
             if let Some(args) = call.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
                 if arg_list.len() == 1 {
