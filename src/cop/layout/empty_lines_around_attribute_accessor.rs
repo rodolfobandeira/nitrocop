@@ -26,6 +26,13 @@ use crate::parse::source::SourceFile;
 /// separators. This was the root cause of 468 FPs: Ruby codebases commonly have indentation
 /// whitespace on otherwise-blank lines between attr accessors.
 ///
+/// **Fix 3 (2026-03-14):** Added standalone-statement check: the attr call must start at the
+/// first non-whitespace position of its line. This filters out attr calls used as expressions
+/// (`(attr :foo).should`), inside single-line block braces (`{ attr_reader :name }`), or
+/// nested inside method calls (`mod.module_eval { attr(name) }`). RuboCop handles this
+/// naturally via `node.right_sibling` which only exists for direct children of a statements
+/// body. Eliminated 100 FPs across 38 repos.
+///
 /// **Remaining gap:** 1 FN (nitrocop misses an offense RuboCop catches). Not investigated.
 pub struct EmptyLinesAroundAttributeAccessor;
 
@@ -79,8 +86,27 @@ impl Cop for EmptyLinesAroundAttributeAccessor {
         }
 
         let loc = call.location();
-        let (last_line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+
+        // The attr call must be a standalone statement on its line. If the call
+        // is part of a larger expression (e.g., `(attr :foo).should`, or inside
+        // single-line block braces `{ attr_reader :name }`), skip it.
+        // RuboCop handles this via `node.right_sibling` which only exists when
+        // the node is a direct child of a statements body. We approximate by
+        // checking that the call starts at the first non-whitespace position
+        // of its line.
+        let (start_line, start_col) = source.offset_to_line_col(loc.start_offset());
         let lines: Vec<&[u8]> = source.lines().collect();
+        if start_line > 0 && (start_line - 1) < lines.len() {
+            let call_line = lines[start_line - 1];
+            let indent = call_line
+                .iter()
+                .take_while(|&&b| b == b' ' || b == b'\t')
+                .count();
+            if start_col != indent {
+                return;
+            }
+        }
+        let (last_line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
 
         // Check if the next line exists and is not empty
         if last_line >= lines.len() {

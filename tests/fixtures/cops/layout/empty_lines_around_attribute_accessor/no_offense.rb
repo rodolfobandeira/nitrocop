@@ -91,7 +91,32 @@ class WhitespaceBlankLine
     
   # The condition that must *not* be met on an object
   attr_reader :unless_condition
-    
+
   def example
   end
+end
+
+# attr calls used as expressions inside parentheses — not standard accessors
+Class.new do
+  (attr :foo, 'bar').should == [:foo, :bar]
+  (attr :baz, false).should == [:baz]
+  (attr :qux, true).should == [:qux, :qux=]
+end
+
+# attr inside single-line block braces
+-> { Class.new { attr :foo } }.should raise_error(TypeError)
+mod.module_eval { attr_reader(:name) }
+assert_raise(NameError) { mod.module_eval { attr(name) } }
+
+# attr_reader inside single-line block with variable
+-> { Class.new { attr_reader o } }.should raise_error(TypeError)
+
+# attr_accessor as the last statement in a block (no right sibling)
+Class.new do
+  attr_accessor :foo
+end
+
+# attr_reader as the only statement in a class
+class OnlyAttr
+  attr_reader :bar
 end
