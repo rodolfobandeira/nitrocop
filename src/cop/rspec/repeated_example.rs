@@ -100,6 +100,31 @@ use std::collections::HashMap;
 /// 5. **Variable target nodes**: `LocalVariableTargetNode` (multi-assign `a, b = ...`) and
 ///    similar target nodes have names that default visitors don't emit.
 ///
+/// **Investigation (2026-03-14):** 168 FPs and 34 FNs remaining.
+///
+/// FP root cause 1: The `AstFingerprinter::visit_call_node` did not emit a block presence
+/// marker. A call with an empty block `call {}` and the same call without a block `call`
+/// both produced the same fingerprint: `visit_block_node` emits nothing for an empty block
+/// (no params, no body), and if there is no block, it's simply not called. The result is
+/// that `any? {}` and `any?` in the example body were treated as identical.
+/// Fix: emit a block presence/type byte (0=no block, 1=BlockNode, 2=BlockArgumentNode) in
+/// `visit_call_node` before calling the default visitor.
+///
+/// FP root cause 2: `MatchPredicateNode` (i.e., `value in pattern`), `MatchRequiredNode`
+/// (`value => pattern`), and `InNode` (`case x; in pattern; end`) all call
+/// `visitor.visit(&node.pattern())` in their default implementations, without emitting the
+/// pattern's type tag. For empty patterns (`[]` = ArrayPatternNode, `{}` = HashPatternNode),
+/// both default visitors are no-ops — the patterns produce zero bytes and become
+/// indistinguishable. Observed in dry-rb: `(None() in [])` vs `(None() in {})` both
+/// produced the same fingerprint. Fix: added custom visitors for all three nodes that emit
+/// the pattern's type tag before delegating to the default visitor.
+///
+/// FP root cause 3 (minor): `&(proc do ... end)` syntax uses `BlockArgumentNode` instead
+/// of `BlockNode`. The `example_body_signature` function only fingerprinted `BlockNode`
+/// bodies, silently producing an empty body signature for BlockArgumentNode. Two `it` calls
+/// using different `&proc` expressions would be treated as duplicates.
+/// Fix: when block is a `BlockArgumentNode`, fingerprint its `.expression()`.
+///
 /// **Investigation (2026-03-11, round 3):** 279 FPs and 36 FNs remaining.
 ///
 /// FP root cause: The `AstFingerprinter` was missing custom visitors for several leaf-like
@@ -495,6 +520,13 @@ fn example_body_signature(call: &ruby_prism::CallNode<'_>, method_name: &[u8]) -
             if let Some(ref body) = block_node.body() {
                 fp.fingerprint_node(body);
             }
+        } else if let Some(block_arg) = block.as_block_argument_node() {
+            // `&(proc do ... end)` style — BlockArgumentNode. Fingerprint the
+            // expression so `it "a", &proc1 { }` and `it "b", &proc2 { }` are
+            // not treated as duplicates when the proc bodies differ.
+            if let Some(ref expr) = block_arg.expression() {
+                fp.fingerprint_node(expr);
+            }
         }
     }
 
@@ -561,6 +593,21 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
             }
         } else {
             self.buf.push(0);
+        }
+        // Emit block presence/type marker to distinguish `call {}` from `call`.
+        // In RuboCop, `(block (send ...) ...)` and `(send ...)` are different structures.
+        // An empty block `{}` produces no content from `visit_block_node` (no params or
+        // body), so without this marker, `call {}` and `call` produce identical fingerprints.
+        // 0 = no block, 1 = BlockNode (do..end or {}), 2 = BlockArgumentNode (&expr)
+        match node.block() {
+            None => self.buf.push(0),
+            Some(ref b) => {
+                if b.as_block_node().is_some() {
+                    self.buf.push(1);
+                } else {
+                    self.buf.push(2);
+                }
+            }
         }
         ruby_prism::visit_call_node(self, node);
     }
@@ -730,6 +777,37 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
             self.buf.push(crate::cop::node_type::node_type_tag(body));
             self.visit(body);
         }
+    }
+
+    // For pattern matching nodes, the default visitors call `visitor.visit(&node.pattern())`
+    // without emitting the pattern's type tag. For empty patterns ([] vs {}), this means
+    // ArrayPatternNode (empty) and HashPatternNode (empty) both produce zero bytes — they
+    // become indistinguishable. Fix: emit the pattern type tag explicitly.
+    //
+    // `value in pattern` (boolean predicate) → MatchPredicateNode
+    // `value => pattern` (destructuring, raises on mismatch) → MatchRequiredNode
+    // `case x; in pattern; end` → InNode
+    //
+    // All three have the same issue. `None() in []` parses as MatchPredicateNode.
+    fn visit_match_predicate_node(&mut self, node: &ruby_prism::MatchPredicateNode<'pr>) {
+        let pattern = node.pattern();
+        self.buf
+            .push(crate::cop::node_type::node_type_tag(&pattern));
+        ruby_prism::visit_match_predicate_node(self, node);
+    }
+
+    fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
+        let pattern = node.pattern();
+        self.buf
+            .push(crate::cop::node_type::node_type_tag(&pattern));
+        ruby_prism::visit_match_required_node(self, node);
+    }
+
+    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
+        let pattern = node.pattern();
+        self.buf
+            .push(crate::cop::node_type::node_type_tag(&pattern));
+        ruby_prism::visit_in_node(self, node);
     }
 
     // For nodes we visit by default traversal, we need to emit child type tags
