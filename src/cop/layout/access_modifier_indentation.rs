@@ -1,5 +1,4 @@
 use crate::cop::node_type::{BLOCK_NODE, CALL_NODE, CLASS_NODE, MODULE_NODE, SINGLETON_CLASS_NODE};
-use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -8,18 +7,22 @@ use crate::parse::source::SourceFile;
 ///
 /// Cached corpus oracle reported FP=11, FN=2.
 ///
+/// ### Round 1 (2026-03-10): IndentationWidth support
 /// Fixed: this cop was already walking block bodies, but it still hardcoded a
 /// 2-space indent for `EnforcedStyle: indent` and ignored `Layout/IndentationWidth`.
 /// That produced false positives in width-4 repos and missed corresponding
-/// under-indented modifiers in the same configs. The local tests now cover both
-/// sides of that width-sensitive behavior.
+/// under-indented modifiers in the same configs.
 ///
-/// Acceptance gate after this patch (`scripts/check-cop.py --verbose --rerun`):
-/// expected=1,859, actual=1,843, CI baseline=1,868, excess=0, missing=16.
-///
-/// Remaining gap: the rerun still under-reports 16 RuboCop offenses. Those
-/// false negatives were not investigated in this batch; the immediate fix here
-/// was eliminating the width-related false positives safely.
+/// ### Round 2 (2026-03-14): Use `end` keyword column instead of opening line indentation
+/// Root cause of remaining 11 FPs: the cop computed expected indentation from the
+/// indentation of the line containing the opening keyword (`class`, `do`, etc.).
+/// RuboCop instead measures the column offset between the access modifier and the
+/// `end` keyword (or `}` for brace blocks). These differ when the opening keyword
+/// is not at the start of its line (e.g., `Post = Struct.new(...) do` where `do`
+/// is far right but `end` is aligned with `Post`). Also handles `Module.new do`
+/// blocks where `end` is deeply indented. FN pattern: `private` at wrong column
+/// relative to `end` keyword (e.g., col 4 in a class whose `end` is at col 0,
+/// expecting col 2).
 pub struct AccessModifierIndentation;
 
 const ACCESS_MODIFIERS: &[&[u8]] = &[b"private", b"protected", b"public", b"module_function"];
@@ -59,37 +62,56 @@ impl Cop for AccessModifierIndentation {
         let style = config.get_str("EnforcedStyle", "indent");
         let indent_width = config.get_usize("IndentationWidth", 2);
 
-        // We need a class, module, sclass, or block node that contains access modifiers
-        let (body, container_offset) = if let Some(class_node) = node.as_class_node() {
-            match class_node.body() {
-                Some(b) => (b, class_node.location().start_offset()),
-                None => return,
-            }
-        } else if let Some(module_node) = node.as_module_node() {
-            match module_node.body() {
-                Some(b) => (b, module_node.location().start_offset()),
-                None => return,
-            }
-        } else if let Some(sclass_node) = node.as_singleton_class_node() {
-            match sclass_node.body() {
-                Some(b) => (b, sclass_node.location().start_offset()),
-                None => return,
-            }
-        } else if let Some(block_node) = node.as_block_node() {
-            match block_node.body() {
-                Some(b) => (b, block_node.location().start_offset()),
-                None => return,
-            }
-        } else {
-            return;
-        };
+        // We need a class, module, sclass, or block node that contains access modifiers.
+        // Extract the body and the offset of the `end` keyword (used to compute expected
+        // indentation, matching RuboCop's `column_offset_between(modifier, end_range)`).
+        let (body, end_offset, container_start_offset) =
+            if let Some(class_node) = node.as_class_node() {
+                match class_node.body() {
+                    Some(b) => (
+                        b,
+                        class_node.end_keyword_loc().start_offset(),
+                        class_node.location().start_offset(),
+                    ),
+                    None => return,
+                }
+            } else if let Some(module_node) = node.as_module_node() {
+                match module_node.body() {
+                    Some(b) => (
+                        b,
+                        module_node.end_keyword_loc().start_offset(),
+                        module_node.location().start_offset(),
+                    ),
+                    None => return,
+                }
+            } else if let Some(sclass_node) = node.as_singleton_class_node() {
+                match sclass_node.body() {
+                    Some(b) => (
+                        b,
+                        sclass_node.end_keyword_loc().start_offset(),
+                        sclass_node.location().start_offset(),
+                    ),
+                    None => return,
+                }
+            } else if let Some(block_node) = node.as_block_node() {
+                match block_node.body() {
+                    Some(b) => (
+                        b,
+                        block_node.closing_loc().start_offset(),
+                        block_node.location().start_offset(),
+                    ),
+                    None => return,
+                }
+            } else {
+                return;
+            };
 
-        // Get the indentation of the container keyword line
-        let (container_line, _) = source.offset_to_line_col(container_offset);
-        let container_indent = match util::line_at(source, container_line) {
-            Some(line) => util::indentation_of(line),
-            None => return,
-        };
+        // RuboCop measures the column offset between the access modifier and the
+        // `end` keyword of the enclosing scope.  For `indent` style the modifier
+        // should be one `IndentationWidth` to the right of `end`; for `outdent`
+        // it should be at the same column as `end`.
+        let (end_line, end_col) = source.offset_to_line_col(end_offset);
+        let (container_line, _) = source.offset_to_line_col(container_start_offset);
 
         for stmt in body_statements(body) {
             let call = match stmt.as_call_node() {
@@ -123,9 +145,14 @@ impl Cop for AccessModifierIndentation {
                 continue;
             }
 
+            // Same line as end keyword — skip
+            if mod_line == end_line {
+                continue;
+            }
+
             let expected_col = match style {
-                "outdent" => container_indent,
-                _ => container_indent + indent_width,
+                "outdent" => end_col,
+                _ => end_col + indent_width,
             };
 
             if mod_col != expected_col {

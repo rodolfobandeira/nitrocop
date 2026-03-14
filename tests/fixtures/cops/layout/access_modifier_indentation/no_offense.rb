@@ -22,3 +22,38 @@ included do
   private
   def garply; end
 end
+
+# private inside deeply indented block where end is aligned differently from opening
+Post = Struct.new("Post", :title, :author_name) do
+        private
+          def secret
+            "super secret"
+          end
+      end
+
+# private inside Module.new block (closing brace at col 0, so private at col 2)
+Runner.singleton_class.prepend Module.new {
+  private
+    def list_items(patterns)
+      super
+    end
+}
+
+# protected inside Module.new do block
+Method = Module.new do
+           protected
+           def helper; end
+         end
+
+# private inside describe block (RSpec pattern)
+describe SomeSpec do
+  it "does something" do
+    true
+  end
+
+  private
+
+  def config
+    {}
+  end
+end

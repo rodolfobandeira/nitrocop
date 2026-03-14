@@ -27,3 +27,9 @@ private
 ^^^^^^^ Layout/AccessModifierIndentation: Indent access modifiers like `private`.
   def garply; end
 end
+
+class Shell
+    private
+    ^^^^^^^ Layout/AccessModifierIndentation: Indent access modifiers like `private`.
+      def read_line; end
+end
