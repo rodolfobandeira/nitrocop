@@ -3,6 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Detects `shuffle.first`, `shuffle.last`, `shuffle[0]`, `shuffle[-1]`,
+/// `shuffle.at(0)`, `shuffle.at(-1)`, `shuffle.slice(0)`, `shuffle.slice(-1)`.
+///
+/// ## Investigation (2026-03-14)
+/// Original implementation only handled `.first` and `.last` on shuffle calls.
+/// Corpus FNs (4) were caused by missing detection of bracket access (`[]`),
+/// `.at()`, and `.slice()` patterns with integer arguments 0 or -1.
+/// Added handling for these patterns to match RuboCop's Style/Sample cop.
 pub struct Sample;
 
 impl Cop for Sample {
@@ -31,9 +39,44 @@ impl Cop for Sample {
         let method_name = call.name();
         let method_bytes = method_name.as_slice();
 
-        // Must be .first or .last (the simple cases)
-        if !matches!(method_bytes, b"first" | b"last") {
-            return;
+        // Determine which pattern we're looking at
+        enum ShufflePattern {
+            FirstLast,   // .first / .last (no args or with count arg)
+            IndexAccess, // [0] / [-1] — method name is `[]`
+            AtOrSlice,   // .at(0) / .at(-1) / .slice(0) / .slice(-1)
+        }
+
+        let pattern = match method_bytes {
+            b"first" | b"last" => ShufflePattern::FirstLast,
+            b"[]" => ShufflePattern::IndexAccess,
+            b"at" | b"slice" => ShufflePattern::AtOrSlice,
+            _ => return,
+        };
+
+        // For [] / at / slice, validate the argument is integer 0 or -1
+        if matches!(
+            pattern,
+            ShufflePattern::IndexAccess | ShufflePattern::AtOrSlice
+        ) {
+            let args = match call.arguments() {
+                Some(a) => a,
+                None => return,
+            };
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            // Must have exactly one argument
+            if arg_list.len() != 1 {
+                return;
+            }
+            let arg = &arg_list[0];
+            let is_valid = if let Some(int_node) = arg.as_integer_node() {
+                let val_str = std::str::from_utf8(int_node.location().as_slice()).unwrap_or("");
+                matches!(val_str, "0" | "-1")
+            } else {
+                false
+            };
+            if !is_valid {
+                return;
+            }
         }
 
         // Receiver must be a call to .shuffle
@@ -54,40 +97,40 @@ impl Cop for Sample {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
 
                 // Determine the correct replacement
-                let correct = if call.arguments().is_some() {
-                    let arg_src = call
-                        .arguments()
-                        .map(|a| {
-                            let args: Vec<_> = a.arguments().iter().collect();
-                            if !args.is_empty() {
-                                std::str::from_utf8(args[0].location().as_slice())
-                                    .unwrap_or("")
-                                    .to_string()
-                            } else {
-                                String::new()
-                            }
-                        })
-                        .unwrap_or_default();
+                let correct =
+                    if matches!(pattern, ShufflePattern::FirstLast) && call.arguments().is_some() {
+                        let arg_src = call
+                            .arguments()
+                            .map(|a| {
+                                let args: Vec<_> = a.arguments().iter().collect();
+                                if !args.is_empty() {
+                                    std::str::from_utf8(args[0].location().as_slice())
+                                        .unwrap_or("")
+                                        .to_string()
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .unwrap_or_default();
 
-                    if shuffle_call.arguments().is_some() {
-                        // shuffle has args (random:), include them
+                        if shuffle_call.arguments().is_some() {
+                            let shuffle_args = shuffle_call
+                                .arguments()
+                                .map(|a| std::str::from_utf8(a.location().as_slice()).unwrap_or(""))
+                                .unwrap_or("");
+                            format!("sample({}, {})", arg_src, shuffle_args)
+                        } else {
+                            format!("sample({})", arg_src)
+                        }
+                    } else if shuffle_call.arguments().is_some() {
                         let shuffle_args = shuffle_call
                             .arguments()
                             .map(|a| std::str::from_utf8(a.location().as_slice()).unwrap_or(""))
                             .unwrap_or("");
-                        format!("sample({}, {})", arg_src, shuffle_args)
+                        format!("sample({})", shuffle_args)
                     } else {
-                        format!("sample({})", arg_src)
-                    }
-                } else if shuffle_call.arguments().is_some() {
-                    let shuffle_args = shuffle_call
-                        .arguments()
-                        .map(|a| std::str::from_utf8(a.location().as_slice()).unwrap_or(""))
-                        .unwrap_or("");
-                    format!("sample({})", shuffle_args)
-                } else {
-                    "sample".to_string()
-                };
+                        "sample".to_string()
+                    };
 
                 diagnostics.push(self.diagnostic(
                     source,
