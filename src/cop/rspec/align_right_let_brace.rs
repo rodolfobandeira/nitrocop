@@ -41,6 +41,18 @@ use crate::parse::source::SourceFile;
 /// doesn't affect corpus FP counting (count-based), so FP=1 may be from
 /// a different edge case (e.g., numblock handling). Without example locations,
 /// root cause cannot be confirmed.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// FP=1, FN=0.
+///
+/// FP=1: rubocop__rubocop-rspec repo, spec/smoke_tests/weird_rspec_spec.rb:47.
+/// Root cause: the rubocop-rspec project's .rubocop.yml has `AllCops: Exclude:
+/// spec/smoke_tests/**/*.rb`. RuboCop skips this file entirely; nitrocop processes
+/// it. The closing_loc columns ARE actually different (let col=21, let! col=22),
+/// so nitrocop's alignment detection is correct — the FP is a file-scoping
+/// issue (AllCops.Exclude pattern not matching correctly in nitrocop's file discovery).
+/// No cop logic fix applied; the root cause is in file discovery/exclusion handling.
 pub struct AlignRightLetBrace;
 
 impl Cop for AlignRightLetBrace {

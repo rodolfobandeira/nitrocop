@@ -39,3 +39,11 @@ end
 RSpec.describe 'proc' do
   let(:user, &args[:build_user])
 end
+
+# Interpolated string let keys - consecutive lets with brace columns that differ by 1
+# due to let vs let! (! adds 1 char) should not produce a false positive when
+# the difference is solely due to method name length
+RSpec.describe 'interp' do
+  let("foo#{1}") { 1 }
+  let!("foo#{1}") { 1 }
+end

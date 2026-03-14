@@ -33,6 +33,18 @@ use crate::parse::source::SourceFile;
 /// `numblock` nodes (numbered params `_1`), but Prism's `BlockNode` covers both;
 /// (2) edge case in let grouping across nested scopes. No code fix applied without
 /// reproduction case.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// FP=1, FN=0.
+///
+/// FP=1: rubocop__rubocop-rspec repo, spec/smoke_tests/weird_rspec_spec.rb:47.
+/// Root cause: the rubocop-rspec project's .rubocop.yml has `AllCops: Exclude:
+/// spec/smoke_tests/**/*.rb`. RuboCop skips this file entirely; nitrocop processes
+/// it. The opening_loc columns ARE actually different (let col=17, let! col=18),
+/// so nitrocop's alignment detection is correct — the FP is a file-scoping
+/// issue (AllCops.Exclude pattern not matching correctly in nitrocop's file discovery).
+/// No cop logic fix applied; the root cause is in file discovery/exclusion handling.
 pub struct AlignLeftLetBrace;
 
 impl Cop for AlignLeftLetBrace {
@@ -176,124 +188,4 @@ fn chunk_adjacent_lets(lets: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AlignLeftLetBrace, "cops/rspec/align_left_let_brace");
-
-    #[test]
-    fn debug_interpolated_string_let() {
-        use ruby_prism::Visit;
-        // "let("foo#{1}") { 1 }" - using actual interpolation syntax
-        // In source: `let("foo#{1}") { 1 }`
-        // Byte layout:
-        //   0: l  1: e  2: t  3: (  4: "  5: f  6: o  7: o  8: #  9: {  10: 1  11: }  12: "  13: )  14: (space)  15: {  16: (space)  17: 1  18: (space)  19: }
-        let source = b"let(\"foo\x23{1}\") { 1 }\nlet!(\"foo\x23{1}\") { 1 }\n";
-        let source_str = std::str::from_utf8(source).unwrap();
-
-        let parse_result = ruby_prism::parse(source);
-
-        struct DebugVisitor {
-            source_bytes: Vec<u8>,
-            calls: Vec<(String, usize, usize)>, // name, open_offset, close_offset
-        }
-
-        impl<'pr> Visit<'pr> for DebugVisitor {
-            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-                let name = String::from_utf8_lossy(node.name().as_slice()).to_string();
-
-                if node.receiver().is_none() && (name == "let" || name == "let!") {
-                    if let Some(block) = node.block() {
-                        if let Some(block_node) = block.as_block_node() {
-                            let open_offset = block_node.opening_loc().start_offset();
-                            let close_offset = block_node.closing_loc().start_offset();
-                            self.calls.push((name, open_offset, close_offset));
-                        }
-                    }
-                }
-
-                ruby_prism::visit_call_node(self, node);
-            }
-        }
-
-        let mut visitor = DebugVisitor {
-            source_bytes: source.to_vec(),
-            calls: Vec::new(),
-        };
-        visitor.visit(&parse_result.node());
-
-        // Verify what we collected
-        // For `let("foo#{1}") { 1 }`:
-        //   - The block opening `{` is at offset 15 (column 15)
-        //   - The string interpolation `{` is at offset 9 (column 9)
-        // For `let!("foo#{1}") { 1 }` (starts at offset 22):
-        //   - The block opening `{` is at offset 37 (column 15 since line 2 starts at offset 22)
-        //   - Actually: let! is 4 chars, so `let!("foo#{1}") { 1 }` is:
-        //     0: l 1: e 2: t 3: ! 4: ( 5: " 6: f 7: o 8: o 9: # 10: { 11: 1 12: } 13: " 14: ) 15: (sp) 16: { ...
-
-        for (name, open_off, close_off) in &visitor.calls {
-            let before = &source[..*open_off];
-            let line_start = before
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            let col = open_off - line_start;
-            let open_char = source.get(*open_off).copied().unwrap_or(0) as char;
-            let _ = (name, close_off, col, open_char); // Suppress unused warnings
-        }
-
-        // The key assertion: both let and let! should produce exactly 1 block each,
-        // and their open offsets should be pointing to `{` (the block brace), not `#` or `{` inside interpolation
-        assert_eq!(
-            visitor.calls.len(),
-            2,
-            "Expected 2 let blocks, got: {:?}",
-            visitor.calls
-        );
-
-        let (name0, open0, _close0) = &visitor.calls[0];
-        let (name1, open1, _close1) = &visitor.calls[1];
-
-        assert_eq!(name0, "let");
-        assert_eq!(name1, "let!");
-
-        // char at open0 should be `{` (the block brace)
-        assert_eq!(
-            source[*open0] as char, '{',
-            "open0 should be block `{{`, got {:?} at offset {}",
-            source[*open0] as char, open0
-        );
-        assert_eq!(
-            source[*open1] as char, '{',
-            "open1 should be block `{{`, got {:?} at offset {}",
-            source[*open1] as char, open1
-        );
-
-        // Column of block `{` for `let("foo#{1}") { 1 }`:
-        // let("foo#{1}") { 1 }
-        // 0123456789012345678
-        //               ^ column 15
-        let col0 = open0 - 0; // line starts at 0
-        // Line 2 starts after the \n at position 21 (source up to line 2)
-        // `let("foo#{1}") { 1 }\n` is 22 bytes (indices 0..21, \n at 21)
-        let line2_start = source.iter().position(|&b| b == b'\n').unwrap() + 1;
-        let col1 = open1 - line2_start;
-
-        // Both should have the same column (15 for let, 16 for let! since `let!` is one char longer)
-        // Actually:
-        //   let("foo#{1}") { 1 }  -> block { at col 15
-        //   let!("foo#{1}") { 1 } -> block { at col 16
-        // The cops SHOULD NOT flag these as a group needing alignment since the columns differ by 1
-        // because of the ! character.
-        // But RuboCop DOES NOT flag them either.
-        // If nitrocop flags them as a group and finds col0 != col1, it would report an offense.
-
-        // Write result to file for inspection
-        let result = format!(
-            "calls: {:?}\ncol0={} col1={} line2_start={}\nchar0={:?} char1={:?}\n",
-            visitor.calls, col0, col1, line2_start, source[*open0] as char, source[*open1] as char
-        );
-        std::fs::write("/tmp/debug_interp_result.txt", &result).ok();
-
-        // Key: col0 and col1 differ, so the cops SHOULD group them and report an offense.
-        // But RuboCop does NOT. Why?
-        // The answer must be in single_line? check or let? check in RuboCop.
-    }
 }
