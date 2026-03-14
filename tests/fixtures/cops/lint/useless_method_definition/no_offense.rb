@@ -58,4 +58,32 @@ class Foo
   def initialize(app, **)
     super app
   end
+
+  # Generic method macro wrapping a def — not flagged
+  memoize def computed_value
+    super
+  end
+
+  # Another generic macro
+  do_something def method
+    super
+  end
+
+  # super with different keyword args
+  def method_kw(a:)
+    super(a: 42)
+  end
+
+  # Non-constructor with only comments — not useless
+  def non_constructor
+    # Comment.
+  end
+
+  # Empty constructor — not flagged by this cop
+  def initialize(arg1, arg2)
+  end
+
+  # Class-level initialize is not flagged when empty
+  def self.initialize
+  end
 end
