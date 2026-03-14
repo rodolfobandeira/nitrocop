@@ -511,13 +511,25 @@ def main():
     }
     args.output_json.write_text(json.dumps(json_output, indent=2) + "\n")
 
+    def _sanitize_for_md(s: str) -> str:
+        """Replace C0 control chars with ASCII escape sequences.
+
+        NUL bytes and other control characters in RuboCop messages (e.g. from
+        symbols containing \\x00) break GitHub's markdown renderer entirely.
+        """
+        return "".join(
+            repr(c)[1:-1] if ord(c) < 0x20 and c not in '\n\t' else c
+            for c in s
+        )
+
     def _format_example_md(ex) -> str:
         """Format an example for markdown (handles both string and dict format)."""
         if isinstance(ex, dict):
             loc = ex.get("loc", "")
             msg = ex.get("msg", "")
+            msg = _sanitize_for_md(msg)
             return f"{loc}  [{msg}]" if msg else loc
-        return ex
+        return _sanitize_for_md(ex)
 
     # ── Write Markdown ──
     md = []

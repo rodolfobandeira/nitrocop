@@ -2967,8 +2967,8 @@ Every offense is compared by file path, line number, and cop name.
 **False positives** (nitrocop reports, RuboCop does not):
 
 - `BetterErrors__better_errors__fde3b70: lib/better_errors/stack_frame.rb:80  [Unnecessary symbol conversion; use `:"#$!"` instead.]`
-- `gettalong__hexapdf__f1176c6: test/hexapdf/test_serializer.rb:92  [Unnecessary symbol conversion; use `:" \t\n\f\r "` instead.]`
-- `jruby__jruby__0303464: spec/ruby/core/symbol/shared/length.rb:9  [Unnecessary symbol conversion; use `:" "` instead.]`
+- `gettalong__hexapdf__f1176c6: test/hexapdf/test_serializer.rb:92  [Unnecessary symbol conversion; use `:"\x00\t\n\f\r "` instead.]`
+- `jruby__jruby__0303464: spec/ruby/core/symbol/shared/length.rb:9  [Unnecessary symbol conversion; use `:"\x00"` instead.]`
 - ... and 11 more (see corpus-results.json for full list)
 
 **False negatives** (RuboCop reports, nitrocop does not):
