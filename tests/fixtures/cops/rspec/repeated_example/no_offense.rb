@@ -225,3 +225,43 @@ describe 'xstring diff content' do
   it { result = `cmd2`; expect(result).to eq("x") }
 end
 
+# Method call with empty block {} vs same method call without block are NOT duplicates.
+# `any? {}` and `any?` differ in that one passes an empty block, the other does not.
+# In RuboCop's AST, (block (send ...) ...) vs (send ...) are different structures.
+describe 'empty block vs no block' do
+  it "with a block returns false" do
+    expect(items.any? {}).to eq(false)
+  end
+
+  it "with no block returns false" do
+    expect(items.any?).to eq(false)
+  end
+end
+
+# Same pattern with deeper nesting: with block vs without
+describe 'register with and without empty block' do
+  it "raises when passed a block" do
+    expect do instance.register(:test) {} end.to raise_error(ArgumentError)
+  end
+
+  it "raises when no block" do
+    expect do instance.register(:test) end.to raise_error(ArgumentError)
+  end
+end
+
+# Pattern matching: empty array pattern vs empty hash pattern are NOT duplicates
+# `value in []` is ArrayPatternNode; `value in {}` is HashPatternNode - different AST
+describe 'pattern matching empty array vs hash' do
+  it "matches on the empty array" do
+    expect(
+      (None() in [])
+    ).to be(true)
+  end
+
+  it "matches on the empty hash" do
+    expect(
+      (None() in {})
+    ).to be(true)
+  end
+end
+
