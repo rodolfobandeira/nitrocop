@@ -49,6 +49,23 @@ use ruby_prism::Visit;
 ///
 /// **Fix:** Updated hardcoded AllowedMethods default to include `select` and
 /// `lock`. Changed AllowedPatterns matching from `contains()` to `regex::Regex`.
+///
+/// ## Follow-up investigation (2026-03-14)
+///
+/// **FP=7 root causes:** `chain_has_allowed_method` only walked the LINEAR receiver
+/// chain (e.g., `each → where → User`). RuboCop uses `node.each_node(:send)` which
+/// walks ALL descendant send nodes, including those INSIDE ARGUMENTS to scope methods.
+///
+/// Pattern: `User.where(id: OtherModel.select(:user_id)).each` — the `select` call
+/// is inside the argument to `where`, not in the linear receiver chain. The old
+/// code missed it; RuboCop's subtree walk found it and suppressed the offense.
+///
+/// All 7 FPs were `.each` calls where an allowed method (`select` or `lock`) appeared
+/// inside a subquery argument (e.g., `.where.not(id: records.select(:id))`).
+///
+/// **Fix:** Changed `chain_has_allowed_method` to use a recursive `Visit` subtree
+/// walker that checks all descendant call nodes (not just the linear receiver chain),
+/// matching RuboCop's `each_node(:send)` behavior.
 pub struct FindEach;
 
 const AR_SCOPE_METHODS: &[&[u8]] = &[
@@ -198,33 +215,51 @@ impl<'pr> FindEachVisitor<'_, '_> {
         ));
     }
 
-    /// Walk the entire method chain from `each` down to the base receiver,
-    /// collecting all method names. Return true if any method in the chain
-    /// matches AllowedMethods or AllowedPatterns.
+    /// Walk the ENTIRE subtree of the `each` call node and check AllowedMethods/AllowedPatterns
+    /// against ALL descendant send nodes (including those inside arguments).
+    ///
+    /// This matches RuboCop's behavior:
+    ///   method_chain = node.each_node(:send).map(&:method_name)
+    ///   method_chain.any? { |m| allowed_method?(m) || matches_allowed_pattern?(m) }
+    ///
+    /// The key difference from a linear receiver chain walk is that RuboCop's `each_node`
+    /// visits ALL descendants, including send nodes inside arguments to scope methods (e.g.,
+    /// `User.where(id: OtherModel.select(:user_id)).each` — the `select` inside the `where`
+    /// argument suppresses the offense).
     fn chain_has_allowed_method(&self, node: &ruby_prism::CallNode<'pr>) -> bool {
-        let mut current: Option<ruby_prism::Node<'pr>> = node.receiver();
-        while let Some(ref recv) = current {
-            if let Some(call) = recv.as_call_node() {
-                let method_name = call.name().as_slice();
+        struct SubtreeChecker<'a> {
+            allowed_methods: &'a [String],
+            allowed_patterns: &'a [String],
+            found: bool,
+        }
+
+        impl<'pr> Visit<'pr> for SubtreeChecker<'_> {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                if self.found {
+                    return;
+                }
+                let method_name = node.name().as_slice();
                 let method_str = std::str::from_utf8(method_name).unwrap_or("");
-
-                if self.allowed_methods.iter().any(|m| m == method_str) {
-                    return true;
-                }
-                if self
-                    .allowed_patterns
-                    .iter()
-                    .any(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(method_str)))
+                if self.allowed_methods.iter().any(|m| m == method_str)
+                    || self
+                        .allowed_patterns
+                        .iter()
+                        .any(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(method_str)))
                 {
-                    return true;
+                    self.found = true;
+                    return;
                 }
-
-                current = call.receiver();
-            } else {
-                break;
+                ruby_prism::visit_call_node(self, node);
             }
         }
-        false
+
+        let mut checker = SubtreeChecker {
+            allowed_methods: &self.allowed_methods,
+            allowed_patterns: &self.allowed_patterns,
+            found: false,
+        };
+        checker.visit_call_node(node);
+        checker.found
     }
 }
 

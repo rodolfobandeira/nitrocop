@@ -63,3 +63,9 @@ User.select(:name).where(active: true).each { |u| u.something }
 
 # lock in a chain before an AR scope method should suppress (in default AllowedMethods)
 User.lock.where(active: true).each { |u| u.something }
+
+# select inside an argument to a scope method should suppress offense
+# (RuboCop's each_node(:send) walks all descendants, not just the receiver chain)
+User.where(id: OtherModel.select(:user_id)).each { |u| u.something }
+records.where.not(id: other.select(:id)).each { |r| r.process }
+@model.users.where.not(id: @other.select(:user_id)).where(active: true).each { |u| u.process }
