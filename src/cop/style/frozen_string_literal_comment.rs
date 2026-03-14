@@ -2,14 +2,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// FP=778 root cause: Emacs-style magic comments like
+/// FP=523 root causes identified and fixed:
+/// 1. Blank lines between shebang/encoding and the frozen_string_literal comment caused the
+///    scan to stop prematurely. RuboCop scans all lines before the first non-comment token,
+///    so blank lines don't break the search. Fixed by scanning through comment AND blank lines.
+/// 2. Case-sensitive matching: RuboCop uses `/frozen[_-]string[_-]literal/i` (case-insensitive),
+///    but nitrocop only matched exact `frozen_string_literal:`. Fixed with case-insensitive scan.
+/// 3. Hyphen separator: RuboCop accepts `frozen-string-literal:` (hyphens) as well as
+///    underscores. Fixed by accepting both `_` and `-` as separators.
+///
+/// Previous fix (FP=778): Emacs-style magic comments like
 /// `# -*- encoding: utf-8; frozen_string_literal: true -*-` were not recognized.
-/// The `is_encoding_comment` function matched these lines (they contain "encoding"),
-/// causing them to be skipped, but `is_frozen_string_literal_comment` only checked for
-/// `# frozen_string_literal:` in simple format. Fix: (1) updated `is_frozen_string_literal_comment`
-/// and `is_frozen_string_literal_true` to also parse `frozen_string_literal:` inside
-/// `# -*- ... -*-` Emacs-style comments, and (2) added a check in the encoding-skip logic
-/// to detect when the encoding line also contains frozen_string_literal.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
@@ -79,6 +82,12 @@ impl Cop for FrozenStringLiteralComment {
             idx += 1;
         }
 
+        // Skip blank lines after shebang (RuboCop scans all lines before the first
+        // non-comment token, so blank lines don't break the search)
+        while idx < lines.len() && is_blank_line(lines[idx]) {
+            idx += 1;
+        }
+
         // Skip encoding comment, but check if it also contains frozen_string_literal
         // (Emacs-style: # -*- encoding: utf-8; frozen_string_literal: true -*-)
         if idx < lines.len() && is_encoding_comment(lines[idx]) {
@@ -99,8 +108,10 @@ impl Cop for FrozenStringLiteralComment {
         // Remember where to insert the comment (after shebang/encoding)
         let insert_after_line = idx; // 0-indexed line number
 
-        // Scan leading comment lines for the frozen_string_literal magic comment.
-        while idx < lines.len() && is_comment_line(lines[idx]) {
+        // Scan leading comment and blank lines for the frozen_string_literal magic comment.
+        // RuboCop's `leading_comment_lines` returns all lines before the first non-comment
+        // token — blank lines are included since they don't produce tokens.
+        while idx < lines.len() && is_comment_or_blank_line(lines[idx]) {
             if is_frozen_string_literal_comment(lines[idx]) {
                 if enforced_style == "always_true" {
                     // Must be set to true specifically
@@ -164,6 +175,14 @@ fn is_comment_line(line: &[u8]) -> bool {
     matches!(trimmed.clone().next(), Some(b'#'))
 }
 
+fn is_blank_line(line: &[u8]) -> bool {
+    line.iter().all(|&b| b == b' ' || b == b'\t' || b == b'\r')
+}
+
+fn is_comment_or_blank_line(line: &[u8]) -> bool {
+    is_blank_line(line) || is_comment_line(line)
+}
+
 fn is_encoding_comment(line: &[u8]) -> bool {
     let s = match std::str::from_utf8(line) {
         Ok(s) => s,
@@ -182,21 +201,44 @@ fn is_encoding_comment(line: &[u8]) -> bool {
     false
 }
 
+/// Match `frozen_string_literal:` or `frozen-string-literal:` case-insensitively,
+/// consistent with RuboCop's regex `frozen[_-]string[_-]literal` with `/i` flag.
 fn is_frozen_string_literal_comment(line: &[u8]) -> bool {
     let s = match std::str::from_utf8(line) {
         Ok(s) => s,
         Err(_) => return false,
     };
-    // Allow leading whitespace, then `#`, then optional space, then `frozen_string_literal:`
+    // Allow leading whitespace, then `#`, then optional space, then the magic comment key
     let s = s.trim_start();
     let trimmed = s.strip_prefix('#').unwrap_or("");
     let trimmed = trimmed.trim_start();
-    if trimmed.starts_with("frozen_string_literal:") {
+    if has_frozen_string_literal_key(trimmed) {
         return true;
     }
     // Emacs-style: # -*- ... frozen_string_literal: true/false ... -*-
     if trimmed.starts_with("-*-") && trimmed.ends_with("-*-") {
-        return trimmed.contains("frozen_string_literal:");
+        return has_frozen_string_literal_key(trimmed);
+    }
+    false
+}
+
+/// Check if a string contains `frozen_string_literal:` or `frozen-string-literal:`
+/// (case-insensitive, allowing hyphens or underscores as separators).
+/// Matches RuboCop's `/frozen[_-]string[_-]literal/i` regex.
+fn has_frozen_string_literal_key(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    // "frozen" (6) + sep (1) + "string" (6) + sep (1) + "literal:" (8) = 22 chars
+    for i in 0..bytes.len() {
+        if bytes[i..].starts_with(b"frozen")
+            && i + 22 <= bytes.len()
+            && (bytes[i + 6] == b'_' || bytes[i + 6] == b'-')
+            && bytes[i + 7..].starts_with(b"string")
+            && (bytes[i + 13] == b'_' || bytes[i + 13] == b'-')
+            && bytes[i + 14..].starts_with(b"literal:")
+        {
+            return true;
+        }
     }
     false
 }
@@ -210,19 +252,38 @@ fn is_frozen_string_literal_true(line: &[u8]) -> bool {
     let s = s.trim_start();
     let trimmed = s.strip_prefix('#').unwrap_or("");
     let trimmed = trimmed.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("frozen_string_literal:") {
-        return rest.trim() == "true";
+    if let Some(after_key) = strip_frozen_string_literal_key(trimmed) {
+        return after_key.trim() == "true";
     }
     // Emacs-style: # -*- ... frozen_string_literal: true ... -*-
     if trimmed.starts_with("-*-") && trimmed.ends_with("-*-") {
-        if let Some(pos) = trimmed.find("frozen_string_literal:") {
-            let after = &trimmed[pos + "frozen_string_literal:".len()..];
+        if let Some(after_key) = strip_frozen_string_literal_key(trimmed) {
             // Extract the value: take until `;` or `-*-`
-            let value = after.split([';', '-']).next().unwrap_or("");
+            let value = after_key.split([';', '-']).next().unwrap_or("");
             return value.trim() == "true";
         }
     }
     false
+}
+
+/// If the string contains `frozen[_-]string[_-]literal:` (case-insensitive),
+/// return the portion after the colon.
+fn strip_frozen_string_literal_key(s: &str) -> Option<&str> {
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    // "frozen" (6) + sep (1) + "string" (6) + sep (1) + "literal:" (8) = 22 chars
+    for i in 0..bytes.len() {
+        if bytes[i..].starts_with(b"frozen")
+            && i + 22 <= bytes.len()
+            && (bytes[i + 6] == b'_' || bytes[i + 6] == b'-')
+            && bytes[i + 7..].starts_with(b"string")
+            && (bytes[i + 13] == b'_' || bytes[i + 13] == b'-')
+            && bytes[i + 14..].starts_with(b"literal:")
+        {
+            return Some(&s[i + 22..]);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -530,6 +591,81 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should recognize Emacs-style comment after shebang"
+        );
+    }
+
+    #[test]
+    fn blank_line_between_shebang_and_frozen() {
+        // FP pattern: shebang, blank line, then frozen_string_literal
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"#!/usr/bin/env ruby\n\n# frozen_string_literal: true\n\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize frozen_string_literal after shebang + blank line"
+        );
+    }
+
+    #[test]
+    fn leading_blank_line_before_frozen() {
+        // FP pattern: blank line at start, then frozen_string_literal
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"\n# frozen_string_literal: true\n\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize frozen_string_literal after leading blank line"
+        );
+    }
+
+    #[test]
+    fn case_insensitive_frozen_string_literal() {
+        // FP pattern: typo with different case like frozen_sTring_literal
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# frozen_sTring_literal: true\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize frozen_string_literal case-insensitively"
+        );
+    }
+
+    #[test]
+    fn hyphen_separator_frozen_string_literal() {
+        // FP pattern: hyphens instead of underscores (frozen-string-literal)
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# frozen-string-literal: true\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should recognize frozen-string-literal with hyphens"
+        );
+    }
+
+    #[test]
+    fn shebang_blank_line_encoding_frozen() {
+        // shebang, blank line, encoding, frozen_string_literal
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"#!/usr/bin/env ruby\n\n# encoding: ascii-8bit\n# frozen_string_literal: true\n\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should find frozen_string_literal after shebang + blank + encoding"
         );
     }
 
