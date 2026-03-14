@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks for unnecessary additional spaces inside array percent literals (%w, %W, %i, %I).
+///
+/// Root cause of 79 FNs: original implementation skipped multiline percent literals entirely
+/// (`open_line != close_line` early return). Fix: removed the multiline skip and scan each
+/// line of the content individually for double spaces between elements, matching RuboCop's
+/// `MULTIPLE_SPACES_BETWEEN_ITEMS_REGEX` behavior. Leading/trailing spaces on each line are
+/// ignored (only mid-line double spaces between items are flagged).
 pub struct SpaceInsideArrayPercentLiteral;
 
 impl Cop for SpaceInsideArrayPercentLiteral {
@@ -56,57 +63,56 @@ impl Cop for SpaceInsideArrayPercentLiteral {
         let open_end = open_loc.end_offset();
         let close_start = close_loc.start_offset();
 
-        // Skip multiline
-        let (open_line, _) = source.offset_to_line_col(open_end.saturating_sub(1));
-        let (close_line, _) = source.offset_to_line_col(close_start);
-        if open_line != close_line {
-            return;
-        }
-
         if close_start <= open_end {
             return;
         }
 
         let content = &bytes[open_end..close_start];
 
-        // Find multiple consecutive spaces between non-space characters
-        let mut i = 0;
-        while i < content.len() {
-            // Find a space
-            if content[i] == b' ' {
-                let space_start = i;
-                while i < content.len() && content[i] == b' ' {
+        // Scan each line of the content for multiple consecutive spaces
+        // between non-space, non-backslash characters (matching RuboCop's
+        // MULTIPLE_SPACES_BETWEEN_ITEMS_REGEX behavior).
+        for line_bytes in content.split(|&b| b == b'\n') {
+            let mut i = 0;
+            while i < line_bytes.len() {
+                if line_bytes[i] == b' ' {
+                    let space_start = i;
+                    while i < line_bytes.len() && line_bytes[i] == b' ' {
+                        i += 1;
+                    }
+                    let space_len = i - space_start;
+                    // Multiple spaces between items (not leading/trailing on the line)
+                    if space_len >= 2 && space_start > 0 && i < line_bytes.len() {
+                        // Check that character before spaces is not escaped
+                        let prev_char = line_bytes[space_start - 1];
+                        if prev_char != b'\\' {
+                            // Compute offset within content: find where this line starts
+                            let line_start_in_content =
+                                line_bytes.as_ptr() as usize - content.as_ptr() as usize;
+                            let offset = open_end + line_start_in_content + space_start;
+                            let (line, col) = source.offset_to_line_col(offset);
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                col,
+                                "Use only a single space inside array percent literal.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: offset,
+                                    end: offset + space_len,
+                                    replacement: " ".to_string(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
+                    }
+                } else {
                     i += 1;
                 }
-                let space_len = i - space_start;
-                // Multiple spaces between items (not leading/trailing)
-                if space_len >= 2 && space_start > 0 && i < content.len() {
-                    // Check that character before spaces is not escaped
-                    let prev_char = content[space_start - 1];
-                    if prev_char != b'\\' {
-                        let offset = open_end + space_start;
-                        let (line, col) = source.offset_to_line_col(offset);
-                        let mut diag = self.diagnostic(
-                            source,
-                            line,
-                            col,
-                            "Use only a single space inside array percent literal.".to_string(),
-                        );
-                        if let Some(ref mut corr) = corrections {
-                            corr.push(crate::correction::Correction {
-                                start: offset,
-                                end: offset + space_len,
-                                replacement: " ".to_string(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                        diagnostics.push(diag);
-                    }
-                }
-            } else {
-                i += 1;
             }
         }
     }
@@ -124,4 +130,34 @@ mod tests {
         SpaceInsideArrayPercentLiteral,
         "cops/layout/space_inside_array_percent_literal"
     );
+
+    #[test]
+    fn multiline_large_percent_w() {
+        let source = b"%w(
+  aget alength all-ns alter and append-child apply array-map
+  contains? count create-ns create-struct cycle dec  deref
+  str string?  struct struct-map subs subvec symbol symbol?
+)
+";
+        let diags = crate::testutil::run_cop_full(&SpaceInsideArrayPercentLiteral, source);
+        // Should detect double space in "dec  deref" and "string?  struct"
+        assert_eq!(diags.len(), 2, "Expected 2 offenses, got: {diags:?}");
+    }
+
+    #[test]
+    fn multiline_with_leading_spaces() {
+        // Reproduces corpus pattern: %w() with large leading whitespace
+        let source = b"        words = %w(
+          aget alength all-ns alter and append-child apply array-map
+          bit-xor boolean branch?  butlast byte cast char children
+          contains? count create-ns create-struct cycle dec  deref
+        )
+";
+        let diags = crate::testutil::run_cop_full(&SpaceInsideArrayPercentLiteral, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "Expected 2 offenses for branch?__butlast and dec__deref, got: {diags:?}"
+        );
+    }
 }
