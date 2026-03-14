@@ -1,5 +1,5 @@
 use crate::cop::node_type::CALL_NODE;
-use crate::cop::util::is_blank_line;
+use crate::cop::util::is_blank_or_whitespace_line;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -20,6 +20,11 @@ use crate::parse::source::SourceFile;
 /// **Fix:** Added `is_block_boundary_keyword()` that checks the next trimmed line for any
 /// of these branch-closing keywords (end, else, elsif, when, in, rescue, ensure). This
 /// mirrors RuboCop's AST-level "no right sibling" check using line-level heuristics.
+///
+/// **Fix 2 (2026-03-13):** Changed `is_blank_line` to `is_blank_or_whitespace_line` so that
+/// whitespace-only lines (e.g., `    \n` — indentation-only) are recognized as valid blank
+/// separators. This was the root cause of 468 FPs: Ruby codebases commonly have indentation
+/// whitespace on otherwise-blank lines between attr accessors.
 ///
 /// **Remaining gap:** 1 FN (nitrocop misses an offense RuboCop catches). Not investigated.
 pub struct EmptyLinesAroundAttributeAccessor;
@@ -85,7 +90,7 @@ impl Cop for EmptyLinesAroundAttributeAccessor {
         let next_line = lines[last_line]; // 0-indexed: last_line (1-based) maps to lines[last_line] for next
 
         // If next line is blank, no offense
-        if is_blank_line(next_line) {
+        if is_blank_or_whitespace_line(next_line) {
             return;
         }
 

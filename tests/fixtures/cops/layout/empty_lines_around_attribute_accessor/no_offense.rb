@@ -84,3 +84,14 @@ unless condition
 else
   fallback
 end
+
+# attr_reader followed by whitespace-only blank line (spaces, visually blank)
+class WhitespaceBlankLine
+  attr_reader :if_condition
+    
+  # The condition that must *not* be met on an object
+  attr_reader :unless_condition
+    
+  def example
+  end
+end
