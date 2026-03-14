@@ -4278,6 +4278,25 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn glob_set_anchoring_with_literal_separator() {
+        // Verify that build_glob_set (literal_separator=true) anchors patterns to the
+        // start of the path. app/controllers/**/*.rb must NOT match admin/app/controllers/foo.rb.
+        let filter = make_filter(true, &["app/controllers/**/*.rb"], &[]);
+        assert!(
+            filter.is_included(Path::new("app/controllers/foo_controller.rb")),
+            "standard app/controllers path should match"
+        );
+        assert!(
+            !filter.is_included(Path::new("admin/app/controllers/foo_controller.rb")),
+            "admin/app/controllers/ should NOT match app/controllers/ pattern"
+        );
+        assert!(
+            !filter.is_included(Path::new("api/app/controllers/foo_controller.rb")),
+            "api/app/controllers/ should NOT match app/controllers/ pattern"
+        );
+    }
+
     // --- is_cop_match tests ---
     // These test the Include-OR / Exclude-OR logic that handles running
     // from outside the project root where file paths have a prefix.
