@@ -23,6 +23,26 @@ use crate::parse::source::SourceFile;
 ///
 /// FN=1: Single case in cyberark/conjur. Could not inspect source (corpus not local).
 /// May be a numblock edge case or config-dependent behavior. Deferred.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// FP=5 total. Corpus oracle (2026-03-14) reported FP=5, FN=1.
+///
+/// FP Fix 1 (que-rb, 4 FPs): `around do |&block| block.call end`. The
+/// `get_block_param_name` function was only checking required params.
+/// For `|&block|`, the name is in `ParametersNode.block()`. Fixed by
+/// also checking `p.block()` for `BlockParameterNode` when requireds empty.
+///
+/// FP Fix 2 (webmock, 1 FP): `around(:each, net_connect: true) do |ex|`.
+/// RuboCop's `hook_block` pattern `(send nil? :around sym ?)` only matches
+/// 0 or 1 symbol argument. Multiple args don't match. Fixed by skipping
+/// `around` calls with >1 arg or non-symbol first arg.
+///
+/// FN Fix (cyberark, 1 FN): `example.run(test_server)`. RuboCop's
+/// `(send $... {:call :run})` requires the method to be the final child
+/// (no trailing args). `example.run(test_server)` has args → not recognized
+/// as valid usage by RuboCop. Fixed: require `arguments().is_none()` for
+/// run/call in deep_uses_param.
 pub struct AroundBlock;
 
 /// Flags `around` hooks that don't yield or call `run`/`call` on the example.
@@ -80,6 +100,20 @@ impl Cop for AroundBlock {
         }
         if call.receiver().is_some() {
             return;
+        }
+
+        // RuboCop's hook_block pattern: (send nil? :around sym ?)
+        // Only matches 0 or 1 symbol argument. Skip if more args or non-symbol first arg.
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            // More than 1 argument → doesn't match (sym ?)
+            if arg_list.len() > 1 {
+                return;
+            }
+            // Single arg must be a symbol
+            if !arg_list.is_empty() && arg_list[0].as_symbol_node().is_none() {
+                return;
+            }
         }
 
         let block = match call.block() {
@@ -147,15 +181,21 @@ impl Cop for AroundBlock {
 fn get_block_param_name(block: &ruby_prism::BlockNode<'_>) -> Option<Vec<u8>> {
     let params = block.parameters()?;
     let bp = params.as_block_parameters_node()?;
-    let p = bp.parameters()?;
-    let requireds: Vec<_> = p.requireds().iter().collect();
-    if requireds.is_empty() {
-        return None;
+    if let Some(p) = bp.parameters() {
+        let requireds: Vec<_> = p.requireds().iter().collect();
+        if !requireds.is_empty() {
+            return requireds[0]
+                .as_required_parameter_node()
+                .map(|rp| rp.name().as_slice().to_vec());
+        }
+        // Check for block parameter |&block|
+        if let Some(block_param) = p.block() {
+            if let Some(name) = block_param.name() {
+                return Some(name.as_slice().to_vec());
+            }
+        }
     }
-    // Get the name of the first required parameter
-    requireds[0]
-        .as_required_parameter_node()
-        .map(|rp| rp.name().as_slice().to_vec())
+    None
 }
 
 /// Deep search using Prism visitor to find param usage anywhere in the block body.
@@ -181,7 +221,9 @@ fn deep_uses_param(block: &ruby_prism::BlockNode<'_>, param_name: &[u8]) -> bool
             let method = node.name().as_slice();
 
             // Check for param.run or param.call
-            if method == b"run" || method == b"call" {
+            // RuboCop's (send $... {:call :run}) only matches when no args follow
+            // the method, so example.run(args) does NOT count as valid usage.
+            if (method == b"run" || method == b"call") && node.arguments().is_none() {
                 if let Some(recv) = node.receiver() {
                     if is_param_ref(&recv, self.param_name) {
                         self.found = true;

@@ -7,14 +7,22 @@ use ruby_prism::Visit;
 
 /// Flags usage of bare `subject` inside examples/hooks when it should be named.
 ///
-/// Corpus investigation (FP=2, FN=88):
+/// ## Corpus investigation (FP=2, FN=88):
 /// - Fixed: `find_subject_in_block` now recognizes `subject!` definitions (not just
 ///   `subject`). This affects `named_only` style where `subject!(:foo) { ... }` should
 ///   be treated as a named subject definition.
 /// - The remaining FNs (without corpus data to confirm) may be from edge cases in
 ///   how `subject` references are found in deeply nested AST structures, or from
 ///   config resolution differences.
-/// - FP=2 cause unknown without corpus line-level data.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// FP=2 fixed. Root cause: `subject(&b)` passes a block via `call.block()` as a
+/// `BlockArgumentNode`, not via `call.arguments()`. So `arguments().is_none()` is
+/// true for `subject(&b)`, causing it to look like a bare `subject` reference.
+/// RuboCop's `(send nil? :subject)` pattern does NOT match `subject(&b)` because
+/// in RuboCop AST it has a `(block_pass ...)` child. Fix: added guard
+/// `node.block().map_or(true, |b| b.as_block_argument_node().is_none())`.
 pub struct NamedSubject;
 
 /// EnforcedStyle:
@@ -192,9 +200,20 @@ impl<'pr> Visit<'pr> for BareSubjectFinder<'_> {
         // `subject { ... }` (the send node inside the block node). So we don't
         // check for `node.block().is_none()` — a `subject { ... }` inside a
         // hook is still a reference, not a definition.
+        //
+        // However, `subject(&b)` passes a block argument (BlockArgumentNode) via
+        // call.block(). In Prism, BlockArgumentNode is stored in `call.block()`,
+        // not in `call.arguments()`, so `arguments().is_none()` is true for
+        // `subject(&b)`. RuboCop's `(send nil? :subject)` pattern does NOT match
+        // `subject(&b)` because in RuboCop AST it appears as
+        // `(send nil :subject (block_pass (lvar :b)))` with a positional child.
+        // We guard against this by skipping when block() is a BlockArgumentNode.
         if name == b"subject"
             && node.receiver().is_none()
             && node.arguments().is_none()
+            && node
+                .block()
+                .is_none_or(|b| b.as_block_argument_node().is_none())
             && self.should_flag()
         {
             let loc = node.location();

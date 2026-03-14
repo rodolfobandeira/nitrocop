@@ -68,3 +68,13 @@ RSpec.describe Config do
     subject(:name)
   end
 end
+
+# subject called with block arg (&b) should not be flagged — it is not a bare
+# subject reference, it passes a block to subject (used with yield_control matchers)
+RSpec.describe Crawler do
+  subject { described_class.new }
+
+  it "yields nothing" do
+    expect { |b| subject(&b) }.not_to yield_control
+  end
+end
