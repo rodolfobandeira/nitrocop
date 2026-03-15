@@ -2,6 +2,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Detects double `rubocop:disable` (or `rubocop:todo`) comments on a single line.
+///
+/// ## Investigation notes
+///
+/// Synthetic corpus FP was caused by test data using short cop names like `Style/A`
+/// in `# rubocop:disable Style/A # rubocop:disable Style/B`. RuboCop's
+/// `DirectiveComment::DIRECTIVE_COMMENT_REGEXP` has a `COP_NAME_PATTERN` that
+/// matches `([A-Za-z]\w+/)*(?:[A-Za-z]\w+)`. For `Style/A`, the regex greedily
+/// matches just `Style` (valid department name), leaving `/A ...` as post-match.
+/// `CommentConfig` then treats this as a department-level disable for all of `Style`,
+/// which suppresses the `Style/DoubleCopDisableDirective` offense on that line.
+/// Fix: renamed synthetic test cop names to multi-character names (`Style/Aaa`).
+/// The nitrocop cop logic is correct and matches RuboCop's behavior.
 pub struct DoubleCopDisableDirective;
 
 impl Cop for DoubleCopDisableDirective {

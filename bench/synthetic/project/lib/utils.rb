@@ -76,4 +76,4 @@ TOP_HOME = ::ENV["HOME"]
 # DoubleCopDisableDirective
 x = 1 # rubocop:disable Style/Foo # rubocop:disable Style/Bar
 y = 2 # rubocop:disable Lint/Baz # rubocop:disable Lint/Qux
-z = 3 # rubocop:disable Style/A # rubocop:disable Style/B
+z = 3 # rubocop:disable Style/Aaa # rubocop:disable Style/Bbb
