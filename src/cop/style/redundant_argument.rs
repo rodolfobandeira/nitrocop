@@ -16,6 +16,12 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: use `call.opening_loc()` to get the `(` position for parenthesized
 /// calls, falling back to `arg.location()` for unparenthesized calls.
+///
+/// ## Additional fix: block argument FP (1 FP):
+/// `"a b".split(" ", &proc {})` was flagged as redundant because Prism stores
+/// `&expr` block arguments in `call.block()` rather than in `arguments()`, so
+/// `arg_list.len() == 1` and the cop only saw `" "`. Added early return when
+/// `call.block().is_some()` since a block argument changes method semantics.
 pub struct RedundantArgument;
 
 impl Cop for RedundantArgument {
@@ -56,7 +62,18 @@ impl Cop for RedundantArgument {
             return;
         }
 
+        // If the call has a block (do..end or {}) or any argument is a block
+        // argument (&proc, &block), the default argument is not redundant
+        // because the block changes method semantics.
+        if call.block().is_some() {
+            return;
+        }
+
         let arg = &arg_list[0];
+
+        if arg.as_block_argument_node().is_some() {
+            return;
+        }
 
         // RuboCop skips receiverless calls (except exit/exit!) because `split(" ")`
         // without an explicit receiver may be a different method than String#split.

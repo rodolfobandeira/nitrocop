@@ -12,3 +12,7 @@ chomp("\n")
 # Single-quoted newline is literal '\n', not a newline character
 str.chomp('\n')
 str.chomp!('\n')
+
+# Block argument changes semantics, not redundant
+"a b".split(" ", &proc {})
+"a b".split(" ", &block)
