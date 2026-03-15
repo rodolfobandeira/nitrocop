@@ -14,6 +14,10 @@ Usage:
     python3 scripts/corpus_smoke_test.py                    # auto-detect binary
     python3 scripts/corpus_smoke_test.py --binary path/to/nitrocop
     python3 scripts/corpus_smoke_test.py --update-baseline  # regenerate baseline
+
+When using the repo's normal release binary, the script will auto-rebuild if the
+binary is older than Rust source inputs. Explicit non-standard `--binary` paths
+must already be fresh.
 """
 
 from __future__ import annotations
@@ -86,8 +90,73 @@ SNAPSHOT_PATH = os.path.join(ROOT, "bench", "corpus", "smoke_baseline.json")
 REGRESSION_TOLERANCE = 5  # absolute offense count
 
 
+def release_binary_path() -> str:
+    target_dir = os.environ.get("CARGO_TARGET_DIR", "target")
+    return os.path.join(ROOT, target_dir, "release", "nitrocop")
+
+
+def rust_build_inputs() -> list[Path]:
+    paths = [
+        Path(ROOT) / "Cargo.toml",
+        Path(ROOT) / "Cargo.lock",
+        Path(ROOT) / "build.rs",
+    ]
+    src_dir = Path(ROOT) / "src"
+    if src_dir.is_dir():
+        paths.extend(src_dir.rglob("*.rs"))
+    return [path for path in paths if path.is_file()]
+
+
+def stale_binary_reason(binary: str) -> str | None:
+    binary_path = Path(binary)
+    if not binary_path.is_file():
+        return f"nitrocop binary not found at {binary}"
+
+    newest_input = max(rust_build_inputs(), key=lambda path: path.stat().st_mtime_ns, default=None)
+    if newest_input is None:
+        return None
+
+    binary_mtime = binary_path.stat().st_mtime_ns
+    newest_input_mtime = newest_input.stat().st_mtime_ns
+    if binary_mtime >= newest_input_mtime:
+        return None
+
+    try:
+        input_label = newest_input.relative_to(ROOT)
+    except ValueError:
+        input_label = newest_input
+    return f"binary is older than {input_label}"
+
+
+def binary_matches_release_path(binary: str) -> bool:
+    return Path(binary).resolve() == Path(release_binary_path()).resolve()
+
+
+def ensure_fresh_binary(binary: str, explicit: bool) -> str:
+    reason = stale_binary_reason(binary)
+    if reason is None:
+        return binary
+
+    can_rebuild = not explicit or binary_matches_release_path(binary)
+    if can_rebuild:
+        rebuilt_binary = release_binary_path()
+        print(f"Detected stale binary ({reason}); rebuilding with cargo build --release...")
+        subprocess.run(["cargo", "build", "--release"], cwd=ROOT, check=True)
+        rebuilt_reason = stale_binary_reason(rebuilt_binary)
+        if rebuilt_reason is not None:
+            sys.exit(f"ERROR: rebuilt binary is still stale: {rebuilt_reason}")
+        return rebuilt_binary
+
+    sys.exit(
+        "ERROR: stale nitrocop binary: "
+        f"{reason}. Rebuild with `cargo build --release` or pass a fresh `--binary`."
+    )
+
+
 def find_binary(explicit: str | None) -> str:
     if explicit:
+        if not os.path.isfile(explicit):
+            sys.exit(f"ERROR: nitrocop binary not found at {explicit}")
         return explicit
     target_dir = os.environ.get("CARGO_TARGET_DIR", "target")
     for profile in ["release", "ci", "debug"]:
@@ -301,6 +370,7 @@ def main():
     args = parser.parse_args()
 
     binary = find_binary(args.binary)
+    binary = ensure_fresh_binary(binary, explicit=args.binary is not None)
     print(f"Using binary: {binary}")
 
     # Check corpus bundle is available
