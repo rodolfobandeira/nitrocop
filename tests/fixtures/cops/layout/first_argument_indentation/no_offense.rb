@@ -67,3 +67,23 @@ tag.button \
 # Backslash continuation with correct indent
 f.write \
   "some string"
+
+# super() with correct indentation
+super(
+  serializer: Serializer,
+  host: host,
+  port: port.to_i
+)
+
+# Tab-indented code — mixed tabs/spaces should not be flagged
+branch = if condition
+	            "\n" + content_tag(
+	              'ul',
+	              items_from_tree(
+                    name, children, value_method, text_method, selected,
+                    options
+                  )
+                )
+              else
+                ''
+              end

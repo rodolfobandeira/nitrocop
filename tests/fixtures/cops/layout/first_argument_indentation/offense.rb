@@ -11,6 +11,14 @@ baz(
           ^^^ Layout/FirstArgumentIndentation: Indent the first argument one step more than the start of the previous line.
 )
 
+# super() with wrong indentation
+super(
+        serializer: Serializer,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/FirstArgumentIndentation: Indent the first argument one step more than the start of the previous line.
+        host: host,
+        port: port.to_i
+)
+
 # Non-parenthesized call with backslash continuation — first arg on next line
 output = Whenever.cron \
     <<-file

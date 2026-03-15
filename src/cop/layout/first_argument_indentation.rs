@@ -28,6 +28,25 @@ use crate::parse::source::SourceFile;
 /// 3. Tab-indented code — the tab indentation case is handled by the existing
 ///    indentation calculation but misfires when tabs mix with spaces. This is a
 ///    minor edge case that would need tab-width-aware indentation to fix properly.
+///
+/// ## Investigation (2026-03-15)
+///
+/// **FP fix (1 FP):** Tab-indented code (mixed tabs/spaces) caused false positives
+/// because `indentation_of` counts only spaces while `offset_to_line_col` counts
+/// tabs as 1 character, creating mismatches. Fixed by skipping the check entirely
+/// when either the argument line or the previous code line has tab indentation.
+///
+/// **FN fix (2 FN):** `super()` calls were not handled because Prism uses
+/// `SuperNode` (not `CallNode`) for explicit `super(args)`. Added
+/// `visit_super_node` to the visitor.
+///
+/// **Remaining FN (11):** 10 FNs from calls inside string interpolation in
+/// heredocs (puppetlabs, antiwork, autolab). The `in_interpolation` skip was
+/// added to fix FPs, and removing it would reintroduce those FPs. Fixing this
+/// would require distinguishing "interpolation with meaningful indentation
+/// context" from "interpolation where indentation is relative to the heredoc
+/// body." 1 FN from tab-indented code where RuboCop does flag the offense
+/// (charlotte-ruby) — would require tab-width-aware column counting.
 pub struct FirstArgumentIndentation;
 
 impl Cop for FirstArgumentIndentation {
@@ -139,6 +158,16 @@ impl FirstArgVisitor<'_> {
 
         // Skip bare operators (like `a + b`) and setter methods (like `self.x = 1`)
         if is_bare_operator(name) || is_setter_method(name) {
+            return;
+        }
+
+        // Skip if the argument's line or the previous code line contains tab
+        // indentation. Mixed tabs/spaces make column calculations unreliable,
+        // and RuboCop effectively skips these too (its IndentationWidth layer
+        // handles tab-width expansion at a higher level).
+        if line_has_tab_indentation(self.source, arg_line)
+            || prev_code_line_has_tab_indentation(self.source, arg_line)
+        {
             return;
         }
 
@@ -309,6 +338,47 @@ fn previous_code_line_indent(source: &SourceFile, line_number: usize) -> usize {
     }
 }
 
+/// Check if a line has tab characters in its leading whitespace.
+fn line_has_tab_indentation(source: &SourceFile, line_number: usize) -> bool {
+    let line_bytes = source.lines().nth(line_number - 1).unwrap_or(b"");
+    line_bytes
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .any(|&b| b == b'\t')
+}
+
+/// Check if the previous non-blank, non-comment code line has tab indentation.
+fn prev_code_line_has_tab_indentation(source: &SourceFile, line_number: usize) -> bool {
+    let mut line_num = line_number;
+    loop {
+        if line_num <= 1 {
+            return false;
+        }
+        line_num -= 1;
+        let line_bytes = source.lines().nth(line_num - 1).unwrap_or(b"");
+        // Skip blank lines
+        if line_bytes
+            .iter()
+            .all(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+        {
+            continue;
+        }
+        // Skip comment lines
+        let trimmed = line_bytes
+            .iter()
+            .skip_while(|&&b| b == b' ' || b == b'\t')
+            .copied()
+            .next();
+        if trimmed == Some(b'#') {
+            continue;
+        }
+        return line_bytes
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .any(|&b| b == b'\t');
+    }
+}
+
 fn is_bare_operator(name: &str) -> bool {
     // Operators that can be defined as methods
     matches!(
@@ -383,6 +453,43 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
 
         self.parent_call_stack.push(parent_info);
         ruby_prism::visit_call_node(self, node);
+        self.parent_call_stack.pop();
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        let call_start_offset = node.location().start_offset();
+
+        // Check this super call for first argument indentation
+        self.check_call(
+            call_start_offset,
+            Some(node.keyword_loc()),
+            node.lparen_loc(),
+            None,
+            node.arguments(),
+            "super",
+        );
+
+        // super() is always parenthesized and eligible
+        let is_parenthesized = node.lparen_loc().is_some();
+
+        let arg_start_offsets: Vec<usize> = node
+            .arguments()
+            .map(|args| {
+                args.arguments()
+                    .iter()
+                    .map(|arg| arg.location().start_offset())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let parent_info = ParentCallInfo {
+            is_parenthesized,
+            arg_start_offsets,
+            is_eligible: true,
+        };
+
+        self.parent_call_stack.push(parent_info);
+        ruby_prism::visit_super_node(self, node);
         self.parent_call_stack.pop();
     }
 
