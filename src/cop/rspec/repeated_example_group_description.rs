@@ -21,6 +21,13 @@ use std::collections::HashMap;
 /// - `skip_or_pending` filtering: groups containing bare `skip` or `pending` calls are
 ///   excluded from duplicate checking (matches RuboCop's SkipOrPending mixin).
 /// - Empty description filtering: groups with no arguments are excluded.
+///
+/// ## Corpus investigation (FN=79, 2026-03-15)
+///
+/// FN=79: description_signature used raw source bytes for comparison, causing
+/// single-quoted vs double-quoted strings to be treated as different descriptions.
+/// RuboCop's AST node equality treats "foo" and 'foo' identically (both are str nodes).
+/// Fixed by normalizing StringNode/SymbolNode to their unescaped values.
 pub struct RepeatedExampleGroupDescription;
 
 impl Cop for RepeatedExampleGroupDescription {
@@ -189,9 +196,30 @@ fn description_signature(source: &SourceFile, call: &ruby_prism::CallNode<'_>) -
         return None;
     }
 
-    // Build signature from all arguments source text
-    let args_loc = args.location();
-    let sig = source.as_bytes()[args_loc.start_offset()..args_loc.end_offset()].to_vec();
+    let mut sig: Vec<u8> = Vec::new();
+
+    // Normalize the first argument (description string/symbol) to its unescaped value.
+    // RuboCop compares AST node equality where "foo" and 'foo' produce the same (str "foo") node.
+    let first = &arg_list[0];
+    if let Some(s) = first.as_string_node() {
+        sig.extend_from_slice(b"str:");
+        sig.extend_from_slice(s.unescaped());
+    } else if let Some(sym) = first.as_symbol_node() {
+        sig.extend_from_slice(b"sym:");
+        sig.extend_from_slice(sym.unescaped());
+    } else {
+        // Constants, interpolated strings, etc: use source text
+        let loc = first.location();
+        sig.extend_from_slice(&source.as_bytes()[loc.start_offset()..loc.end_offset()]);
+    }
+
+    // Metadata args: use source text (symbols here won't have quote style differences)
+    for arg in &arg_list[1..] {
+        sig.push(b',');
+        let loc = arg.location();
+        sig.extend_from_slice(&source.as_bytes()[loc.start_offset()..loc.end_offset()]);
+    }
+
     Some(sig)
 }
 

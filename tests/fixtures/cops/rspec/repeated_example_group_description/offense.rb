@@ -43,3 +43,14 @@ class MySpec
     it { also_passes }
   end
 end
+
+# Quote style difference (double vs single) should still flag as duplicate
+describe "quoted with double" do
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExampleGroupDescription: Repeated describe block description on line(s) [44]
+  it { something }
+end
+
+describe 'quoted with double' do
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExampleGroupDescription: Repeated describe block description on line(s) [40]
+  it { other }
+end
