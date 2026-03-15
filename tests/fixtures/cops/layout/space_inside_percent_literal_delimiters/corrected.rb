@@ -5,3 +5,6 @@ a = %x(ls -l)
 b = %x[echo hello]
 c = %x(pwd)
 d = %x(#{cmd} --flag)
+e = %w[]
+f = %w()
+g = %i()

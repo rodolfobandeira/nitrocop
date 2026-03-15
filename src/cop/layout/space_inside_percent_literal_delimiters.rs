@@ -11,6 +11,15 @@ use crate::parse::source::SourceFile;
 /// processes %x literals separately. Added both x-string node types to
 /// interested_node_types and extract open/close locations for all three
 /// node families.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=0, FN=8. All 8 FNs from multiline percent
+/// literals with all-whitespace bodies (e.g., `%w[\n]`). RuboCop has two
+/// checks: `add_offenses_for_blank_spaces` (multiline all-whitespace body)
+/// and `add_offenses_for_unnecessary_spaces` (single-line leading/trailing).
+/// nitrocop only had the single-line check. Fixed by adding a blank-body
+/// check before the multiline skip.
 pub struct SpaceInsidePercentLiteralDelimiters;
 
 /// Check for spaces inside percent literal delimiters given the opening
@@ -26,20 +35,50 @@ fn check_percent_literal(
 ) {
     let bytes = source.as_bytes();
 
-    // Skip multiline
-    let (open_line, _) = source.offset_to_line_col(open_end.saturating_sub(1));
-    let (close_line, _) = source.offset_to_line_col(close_start);
-    if open_line != close_line {
-        return;
-    }
-
     if close_start <= open_end {
         return;
     }
 
     let content = &bytes[open_end..close_start];
 
-    // Check for leading spaces
+    // RuboCop's `add_offenses_for_blank_spaces`: if the entire body between
+    // delimiters is whitespace-only (including newlines), flag it regardless
+    // of whether the literal is multiline. E.g., `%w[\n]` or `%w( )`.
+    if !content.is_empty()
+        && content
+            .iter()
+            .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        let (line, col) = source.offset_to_line_col(open_end);
+        let mut diag = cop.diagnostic(
+            source,
+            line,
+            col,
+            "Do not use spaces inside percent literal delimiters.".to_string(),
+        );
+        if let Some(corr) = corrections.as_mut() {
+            corr.push(crate::correction::Correction {
+                start: open_end,
+                end: close_start,
+                replacement: String::new(),
+                cop_name: cop.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
+        return;
+    }
+
+    // Skip multiline for per-line leading/trailing space checks
+    // (RuboCop's `add_offenses_for_unnecessary_spaces` is single-line only)
+    let (open_line, _) = source.offset_to_line_col(open_end.saturating_sub(1));
+    let (close_line, _) = source.offset_to_line_col(close_start);
+    if open_line != close_line {
+        return;
+    }
+
+    // Check for leading spaces (single-line only from here)
     if !content.is_empty() && content[0] == b' ' {
         let (line, col) = source.offset_to_line_col(open_end);
         let mut diag = cop.diagnostic(

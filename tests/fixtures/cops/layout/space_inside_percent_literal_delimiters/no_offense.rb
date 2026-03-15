@@ -8,3 +8,11 @@ d = %x(ls -l)
 e = %x[echo hello]
 f = `backtick command`
 g = %x(#{cmd} --flag)
+h = %w(
+  foo
+  bar
+)
+i = %i(
+  one
+  two
+)
