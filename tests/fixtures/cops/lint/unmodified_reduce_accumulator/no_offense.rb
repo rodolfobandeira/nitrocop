@@ -42,3 +42,11 @@ end
 
 # Returning accumulator index with element key is acceptable
 foo.reduce { |result, key| result[key] }
+
+processors.inject([request, headers]) do |packet, processor|
+  processor.call(*packet)
+end
+
+scopes.reverse_each.reduce(compiled) do |body, scope|
+  scope.wrap(body: [body])
+end

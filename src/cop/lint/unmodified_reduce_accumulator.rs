@@ -7,6 +7,7 @@ use crate::cop::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Looks for `reduce` or `inject` blocks where the value returned (implicitly or
 /// explicitly) does not include the accumulator. A block is considered valid as
@@ -20,6 +21,21 @@ use crate::parse::source::SourceFile;
 ///
 /// FN fix: Added accumulator index detection (`acc[foo]` and `acc[foo] = bar`)
 /// matching RuboCop's `accumulator_index?` / MSG_INDEX pattern.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=4, FN=1.
+///
+/// FP=4: accumulator references nested inside splats, arrays, and keyword/hash
+/// arguments were being missed. That made calls like `processor.call(*packet)`
+/// and `scope.wrap(body: [body])` look like element-only returns even though the
+/// accumulator is part of the returned value.
+///
+/// FN=1: single-expression block bodies (for example `{ |memo, item|
+/// expect(item).to eq(...) }`) were ignored because Prism returns the body as a
+/// direct expression node rather than a `StatementsNode`. Within those bodies,
+/// chained calls rooted in a bare method call that only uses the element still
+/// need to count as element-only returns.
 pub struct UnmodifiedReduceAccumulator;
 
 impl Cop for UnmodifiedReduceAccumulator {
@@ -104,16 +120,11 @@ impl Cop for UnmodifiedReduceAccumulator {
             None => return,
         };
 
-        // Get the statements in the body
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
+        let body_stmts: Vec<ruby_prism::Node<'_>> = if let Some(stmts) = body.as_statements_node() {
+            stmts.body().iter().collect()
+        } else {
+            vec![body]
         };
-
-        let body_stmts: Vec<ruby_prism::Node<'_>> = stmts.body().iter().collect();
-        if body_stmts.is_empty() {
-            return;
-        }
 
         // Check each return point (last expression, next, break)
         check_return_values(
@@ -501,115 +512,49 @@ fn element_modified_recursive(node: &ruby_prism::Node<'_>, el_name: &str) -> boo
     false
 }
 
-/// Check if a node matches RuboCop's lvar_used? pattern (shallow, top-level only):
-/// - `(lvar %1)` — bare variable read
-/// - `(lvasgn %1 ...)` — variable assignment
-/// - `(send (lvar %1) :<< ...)` — shovel operator
-/// - `(dstr (begin (lvar %1)))` — interpolation
-///
-/// Does NOT match op/or/and-assignment due to NodePattern arity mismatch.
+/// Check if a node contains a local variable reference or assignment for the
+/// given name anywhere within the return expression.
 fn lvar_used(node: &ruby_prism::Node<'_>, var_name: &str) -> bool {
-    // Direct variable read
-    if let Some(read) = node.as_local_variable_read_node() {
-        if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name {
-            return true;
-        }
+    struct VarFinder<'a> {
+        target: &'a str,
+        found: bool,
     }
-    // Variable assignment (lvasgn)
-    if let Some(write) = node.as_local_variable_write_node() {
-        if std::str::from_utf8(write.name().as_slice()).unwrap_or("") == var_name {
-            return true;
-        }
-    }
-    // acc << ... (shovel)
-    if let Some(call) = node.as_call_node() {
-        if call.name().as_slice() == b"<<" {
-            if let Some(recv) = call.receiver() {
-                if let Some(read) = recv.as_local_variable_read_node() {
-                    if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name {
-                        return true;
-                    }
-                }
+
+    impl<'pr> Visit<'pr> for VarFinder<'_> {
+        fn visit_local_variable_read_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableReadNode<'pr>,
+        ) {
+            if std::str::from_utf8(node.name().as_slice()).unwrap_or("") == self.target {
+                self.found = true;
+                return;
             }
+            ruby_prism::visit_local_variable_read_node(self, node);
         }
-    }
-    // Interpolation: "#{var}"
-    if let Some(interp) = node.as_interpolated_string_node() {
-        for part in interp.parts().iter() {
-            if let Some(embedded) = part.as_embedded_statements_node() {
-                if let Some(stmts) = embedded.statements() {
-                    for stmt in stmts.body().iter() {
-                        if let Some(read) = stmt.as_local_variable_read_node() {
-                            if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                }
+
+        fn visit_local_variable_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableWriteNode<'pr>,
+        ) {
+            if std::str::from_utf8(node.name().as_slice()).unwrap_or("") == self.target {
+                self.found = true;
+                return;
             }
+            ruby_prism::visit_local_variable_write_node(self, node);
         }
     }
-    // NOTE: RuboCop's lvar_used? does NOT match op-assignment (acc += ...),
-    // or-assignment (acc ||= ...), or and-assignment (acc &&= ...) due to
-    // NodePattern arity mismatch with SHORTHAND_ASSIGNMENTS. These are 3-child
-    // nodes but the pattern expects only 1 child: (%SHORTHAND_ASSIGNMENTS (lvasgn %1)).
-    false
+
+    let mut finder = VarFinder {
+        target: var_name,
+        found: false,
+    };
+    finder.visit(node);
+    finder.found
 }
 
-/// Check if an expression references a variable by name (deep recursive check).
+/// Check if an expression references a variable by name anywhere in the node tree.
 fn references_var(node: &ruby_prism::Node<'_>, var_name: &str) -> bool {
-    if let Some(read) = node.as_local_variable_read_node() {
-        if std::str::from_utf8(read.name().as_slice()).unwrap_or("") == var_name {
-            return true;
-        }
-    }
-
-    // Check in compound expressions
-    if let Some(call) = node.as_call_node() {
-        if let Some(recv) = call.receiver() {
-            if references_var(&recv, var_name) {
-                return true;
-            }
-        }
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                if references_var(&arg, var_name) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Check in interpolated strings
-    if let Some(interp) = node.as_interpolated_string_node() {
-        for part in interp.parts().iter() {
-            if let Some(embedded) = part.as_embedded_statements_node() {
-                if let Some(stmts) = embedded.statements() {
-                    for stmt in stmts.body().iter() {
-                        if references_var(&stmt, var_name) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Check parenthesized expressions
-    if let Some(parens) = node.as_parentheses_node() {
-        if let Some(body) = parens.body() {
-            if let Some(stmts) = body.as_statements_node() {
-                for stmt in stmts.body().iter() {
-                    if references_var(&stmt, var_name) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    false
+    lvar_used(node, var_name)
 }
 
 /// Check if the expression only references the element variable (and not the accumulator).
@@ -646,6 +591,13 @@ fn is_only_element_expr(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &s
                     return true;
                 }
             }
+            if is_bare_call_chain_only_element(&recv, acc_name, el_name)
+                && call
+                    .arguments()
+                    .is_none_or(|args| args_have_no_acc_or_other_vars(&args, acc_name, el_name))
+            {
+                return true;
+            }
             // Receiver is a complex expression (method chain) — not "only element"
             return false;
         }
@@ -655,7 +607,10 @@ fn is_only_element_expr(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &s
                 let arg_list: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
                 let has_el = arg_list.iter().any(|a| references_var(a, el_name));
                 let has_acc = arg_list.iter().any(|a| references_var(a, acc_name));
-                if has_el && !has_acc {
+                let has_other = arg_list
+                    .iter()
+                    .any(|a| has_any_local_var(a) && !references_var(a, el_name));
+                if has_el && !has_acc && !has_other {
                     return true;
                 }
             }
@@ -667,24 +622,96 @@ fn is_only_element_expr(node: &ruby_prism::Node<'_>, acc_name: &str, el_name: &s
 
 /// Check if an expression contains any local variable reference.
 fn has_any_local_var(node: &ruby_prism::Node<'_>) -> bool {
-    if node.as_local_variable_read_node().is_some() {
-        return true;
+    struct AnyVarFinder {
+        found: bool,
     }
-    if let Some(call) = node.as_call_node() {
-        if let Some(recv) = call.receiver() {
-            if has_any_local_var(&recv) {
-                return true;
-            }
+
+    impl<'pr> Visit<'pr> for AnyVarFinder {
+        fn visit_local_variable_read_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableReadNode<'pr>,
+        ) {
+            self.found = true;
+            ruby_prism::visit_local_variable_read_node(self, node);
         }
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                if has_any_local_var(&arg) {
-                    return true;
-                }
-            }
+
+        fn visit_local_variable_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableWriteNode<'pr>,
+        ) {
+            self.found = true;
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+
+        fn visit_local_variable_operator_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+        ) {
+            self.found = true;
+            ruby_prism::visit_local_variable_operator_write_node(self, node);
+        }
+
+        fn visit_local_variable_or_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+        ) {
+            self.found = true;
+            ruby_prism::visit_local_variable_or_write_node(self, node);
+        }
+
+        fn visit_local_variable_and_write_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+        ) {
+            self.found = true;
+            ruby_prism::visit_local_variable_and_write_node(self, node);
         }
     }
-    false
+
+    let mut finder = AnyVarFinder { found: false };
+    finder.visit(node);
+    finder.found
+}
+
+fn args_have_no_acc_or_other_vars(
+    args: &ruby_prism::ArgumentsNode<'_>,
+    acc_name: &str,
+    el_name: &str,
+) -> bool {
+    args.arguments().iter().all(|arg| {
+        (references_var(&arg, el_name) || !has_any_local_var(&arg))
+            && !references_var(&arg, acc_name)
+    })
+}
+
+fn is_bare_call_chain_only_element(
+    node: &ruby_prism::Node<'_>,
+    acc_name: &str,
+    el_name: &str,
+) -> bool {
+    let call = match node.as_call_node() {
+        Some(call) => call,
+        None => return false,
+    };
+
+    if call.receiver().is_none() {
+        let Some(args) = call.arguments() else {
+            return false;
+        };
+        let has_el = args
+            .arguments()
+            .iter()
+            .any(|arg| references_var(&arg, el_name));
+        return has_el && args_have_no_acc_or_other_vars(&args, acc_name, el_name);
+    }
+
+    let Some(recv) = call.receiver() else {
+        return false;
+    };
+    is_bare_call_chain_only_element(&recv, acc_name, el_name)
+        && call
+            .arguments()
+            .is_none_or(|args| args_have_no_acc_or_other_vars(&args, acc_name, el_name))
 }
 
 #[cfg(test)]
