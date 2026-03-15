@@ -4,9 +4,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Default style is `have_received` — flags `expect(...).to receive(...)`.
+///
+/// Corpus investigation (46 FN, 0 FP): FNs caused by compound expectations
+/// like `expect(foo).to receive(:bar).and receive(:baz)` where the second
+/// `receive` call is nested as an argument to `.and`/`.or` rather than in the
+/// receiver chain. RuboCop uses `def_node_search` (recursive subtree search)
+/// to find ALL `receive`/`have_received` calls, while nitrocop previously only
+/// walked the receiver chain. Fixed by implementing recursive subtree search
+/// matching RuboCop's `receive_message` node search behavior.
 pub struct MessageSpies;
 
-/// Default style is `have_received` — flags `expect(...).to receive(...)`.
 impl Cop for MessageSpies {
     fn name(&self) -> &'static str {
         "RSpec/MessageSpies"
@@ -58,76 +66,100 @@ impl Cop for MessageSpies {
             return;
         }
 
-        // Check that the matcher argument is `receive` (not `have_received`)
+        // Check that the matcher argument contains `receive` or `have_received`.
+        // Use recursive search (matching RuboCop's def_node_search :receive_message)
+        // to find ALL receive/have_received calls in the argument subtree.
+        // This handles compound expectations like:
+        //   expect(foo).to receive(:bar).and receive(:baz)
+        // where the second `receive` is an argument to `.and`, not in the
+        // receiver chain.
         let args = match call.arguments() {
             Some(a) => a,
             None => return,
         };
-        let arg_list: Vec<_> = args.arguments().iter().collect();
-        if arg_list.is_empty() {
-            return;
-        }
 
-        // Walk into chained calls to find the root matcher name
-        let matcher_call = find_root_call(&arg_list[0]);
-        let matcher_call = match matcher_call {
-            Some(c) => c,
-            None => return,
+        let target_name = if enforced_style == "receive" {
+            b"have_received" as &[u8]
+        } else {
+            b"receive" as &[u8]
         };
 
-        let matcher_name = matcher_call.name().as_slice();
-        if matcher_call.receiver().is_some() {
-            return;
+        let mut found = Vec::new();
+        for arg in args.arguments().iter() {
+            find_matcher_calls(&arg, target_name, &mut found);
         }
 
-        if enforced_style == "receive" {
-            // "receive" style: flag `have_received`, prefer `receive`
-            if matcher_name != b"have_received" {
-                return;
-            }
-            let loc = matcher_call.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                "Prefer `receive` for setting message expectations.".to_string(),
-            ));
+        let msg = if enforced_style == "receive" {
+            "Prefer `receive` for setting message expectations."
         } else {
-            // Default "have_received" style: flag `receive`, prefer `have_received`
-            if matcher_name != b"receive" {
-                return;
-            }
-            let loc = matcher_call.location();
-            let (line, column) = source.offset_to_line_col(loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                "Prefer `have_received` for setting message expectations. Setup the object as a spy using `allow` or `instance_spy`.".to_string(),
-            ));
+            "Prefer `have_received` for setting message expectations. Setup the object as a spy using `allow` or `instance_spy`."
+        };
+
+        for (start_offset, _end_offset) in found {
+            let (line, column) = source.offset_to_line_col(start_offset);
+            diagnostics.push(self.diagnostic(source, line, column, msg.to_string()));
         }
     }
 }
 
-fn find_root_call<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::CallNode<'a>> {
-    let call = node.as_call_node()?;
-    // Walk receiver chain to find the root
-    let mut current = call;
-    while let Some(recv) = current.receiver() {
-        if let Some(inner) = recv.as_call_node() {
-            current = inner;
-        } else {
-            break;
+/// Recursively search a node subtree for `(send nil? target_name ...)` calls,
+/// matching RuboCop's `def_node_search :receive_message` behavior.
+/// Handles compound expectations like `receive(:a).and receive(:b)` where
+/// the second `receive` is an argument to `.and`/`.or`.
+fn find_matcher_calls(
+    node: &ruby_prism::Node<'_>,
+    target_name: &[u8],
+    out: &mut Vec<(usize, usize)>,
+) {
+    if let Some(call) = node.as_call_node() {
+        // Check if this is a bare `receive(...)` or `have_received(...)` call
+        if call.name().as_slice() == target_name && call.receiver().is_none() {
+            let loc = call.location();
+            out.push((loc.start_offset(), loc.end_offset()));
+        }
+        // Recurse into receiver
+        if let Some(recv) = call.receiver() {
+            find_matcher_calls(&recv, target_name, out);
+        }
+        // Recurse into arguments
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                find_matcher_calls(&arg, target_name, out);
+            }
+        }
+        // Recurse into block body if present
+        if let Some(block) = call.block() {
+            if let Some(body) = block.as_block_node().and_then(|b| b.body()) {
+                find_matcher_calls(&body, target_name, out);
+            }
+        }
+    } else if let Some(stmts) = node.as_statements_node() {
+        for child in stmts.body().iter() {
+            find_matcher_calls(&child, target_name, out);
         }
     }
-    Some(current)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MessageSpies, "cops/rspec/message_spies");
+
+    #[test]
+    fn compound_receive_produces_two_offenses() {
+        let source = b"expect(foo).to receive(:bar).and receive(:baz)\n";
+        let diags = crate::testutil::run_cop_full(&MessageSpies, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "compound receive should produce 2 offenses: {:?}",
+            diags
+        );
+        // First at `receive(:bar)` column 15
+        assert_eq!(diags[0].location.column, 15);
+        // Second at `receive(:baz)` column 33
+        assert_eq!(diags[1].location.column, 33);
+    }
 
     #[test]
     fn receive_style_flags_have_received() {
