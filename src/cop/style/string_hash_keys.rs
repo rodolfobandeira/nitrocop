@@ -18,6 +18,29 @@ use ruby_prism::Visit;
 ///
 /// Fix: Converted from `check_node` to `check_source` with a visitor that
 /// tracks whether we're inside an exempted method call's arguments.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// Root cause of 52 FNs: The env method exemption was too broad — it
+/// exempted ALL hashes in the entire subtree of a `gsub`/`popen`/`spawn`
+/// call. RuboCop's `^^` pattern only exempts hashes that are DIRECT
+/// arguments (pair -> hash -> call). Hashes in the receiver chain (e.g.,
+/// `{...}.to_json.gsub(...)`) or inside arrays (e.g.,
+/// `IO.popen([{"FOO" => "bar"}, ...])`) are NOT exempt.
+/// For `Open3.pipeline*`, RuboCop uses `^^^` (great-grandparent), which
+/// allows one extra nesting level (pair -> hash -> array -> call).
+///
+/// Fix: Replaced depth-based exemption with a set of exempt hash byte
+/// offsets. When visiting an env method call, only the direct hash/keyword
+/// hash arguments (or for pipeline methods, hashes inside direct array
+/// arguments) are added to the exempt set.
+///
+/// Root cause of 62 FPs: Heredoc strings used as hash keys. In the Parser
+/// gem, heredocs are `dstr` nodes (not `str`), so RuboCop's
+/// `(pair (str _) _)` matcher skips them. In Prism, heredocs without
+/// interpolation are `StringNode` with `opening_loc` starting with `<<`.
+///
+/// Fix: Skip `StringNode` keys whose `opening_loc` starts with `<<`.
 pub struct StringHashKeys;
 
 impl Cop for StringHashKeys {
@@ -42,7 +65,7 @@ impl Cop for StringHashKeys {
             source,
             cop: self,
             diagnostics: Vec::new(),
-            exempt_depth: 0,
+            exempt_hash_offsets: std::collections::HashSet::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -53,53 +76,70 @@ struct StringHashKeysVisitor<'a> {
     source: &'a SourceFile,
     cop: &'a StringHashKeys,
     diagnostics: Vec<Diagnostic>,
-    /// Depth counter: when > 0, we're inside arguments of an exempted method call.
-    exempt_depth: usize,
+    /// Set of byte offsets for hash nodes that are exempt (direct args of env methods).
+    exempt_hash_offsets: std::collections::HashSet<usize>,
+}
+
+/// Exemption depth for env method calls.
+/// `Direct` means pair -> hash -> call (RuboCop's `^^` pattern).
+/// `Nested` means pair -> hash -> array -> call (RuboCop's `^^^` pattern, for pipeline methods).
+#[derive(Clone, Copy)]
+enum EnvMethodKind {
+    /// Hash must be a direct argument: `^^(send ...)`
+    Direct,
+    /// Hash can be inside an array argument: `^^^(send ...)`
+    Nested,
 }
 
 /// Check if a call matches one of the environment-method patterns that RuboCop exempts.
-fn is_env_method_call(call: &ruby_prism::CallNode<'_>) -> bool {
+/// Returns the exemption kind if matched.
+fn env_method_kind(call: &ruby_prism::CallNode<'_>) -> Option<EnvMethodKind> {
     let method = call.name();
     let method_name = method.as_slice();
 
     match call.receiver() {
         Some(ref receiver) => {
-            // IO.popen
+            // IO.popen — ^^
             if method_name == b"popen" && is_const(receiver, b"IO") {
-                return true;
+                return Some(EnvMethodKind::Direct);
             }
-            // Open3.capture2/capture2e/capture3/popen2/popen2e/popen3
-            if is_const(receiver, b"Open3")
-                && matches!(
+            if is_const(receiver, b"Open3") {
+                // Open3.capture2/capture2e/capture3/popen2/popen2e/popen3 — ^^
+                if matches!(
                     method_name,
-                    b"capture2"
-                        | b"capture2e"
-                        | b"capture3"
-                        | b"popen2"
-                        | b"popen2e"
-                        | b"popen3"
-                        | b"pipeline"
+                    b"capture2" | b"capture2e" | b"capture3" | b"popen2" | b"popen2e" | b"popen3"
+                ) {
+                    return Some(EnvMethodKind::Direct);
+                }
+                // Open3.pipeline* — ^^^
+                if matches!(
+                    method_name,
+                    b"pipeline"
                         | b"pipeline_r"
                         | b"pipeline_rw"
                         | b"pipeline_start"
                         | b"pipeline_w"
-                )
-            {
-                return true;
+                ) {
+                    return Some(EnvMethodKind::Nested);
+                }
             }
-            // Kernel.spawn / Kernel.system
+            // Kernel.spawn / Kernel.system — ^^
             if is_const(receiver, b"Kernel") && matches!(method_name, b"spawn" | b"system") {
-                return true;
+                return Some(EnvMethodKind::Direct);
             }
-            // anything.gsub / anything.gsub!
+            // anything.gsub / anything.gsub! — ^^
             if matches!(method_name, b"gsub" | b"gsub!") {
-                return true;
+                return Some(EnvMethodKind::Direct);
             }
-            false
+            None
         }
         None => {
-            // Bare spawn/system (implicit Kernel receiver)
-            matches!(method_name, b"spawn" | b"system")
+            // Bare spawn/system (implicit Kernel receiver) — ^^
+            if matches!(method_name, b"spawn" | b"system") {
+                Some(EnvMethodKind::Direct)
+            } else {
+                None
+            }
         }
     }
 }
@@ -123,17 +163,25 @@ fn is_const(node: &ruby_prism::Node<'_>, name: &[u8]) -> bool {
 }
 
 impl StringHashKeysVisitor<'_> {
-    fn check_hash_elements<'pr, I>(&mut self, elements: I)
+    fn check_hash_elements<'pr, I>(&mut self, elements: I, hash_offset: usize)
     where
         I: Iterator<Item = ruby_prism::Node<'pr>>,
     {
-        if self.exempt_depth > 0 {
+        if self.exempt_hash_offsets.contains(&hash_offset) {
             return;
         }
         for element in elements {
             if let Some(assoc) = element.as_assoc_node() {
                 let key = assoc.key();
-                if key.as_string_node().is_some() {
+                if let Some(str_node) = key.as_string_node() {
+                    // Skip heredoc keys — in Parser gem they are `dstr` not `str`,
+                    // so RuboCop's `(pair (str _) _)` matcher doesn't match them.
+                    if str_node
+                        .opening_loc()
+                        .is_some_and(|o| o.as_slice().starts_with(b"<<"))
+                    {
+                        continue;
+                    }
                     let loc = key.location();
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                     self.diagnostics.push(self.cop.diagnostic(
@@ -146,26 +194,53 @@ impl StringHashKeysVisitor<'_> {
             }
         }
     }
+
+    /// Collect byte offsets of hash/keyword-hash nodes that are direct arguments
+    /// of an env method call, so they can be exempted from the string key check.
+    fn collect_exempt_hashes(&mut self, call: &ruby_prism::CallNode<'_>, kind: EnvMethodKind) {
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                match kind {
+                    EnvMethodKind::Direct => {
+                        // Direct hash or keyword hash argument
+                        self.mark_hash_exempt(&arg);
+                    }
+                    EnvMethodKind::Nested => {
+                        // Hash inside an array argument (one level deeper)
+                        if let Some(array) = arg.as_array_node() {
+                            for elem in array.elements().iter() {
+                                self.mark_hash_exempt(&elem);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn mark_hash_exempt(&mut self, node: &ruby_prism::Node<'_>) {
+        if node.as_hash_node().is_some() || node.as_keyword_hash_node().is_some() {
+            self.exempt_hash_offsets
+                .insert(node.location().start_offset());
+        }
+    }
 }
 
 impl<'pr> Visit<'pr> for StringHashKeysVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        if is_env_method_call(node) {
-            self.exempt_depth += 1;
-            ruby_prism::visit_call_node(self, node);
-            self.exempt_depth -= 1;
-        } else {
-            ruby_prism::visit_call_node(self, node);
+        if let Some(kind) = env_method_kind(node) {
+            self.collect_exempt_hashes(node, kind);
         }
+        ruby_prism::visit_call_node(self, node);
     }
 
     fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
-        self.check_hash_elements(node.elements().iter());
+        self.check_hash_elements(node.elements().iter(), node.location().start_offset());
         ruby_prism::visit_hash_node(self, node);
     }
 
     fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
-        self.check_hash_elements(node.elements().iter());
+        self.check_hash_elements(node.elements().iter(), node.location().start_offset());
         ruby_prism::visit_keyword_hash_node(self, node);
     }
 }

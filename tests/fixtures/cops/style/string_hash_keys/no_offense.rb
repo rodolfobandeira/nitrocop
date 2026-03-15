@@ -28,3 +28,13 @@ Kernel.system({"FOO" => "bar"}, "cmd")
 # gsub/gsub! with string replacement hash
 "hello".gsub(/pattern/, "old" => "new")
 "hello".gsub!(/pattern/, "old" => "new")
+
+# Heredoc used as hash key (Parser gem treats as dstr, not str)
+produces(<<-EXAMPLE => 'defined(foo)')
+  class bar { }
+EXAMPLE
+
+# Another heredoc key style
+x = { <<~KEY => 'value' }
+  multiline content
+KEY

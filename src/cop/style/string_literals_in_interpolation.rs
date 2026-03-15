@@ -4,6 +4,25 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/StringLiteralsInInterpolation checks for string literals inside
+/// `#{}` interpolation that use the wrong quote style.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// **FPs (65):** All FPs came from string literals inside `%x()` or backtick
+/// (`` ` ``) interpolation. RuboCop's `inside_interpolation?` only checks for
+/// strings inside `:dstr` (double-quoted), `:dsym` (symbol), or `:regexp`
+/// interpolation — NOT `:xstr` (command strings). In Prism, `%x()` and
+/// backtick strings parse as `InterpolatedXStringNode`, so we skip recursion
+/// into those nodes entirely.
+///
+/// **FNs (24):** The `needs_double_quotes` function incorrectly treated `\\`
+/// (escaped backslash) and `\"` (escaped double quote) as requiring double
+/// quotes. In Ruby, `\\` is valid in single-quoted strings (`'\\'`), and `\"`
+/// inside a double-quoted string doesn't need escaping in single quotes.
+/// Fixed to match RuboCop's `double_quotes_required?` which only requires
+/// double quotes for escape sequences not expressible in single-quoted
+/// strings (e.g., `\n`, `\t`, `\x`, `\u`).
 pub struct StringLiteralsInInterpolation;
 
 impl Cop for StringLiteralsInInterpolation {
@@ -48,6 +67,15 @@ impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
         self.in_interpolation = true;
         ruby_prism::visit_embedded_statements_node(self, node);
         self.in_interpolation = was;
+    }
+
+    // RuboCop only checks strings inside dstr, dsym, and regexp — NOT xstr.
+    // Skip backtick and %x() command execution strings entirely.
+    fn visit_interpolated_x_string_node(
+        &mut self,
+        _node: &ruby_prism::InterpolatedXStringNode<'pr>,
+    ) {
+        // Don't recurse — strings inside xstr interpolation are not flagged.
     }
 
     fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
@@ -106,9 +134,14 @@ fn needs_double_quotes(content: &[u8]) -> bool {
         }
         if content[i] == b'\\' && i + 1 < content.len() {
             match content[i + 1] {
-                b'n' | b't' | b'r' | b'\\' | b'"' | b'0' | b'a' | b'b' | b'e' | b'f' | b's'
-                | b'v' => return true,
+                // These escape sequences only work in double-quoted strings
+                b'n' | b't' | b'r' | b'0' | b'a' | b'b' | b'e' | b'f' | b's' | b'v' => {
+                    return true;
+                }
                 b'x' | b'u' => return true,
+                // \\ is valid in single-quoted strings too ('\\' is a literal backslash)
+                // \" is only needed inside double quotes; single quotes don't escape "
+                b'\\' | b'"' => {}
                 _ => {}
             }
             i += 2;

@@ -1,13 +1,39 @@
 use crate::cop::node_type::{
     GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
-    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_READ_NODE, GLOBAL_VARIABLE_WRITE_NODE,
+    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_READ_NODE, GLOBAL_VARIABLE_TARGET_NODE,
+    GLOBAL_VARIABLE_WRITE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/GlobalVars: flags uses of global variables not in the built-in list
+/// or `AllowedVariables` config.
+///
+/// ## Investigation findings (2026-03)
+///
+/// ### FP root causes (68 total)
+/// Missing built-in globals from RuboCop's BUILT_IN_VARS list:
+/// `$DEFAULT_OUTPUT`, `$DEFAULT_INPUT`, `$IGNORECASE`, `$ARGV` (English aliases),
+/// and `$CLASSPATH`, `$JRUBY_VERSION`, `$JRUBY_REVISION`, `$ENV_JAVA` (JRuby).
+/// Top FP repos: jruby (27), byebug (14), ManageIQ (13), natalie (10).
+/// These repos use JRuby built-ins and English aliases that we weren't treating
+/// as built-in. Config resolution (`AllowedVariables`) was working correctly.
+///
+/// ### FN root causes (23 total)
+/// `GlobalVariableTargetNode` (from `MultiWriteNode` / parallel assignment like
+/// `$a, $b = 1, 2`) was not handled. Added to `interested_node_types`.
+/// Top FN repos: natalie (8), eventmachine (6), rubychan (2).
+///
+/// ### AllowedVariables prefix handling
+/// RuboCop converts `AllowedVariables` entries to symbols and compares against
+/// `node.name` which includes the `$` prefix. Our implementation correctly
+/// compares with `$` prefix. Additionally, we now also try matching without the
+/// `$` prefix for robustness, since some configs may omit it.
 pub struct GlobalVars;
 
+// Built-in global variables and their English aliases, matching RuboCop's list.
+// See: https://www.zenspider.com/ruby/quickref.html
 const BUILTIN_GLOBALS: &[&[u8]] = &[
     b"$!",
     b"$@",
@@ -83,6 +109,16 @@ const BUILTIN_GLOBALS: &[&[u8]] = &[
     b"$PREMATCH",
     b"$PROCESS_ID",
     b"$RS",
+    // English aliases missing from original list
+    b"$DEFAULT_OUTPUT",
+    b"$DEFAULT_INPUT",
+    b"$IGNORECASE",
+    b"$ARGV",
+    // JRuby built-ins
+    b"$CLASSPATH",
+    b"$JRUBY_VERSION",
+    b"$JRUBY_REVISION",
+    b"$ENV_JAVA",
 ];
 
 impl Cop for GlobalVars {
@@ -96,6 +132,7 @@ impl Cop for GlobalVars {
             GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
             GLOBAL_VARIABLE_OR_WRITE_NODE,
             GLOBAL_VARIABLE_READ_NODE,
+            GLOBAL_VARIABLE_TARGET_NODE,
             GLOBAL_VARIABLE_WRITE_NODE,
         ]
     }
@@ -126,6 +163,9 @@ impl Cop for GlobalVars {
         } else if let Some(goow) = node.as_global_variable_or_write_node() {
             let n = goow.name();
             (n.as_slice().to_vec(), goow.name_loc())
+        } else if let Some(gt) = node.as_global_variable_target_node() {
+            let n = gt.name();
+            (n.as_slice().to_vec(), gt.location())
         } else {
             return;
         };
@@ -135,10 +175,17 @@ impl Cop for GlobalVars {
             return;
         }
 
-        // Skip allowed variables
+        // Skip allowed variables — match with and without $ prefix for robustness.
+        // RuboCop expects entries with $ prefix (e.g., "$CLASSPATH"), but some configs
+        // may omit it, so we check both forms.
         let name_str = String::from_utf8_lossy(&name);
+        let name_without_prefix = name_str.strip_prefix('$').unwrap_or(&name_str);
         if let Some(ref list) = allowed {
-            if list.iter().any(|a| a.as_str() == name_str.as_ref()) {
+            if list.iter().any(|a| {
+                let a = a.as_str();
+                let a_without_prefix = a.strip_prefix('$').unwrap_or(a);
+                a == name_str.as_ref() || a_without_prefix == name_without_prefix
+            }) {
                 return;
             }
         }
