@@ -6,3 +6,5 @@ wide = :a
 # comment with trailing spaces
 # Required  Numbers  Only
 #
+nbsp = :a
+# note

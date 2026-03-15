@@ -78,20 +78,15 @@ use crate::parse::source::SourceFile;
 /// prior patches (CRLF `__END__`, heredoc detection, shift operator fixes).
 /// The corpus oracle has not yet been re-run to reflect these fixes.
 ///
-/// FN=4 remain (3 in activemerchant sage.rb:149/155/168, 1 in axlsx
-/// header_footer.rb:8). Without corpus repos cloned locally, root cause
-/// cannot be determined. Investigated possible causes:
-/// - Heredoc false detection: ruled out (AllowInHeredoc defaults to false,
-///   and heredoc tracking has no effect on detection when false).
-/// - `__END__` early termination: ruled out (FN lines are mid-file).
-/// - `\r`-only line endings (classic Mac): plausible but unlikely for
-///   modern Ruby files. Would cause nitrocop to treat entire file as one
-///   line, missing mid-file trailing whitespace.
-/// - File encoding issues: possible if the file can't be read or has
-///   unusual encoding that prevents line splitting.
-///   These 4 FNs (0.005% of 73,562 total offenses) are likely file-level
-///   artifacts rather than cop logic bugs. Deferring until corpus repos
-///   can be cloned for direct investigation.
+/// FN=4 remained (3 in activemerchant sage.rb:149/155/168, 1 in axlsx
+/// header_footer.rb:8). With corpus files available locally, all four lines
+/// were confirmed to end with UTF-8 non-breaking spaces (`U+00A0`, bytes
+/// `C2 A0`). `trailing_whitespace_start` only handled ASCII space/tab and
+/// full-width space (`U+3000`), so it missed these comments entirely.
+///
+/// Fix: treat `U+00A0` as trailing whitespace for both diagnostics and
+/// autocorrect. This matches RuboCop's `[[:blank:]]` behavior on the known
+/// corpus examples.
 pub struct TrailingWhitespace;
 
 fn strip_line_ending_carriage_return(line: &[u8]) -> &[u8] {
@@ -111,6 +106,12 @@ fn trailing_whitespace_start(line: &[u8]) -> Option<usize> {
 
         if end >= 3 && line[end - 3..end] == [0xE3, 0x80, 0x80] {
             end -= 3;
+            found = true;
+            continue;
+        }
+
+        if end >= 2 && line[end - 2..end] == [0xC2, 0xA0] {
+            end -= 2;
             found = true;
             continue;
         }
@@ -291,6 +292,16 @@ mod tests {
 
     crate::cop_fixture_tests!(TrailingWhitespace, "cops/layout/trailing_whitespace");
     crate::cop_autocorrect_fixture_tests!(TrailingWhitespace, "cops/layout/trailing_whitespace");
+
+    #[test]
+    fn detects_non_breaking_space_at_line_end() {
+        let source = SourceFile::from_bytes("test.rb", b"nbsp = :a\xc2\xa0\n".to_vec());
+        let mut diags = Vec::new();
+        TrailingWhitespace.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 9);
+    }
 
     #[test]
     fn no_offense_after_end_marker() {

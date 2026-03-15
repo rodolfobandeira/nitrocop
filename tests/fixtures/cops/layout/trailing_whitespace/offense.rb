@@ -13,3 +13,7 @@ wide = :a　
                          ^ Layout/TrailingWhitespace: Trailing whitespace detected.
 #     
  ^^^^^ Layout/TrailingWhitespace: Trailing whitespace detected.
+nbsp = :a 
+         ^ Layout/TrailingWhitespace: Trailing whitespace detected.
+# note 
+      ^ Layout/TrailingWhitespace: Trailing whitespace detected.
