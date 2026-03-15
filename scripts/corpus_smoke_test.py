@@ -284,6 +284,30 @@ def main():
         print(f"\nIf this is intentional, update the baseline:")
         print(f"  python3 scripts/corpus_smoke_test.py --update-baseline")
         sys.exit(1)
+
+    # Ratchet: auto-tighten baseline when results improve.
+    # Keeps the baseline current as cops are fixed so future regressions
+    # are caught relative to the latest high-water mark.
+    updated = False
+    for repo_id, cur in results.items():
+        base = baseline.get(repo_id)
+        if base is None:
+            baseline[repo_id] = cur
+            updated = True
+            continue
+        if (cur["matches"] > base["matches"]
+                or cur["fp"] < base["fp"]
+                or cur["fn"] < base["fn"]
+                or abs(cur["nc_files"] - cur["rc_files"]) < abs(base["nc_files"] - base["rc_files"])):
+            baseline[repo_id] = cur
+            updated = True
+            print(f"  Baseline improved for {repo_id}")
+
+    if updated:
+        with open(SNAPSHOT_PATH, "w") as f:
+            json.dump(baseline, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"\nPASS (baseline auto-tightened — commit {SNAPSHOT_PATH})")
     else:
         print("\nPASS (no regression vs baseline)")
 
