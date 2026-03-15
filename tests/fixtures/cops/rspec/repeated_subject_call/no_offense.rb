@@ -47,3 +47,14 @@ RSpec.describe Corge do
     expect { create(:item, subject) }.to not_change { Item.count }
   end
 end
+
+# Different named subjects — each used once is not an offense
+RSpec.describe Grault do
+  subject { do_something_else }
+  subject(:bar) { do_something }
+
+  it do
+    expect { bar }.to not_change { Grault.count }
+    expect { subject }.to not_change { Grault.count }
+  end
+end

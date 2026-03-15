@@ -1,5 +1,4 @@
-use crate::cop::node_type::{BLOCK_NODE, CALL_NODE, STATEMENTS_NODE};
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example};
+use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -19,6 +18,19 @@ use crate::parse::source::SourceFile;
 /// check condition 2. This caused 42 FPs from patterns like:
 ///   `expect(subject).to be_allowed(resource)` inside `.each` loops —
 ///   subject as an argument was incorrectly counted as a flaggable call.
+///
+/// ## FN fix (2026-03): track named subject aliases
+///
+/// RSpec allows `subject(:name) { ... }` which creates a method alias for `subject`.
+/// The cop only matched literal `subject` calls but not named aliases. All 17 FNs
+/// were from named subjects like `subject(:job)` where the example calls `job`.
+/// Refactored from `check_node` to `check_source` with a visitor that collects
+/// `subject(:name)` definitions per example group scope, then uses the alias set
+/// when scanning examples for repeated calls.
+///
+/// The "different subjects" case (both `subject { }` and `subject(:bar) { }` in
+/// the same group) is handled: each name is tracked independently, so using `bar`
+/// once and `subject` once does not trigger the cop.
 pub struct RepeatedSubjectCall;
 
 impl Cop for RepeatedSubjectCall {
@@ -34,78 +46,256 @@ impl Cop for RepeatedSubjectCall {
         RSPEC_DEFAULT_INCLUDE
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE, STATEMENTS_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // Look for example blocks (it/specify/etc.)
-        let call = match node.as_call_node() {
-            Some(c) => c,
+        let program = match parse_result.node().as_program_node() {
+            Some(p) => p,
             None => return,
         };
-
-        let name = call.name().as_slice();
-        if !is_rspec_example(name) {
-            return;
+        let body = program.statements();
+        for stmt in body.body().iter() {
+            find_example_groups(source, &stmt, &[b"subject".to_vec()], diagnostics, self);
         }
-        if call.receiver().is_some() {
-            return;
+    }
+}
+
+/// Check if a call has an RSpec receiver (e.g., `RSpec.describe`).
+fn is_rspec_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
+    if let Some(recv) = call.receiver() {
+        if let Some(cr) = recv.as_constant_read_node() {
+            return cr.name().as_slice() == b"RSpec";
         }
-
-        let block = match call.block() {
-            Some(b) => b,
-            None => return,
-        };
-        let block_node = match block.as_block_node() {
-            Some(b) => b,
-            None => return,
-        };
-        let body = match block_node.body() {
-            Some(b) => b,
-            None => return,
-        };
-
-        // Find all `subject` calls in the example body.
-        // Each entry: (line, col, is_in_expect_block, is_arg_of_call, is_chained)
-        let mut subject_calls: Vec<SubjectCall> = Vec::new();
-        collect_subject_calls(source, &body, false, false, &mut subject_calls);
-
-        if subject_calls.len() <= 1 {
-            return;
-        }
-
-        // Flag 2nd+ subject calls that are:
-        // - inside an expect { } block
-        // - NOT chained (subject.foo)
-        // - NOT an argument to another call (expect(subject))
-        let mut seen_first = false;
-        for call in &subject_calls {
-            if !seen_first {
-                seen_first = true;
-                continue;
+        if let Some(cp) = recv.as_constant_path_node() {
+            if cp.parent().is_none() {
+                if let Some(name) = cp.name() {
+                    return name.as_slice() == b"RSpec";
+                }
             }
-            if call.in_expect_block && !call.is_chained && !call.is_arg_of_call {
-                diagnostics.push(self.diagnostic(
-                    source,
-                    call.line,
-                    call.col,
-                    "Calls to subject are memoized, this block is misleading".to_string(),
-                ));
+        }
+    }
+    false
+}
+
+/// Recursively find example groups in the AST and process them.
+fn find_example_groups(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    inherited_subjects: &[Vec<u8>],
+    diagnostics: &mut Vec<Diagnostic>,
+    cop: &RepeatedSubjectCall,
+) {
+    if let Some(call) = node.as_call_node() {
+        let name = call.name().as_slice();
+        let is_eg = (call.receiver().is_none() && is_rspec_example_group(name))
+            || (is_rspec_receiver(&call) && is_rspec_example_group(name));
+
+        if is_eg {
+            if let Some(block) = call.block() {
+                if let Some(bn) = block.as_block_node() {
+                    process_example_group(source, &bn, inherited_subjects, diagnostics, cop);
+                }
+            }
+            return;
+        }
+    }
+
+    // Unwrap module/class/begin nodes to find top-level groups
+    if let Some(module_node) = node.as_module_node() {
+        if let Some(body) = module_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for child in stmts.body().iter() {
+                    find_example_groups(source, &child, inherited_subjects, diagnostics, cop);
+                }
+            }
+        }
+        return;
+    }
+    if let Some(class_node) = node.as_class_node() {
+        if let Some(body) = class_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for child in stmts.body().iter() {
+                    find_example_groups(source, &child, inherited_subjects, diagnostics, cop);
+                }
+            }
+        }
+        return;
+    }
+    if let Some(begin_node) = node.as_begin_node() {
+        if let Some(stmts) = begin_node.statements() {
+            for child in stmts.body().iter() {
+                find_example_groups(source, &child, inherited_subjects, diagnostics, cop);
             }
         }
     }
 }
 
+/// Process an example group block: collect subject names, check examples, recurse into nested groups.
+fn process_example_group(
+    source: &SourceFile,
+    block: &ruby_prism::BlockNode<'_>,
+    inherited_subjects: &[Vec<u8>],
+    diagnostics: &mut Vec<Diagnostic>,
+    cop: &RepeatedSubjectCall,
+) {
+    let body = match block.body() {
+        Some(b) => b,
+        None => return,
+    };
+    let stmts = match body.as_statements_node() {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Collect subject names defined in this scope
+    let mut subject_names: Vec<Vec<u8>> = inherited_subjects.to_vec();
+    let mut has_unnamed_subject = false;
+    for stmt in stmts.body().iter() {
+        if let Some(call) = stmt.as_call_node() {
+            let name = call.name().as_slice();
+            if (name == b"subject" || name == b"subject!") && call.receiver().is_none() {
+                if let Some(args) = call.arguments() {
+                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                    if !arg_list.is_empty() {
+                        if let Some(sym) = arg_list[0].as_symbol_node() {
+                            let alias = sym.unescaped().to_vec();
+                            if !subject_names.contains(&alias) {
+                                subject_names.push(alias);
+                            }
+                        }
+                    }
+                }
+                // Track that there's an unnamed `subject { }` redefinition
+                // (even named subjects redefine subject, but if there's also an unnamed one,
+                // it's a separate subject)
+                if call
+                    .arguments()
+                    .is_none_or(|a| a.arguments().iter().count() == 0)
+                {
+                    has_unnamed_subject = true;
+                }
+            }
+        }
+    }
+
+    // If both unnamed `subject { }` and named `subject(:bar) { }` exist in this scope,
+    // they are "different subjects" — calls to each should be tracked independently.
+    let has_different_subjects =
+        has_unnamed_subject && subject_names.iter().any(|n| n != b"subject");
+
+    // Process statements
+    for stmt in stmts.body().iter() {
+        if let Some(call) = stmt.as_call_node() {
+            let call_name = call.name().as_slice();
+
+            // Check examples
+            if is_rspec_example(call_name) && call.receiver().is_none() {
+                if let Some(block) = call.block() {
+                    if let Some(bn) = block.as_block_node() {
+                        if let Some(body) = bn.body() {
+                            check_example_body(
+                                source,
+                                &body,
+                                &subject_names,
+                                has_different_subjects,
+                                diagnostics,
+                                cop,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Recurse into nested example groups
+            if is_rspec_example_group(call_name) && call.receiver().is_none() {
+                if let Some(block) = call.block() {
+                    if let Some(bn) = block.as_block_node() {
+                        process_example_group(source, &bn, &subject_names, diagnostics, cop);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check an example body for repeated subject calls.
+fn check_example_body(
+    source: &SourceFile,
+    body: &ruby_prism::Node<'_>,
+    subject_names: &[Vec<u8>],
+    has_different_subjects: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+    cop: &RepeatedSubjectCall,
+) {
+    let mut subject_calls: Vec<SubjectCall> = Vec::new();
+    collect_subject_calls(
+        source,
+        body,
+        false,
+        false,
+        subject_names,
+        &mut subject_calls,
+    );
+
+    if subject_calls.len() <= 1 {
+        return;
+    }
+
+    // If there are "different subjects" (unnamed + named), only flag repeats
+    // of the SAME subject name.
+    if has_different_subjects {
+        // Group calls by name and check each group independently
+        let unique_names: Vec<&[u8]> = {
+            let mut names: Vec<&[u8]> = subject_calls.iter().map(|c| c.name.as_slice()).collect();
+            names.dedup();
+            names
+        };
+        for name in unique_names {
+            let calls_for_name: Vec<&SubjectCall> =
+                subject_calls.iter().filter(|c| c.name == name).collect();
+            if calls_for_name.len() <= 1 {
+                continue;
+            }
+            flag_repeated_calls(&calls_for_name, source, diagnostics, cop);
+        }
+    } else {
+        let all_refs: Vec<&SubjectCall> = subject_calls.iter().collect();
+        flag_repeated_calls(&all_refs, source, diagnostics, cop);
+    }
+}
+
+/// Flag the 2nd+ subject calls that are in expect blocks and not chained/args.
+fn flag_repeated_calls(
+    calls: &[&SubjectCall],
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    cop: &RepeatedSubjectCall,
+) {
+    let mut seen_first = false;
+    for call in calls {
+        if !seen_first {
+            seen_first = true;
+            continue;
+        }
+        if call.in_expect_block && !call.is_chained && !call.is_arg_of_call {
+            diagnostics.push(cop.diagnostic(
+                source,
+                call.line,
+                call.col,
+                "Calls to subject are memoized, this block is misleading".to_string(),
+            ));
+        }
+    }
+}
+
 struct SubjectCall {
+    name: Vec<u8>,
     line: usize,
     col: usize,
     in_expect_block: bool,
@@ -118,11 +308,19 @@ fn collect_subject_calls(
     node: &ruby_prism::Node<'_>,
     in_expect_block: bool,
     is_receiver: bool,
+    subject_names: &[Vec<u8>],
     results: &mut Vec<SubjectCall>,
 ) {
     if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_subject_calls(source, &stmt, in_expect_block, false, results);
+            collect_subject_calls(
+                source,
+                &stmt,
+                in_expect_block,
+                false,
+                subject_names,
+                results,
+            );
         }
         return;
     }
@@ -130,32 +328,30 @@ fn collect_subject_calls(
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
 
-        // Check if this is a bare `subject` call (no receiver).
-        if name == b"subject" && call.receiver().is_none() {
+        // Check if this is a bare subject call (no receiver) matching any known subject name.
+        if call.receiver().is_none() && subject_names.iter().any(|s| s == name) {
             let loc = call.location();
             let (line, col) = source.offset_to_line_col(loc.start_offset());
             results.push(SubjectCall {
+                name: name.to_vec(),
                 line,
                 col,
                 in_expect_block,
                 is_chained: is_receiver,
-                // subject is an argument if it's not a receiver and it's inside
-                // the arguments of another call — tracked by the caller passing
-                // is_arg=true via the arguments recursion below
                 is_arg_of_call: false, // will be set by caller
             });
         }
 
         // Recurse into receiver, marking it as a receiver context
         if let Some(recv) = call.receiver() {
-            collect_subject_calls(source, &recv, in_expect_block, true, results);
+            collect_subject_calls(source, &recv, in_expect_block, true, subject_names, results);
         }
 
         // Check arguments — subject here is an argument to this call
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
                 let before = results.len();
-                collect_subject_calls(source, &arg, in_expect_block, false, results);
+                collect_subject_calls(source, &arg, in_expect_block, false, subject_names, results);
                 // Mark any subject calls found in args as arguments of a call
                 for r in &mut results[before..] {
                     r.is_arg_of_call = true;
@@ -174,6 +370,7 @@ fn collect_subject_calls(
                         &body,
                         in_expect_block || is_expect,
                         false,
+                        subject_names,
                         results,
                     );
                 }

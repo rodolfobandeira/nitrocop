@@ -23,3 +23,14 @@ RSpec.describe Baz do
     end
   end
 end
+
+# Named subject alias
+RSpec.describe Qux do
+  subject(:bar) { do_something }
+
+  it do
+    bar
+    expect { bar }.to not_change { Qux.count }
+             ^^^ RSpec/RepeatedSubjectCall: Calls to subject are memoized, this block is misleading
+  end
+end
