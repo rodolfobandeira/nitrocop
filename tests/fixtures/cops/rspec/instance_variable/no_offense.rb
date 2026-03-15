@@ -129,6 +129,22 @@ end
   end
 end
 
+# Instance variables inside describe with &(proc do...end) are NOT flagged
+# RuboCop's TopLevelGroup requires a standard block, not block_pass/block_argument
+require_relative 'spec_helper'
+describe 'WithProcBlock', &(proc do
+  it 'test' do
+    helper = create_class do
+      def initialize(val)
+        @val = val
+      end
+      def process
+        @val.to_s
+      end
+    end
+  end
+end)
+
 # Instance variables inside describe wrapped in begin..rescue..end
 # RuboCop treats begin..rescue as opaque (kwbegin), NOT a plain begin
 begin

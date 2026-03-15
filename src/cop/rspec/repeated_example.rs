@@ -115,6 +115,24 @@ use std::collections::HashMap;
 /// `WhileNode`/`UntilNode` pairs. Added custom visitors for all four to prevent future FPs
 /// if examples using `if` vs `unless` or `while` vs `until` appear in the corpus.
 ///
+/// **Investigation (2026-03-15):** 58 FPs and 42 FNs remaining.
+///
+/// FP root cause: The `AstFingerprinter` had a fundamental issue with leaf node type
+/// distinction. When composite nodes use the default Visit trait implementation to visit
+/// their children, they call `self.visit(&child)`, which dispatches to the type-specific
+/// `visit_*_node` method but does NOT emit a type tag. For leaf nodes with no custom
+/// visitor (whose default `visit_*_node` is a no-op), structurally different child nodes
+/// produce identical (zero) bytes, making them indistinguishable. Examples:
+/// - `defined?(__FILE__)` vs `defined?(__LINE__)` vs `defined?(__ENCODING__)`: SourceFileNode,
+///   SourceLineNode, SourceEncodingNode are all no-op leaf visitors producing 0 bytes.
+/// - `(not(false)).should` vs `(not(nil)).should`: FalseNode and NilNode both produce 0 bytes.
+///
+/// Fix: Overrode `visit_branch_node_enter` and `visit_leaf_node_enter` hooks in the Visit
+/// trait to emit `node_type_tag` for EVERY node visited. This ensures all nodes get type
+/// tags regardless of how they're reached (via `fingerprint_node` or via a parent's default
+/// visitor). Removed redundant manual type tag emissions from custom visitors since the
+/// hooks now handle this universally.
+///
 /// **Investigation (2026-03-14):** 168 FPs and 34 FNs remaining.
 ///
 /// FP root cause 1: The `AstFingerprinter::visit_call_node` did not emit a block presence
@@ -592,11 +610,8 @@ impl AstFingerprinter {
     }
 
     fn fingerprint_node(&mut self, node: &ruby_prism::Node<'_>) {
-        // Emit node type tag
-        self.buf.push(crate::cop::node_type::node_type_tag(node));
-
-        // For leaf nodes with literal content, emit the content
-        // For composite nodes, the Visit traversal handles children
+        // Type tag is emitted automatically by visit_branch_node_enter /
+        // visit_leaf_node_enter when self.visit(node) dispatches.
         self.visit(node);
     }
 
@@ -609,8 +624,18 @@ impl AstFingerprinter {
 }
 
 impl<'pr> Visit<'pr> for AstFingerprinter {
-    // For most nodes, the default visit implementation recurses into children,
-    // and we emit the node type tag for each child we visit.
+    // Emit a type tag for EVERY node visited, whether branch or leaf.
+    // This ensures that structurally different leaf nodes (e.g., SourceFileNode
+    // vs SourceLineNode, NilNode vs FalseNode) always produce different
+    // fingerprints, even when reached via a parent's default visitor which
+    // calls `self.visit(&child)` without going through `fingerprint_node`.
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.buf.push(crate::cop::node_type::node_type_tag(&node));
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.buf.push(crate::cop::node_type::node_type_tag(&node));
+    }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Emit method name for method calls
@@ -802,12 +827,10 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         // Fingerprint parameters if present
         if let Some(ref params) = node.parameters() {
-            self.buf.push(crate::cop::node_type::node_type_tag(params));
             self.visit(params);
         }
         // Fingerprint body if present
         if let Some(ref body) = node.body() {
-            self.buf.push(crate::cop::node_type::node_type_tag(body));
             self.visit(body);
         }
     }
@@ -818,41 +841,33 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     // `KeywordRestParameterNode(b)` (from `**b`) both produce just "b" bytes, making
     // `-> *a, b: {}` and `-> *a, **b {}` appear identical.
     // Fix: emit a type tag for each child, like visit_statements_node does.
+    // ParametersNode: the default visitor visits children but the
+    // visit_branch/leaf_node_enter hooks now handle type tags automatically.
+    // We still need a custom visitor to visit each parameter list properly
+    // since the default may not emit children in the same deterministic order.
     fn visit_parameters_node(&mut self, node: &ruby_prism::ParametersNode<'pr>) {
-        macro_rules! visit_list {
-            ($list:expr) => {
-                for child in $list.iter() {
-                    self.buf.push(crate::cop::node_type::node_type_tag(&child));
-                    self.visit(&child);
-                }
-            };
+        for child in node.requireds().iter() {
+            self.visit(&child);
         }
-        macro_rules! visit_opt_node {
-            ($opt:expr) => {
-                if let Some(ref child) = $opt {
-                    self.buf.push(crate::cop::node_type::node_type_tag(child));
-                    self.visit(child);
-                }
-            };
+        for child in node.optionals().iter() {
+            self.visit(&child);
         }
-        // node.block() returns Option<BlockParameterNode>, not Option<Node> — use as_node()
-        macro_rules! visit_opt_concrete {
-            ($opt:expr) => {
-                if let Some(child) = $opt {
-                    let as_node = child.as_node();
-                    self.buf
-                        .push(crate::cop::node_type::node_type_tag(&as_node));
-                    self.visit(&as_node);
-                }
-            };
+        if let Some(ref rest) = node.rest() {
+            self.visit(rest);
         }
-        visit_list!(node.requireds());
-        visit_list!(node.optionals());
-        visit_opt_node!(node.rest());
-        visit_list!(node.posts());
-        visit_list!(node.keywords());
-        visit_opt_node!(node.keyword_rest());
-        visit_opt_concrete!(node.block());
+        for child in node.posts().iter() {
+            self.visit(&child);
+        }
+        for child in node.keywords().iter() {
+            self.visit(&child);
+        }
+        if let Some(ref keyword_rest) = node.keyword_rest() {
+            self.visit(keyword_rest);
+        }
+        if let Some(block) = node.block() {
+            let as_node = block.as_node();
+            self.visit(&as_node);
+        }
     }
 
     // For pattern matching nodes, the default visitors call `visitor.visit(&node.pattern())`
@@ -865,78 +880,51 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     // `case x; in pattern; end` → InNode
     //
     // All three have the same issue. `None() in []` parses as MatchPredicateNode.
+    // Pattern matching nodes: visit_branch/leaf_node_enter hooks now emit type
+    // tags for all children automatically, so the manual pattern type tag emission
+    // is no longer needed. Use the default visitor.
     fn visit_match_predicate_node(&mut self, node: &ruby_prism::MatchPredicateNode<'pr>) {
-        let pattern = node.pattern();
-        self.buf
-            .push(crate::cop::node_type::node_type_tag(&pattern));
         ruby_prism::visit_match_predicate_node(self, node);
     }
 
     fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
-        let pattern = node.pattern();
-        self.buf
-            .push(crate::cop::node_type::node_type_tag(&pattern));
         ruby_prism::visit_match_required_node(self, node);
     }
 
     fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
-        let pattern = node.pattern();
-        self.buf
-            .push(crate::cop::node_type::node_type_tag(&pattern));
         ruby_prism::visit_in_node(self, node);
     }
 
-    // For nodes we visit by default traversal, we need to emit child type tags
+    // With visit_branch/leaf_node_enter hooks emitting type tags for ALL nodes,
+    // the following custom visitors no longer need manual type tag emission.
+    // They can simply delegate to the default visitors.
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
-        for child in node.body().iter() {
-            self.buf.push(crate::cop::node_type::node_type_tag(&child));
-            self.visit(&child);
-        }
+        ruby_prism::visit_statements_node(self, node);
     }
 
     fn visit_arguments_node(&mut self, node: &ruby_prism::ArgumentsNode<'pr>) {
-        for child in node.arguments().iter() {
-            self.buf.push(crate::cop::node_type::node_type_tag(&child));
-            self.visit(&child);
-        }
+        ruby_prism::visit_arguments_node(self, node);
     }
 
     fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
-        for child in node.elements().iter() {
-            self.buf.push(crate::cop::node_type::node_type_tag(&child));
-            self.visit(&child);
-        }
+        ruby_prism::visit_array_node(self, node);
     }
 
     fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
-        for child in node.elements().iter() {
-            self.buf.push(crate::cop::node_type::node_type_tag(&child));
-            self.visit(&child);
-        }
+        ruby_prism::visit_hash_node(self, node);
     }
 
     fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
-        for child in node.elements().iter() {
-            self.buf.push(crate::cop::node_type::node_type_tag(&child));
-            self.visit(&child);
-        }
+        ruby_prism::visit_keyword_hash_node(self, node);
     }
 
     fn visit_assoc_node(&mut self, node: &ruby_prism::AssocNode<'pr>) {
-        self.buf
-            .push(crate::cop::node_type::node_type_tag(&node.key()));
-        self.visit(&node.key());
-        self.buf
-            .push(crate::cop::node_type::node_type_tag(&node.value()));
-        self.visit(&node.value());
+        ruby_prism::visit_assoc_node(self, node);
     }
 
     fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
         // Parentheses are transparent — just visit the body
-        if let Some(ref body) = node.body() {
-            self.buf.push(crate::cop::node_type::node_type_tag(body));
-            self.visit(body);
-        }
+        ruby_prism::visit_parentheses_node(self, node);
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {

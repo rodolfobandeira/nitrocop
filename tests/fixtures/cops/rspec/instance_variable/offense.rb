@@ -73,3 +73,21 @@ RSpec.context 'standalone context' do
   it { @value }
        ^^^^^^ RSpec/InstanceVariable: Avoid instance variables - use let, a method call, or a local variable (if possible).
 end
+
+# Instance variables inside matcher blocks with variable argument ARE flagged
+# (only symbol-argument matchers are excluded, matching RuboCop's NodePattern)
+describe MatcherWithVariable do
+  %i[create_item update_item].each do |key|
+    matcher key do |opts = {}|
+      match do |*|
+        @body = requests[key]
+        @body.present?
+        ^^^^^ RSpec/InstanceVariable: Avoid instance variables - use let, a method call, or a local variable (if possible).
+      end
+      failure_message do
+        "Expected #{key} but got #{@body}"
+                                   ^^^^^ RSpec/InstanceVariable: Avoid instance variables - use let, a method call, or a local variable (if possible).
+      end
+    end
+  end
+end

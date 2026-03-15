@@ -315,3 +315,32 @@ describe 'and vs or keyword operators' do
     defined?(x or y).should == 'expression'
   end
 end
+
+# __FILE__ vs __LINE__ vs __ENCODING__ are NOT duplicates
+# SourceFileNode, SourceLineNode, SourceEncodingNode are different leaf types
+# that produce zero bytes without type tag emission
+describe 'pseudo variables' do
+  it { defined?(__FILE__).should == 'expression' }
+  it { defined?(__LINE__).should == 'expression' }
+  it { defined?(__ENCODING__).should == 'expression' }
+end
+
+# false vs nil are NOT duplicates
+# FalseNode and NilNode are different leaf types
+describe 'false vs nil literals' do
+  it { (not(false)).should be_true }
+  it { (not(nil)).should be_true }
+end
+
+# true vs false vs nil are all different
+describe 'boolean and nil literals' do
+  it { expect(defined?(true)).to eq('expression') }
+  it { expect(defined?(false)).to eq('expression') }
+  it { expect(defined?(nil)).to eq('expression') }
+end
+
+# self vs nil are NOT duplicates
+describe 'self vs nil' do
+  it { expect(self).to be_truthy }
+  it { expect(nil).to be_falsey }
+end

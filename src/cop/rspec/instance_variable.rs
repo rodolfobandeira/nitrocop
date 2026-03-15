@@ -21,16 +21,23 @@ use ruby_prism::Visit;
 /// In RuboCop, `begin..rescue..end` is `:kwbegin` and NOT unwrapped.
 /// Fix: Removed `BeginNode` unwrapping from `collect_top_level_groups`.
 ///
-/// ## Corpus investigation (2026-03-14)
+/// ## Corpus investigation (2026-03-14, updated 2026-03-15)
 ///
-/// FP=2, FN=2 from asciidoctor-pdf. Both FPs are `@quality` reads inside
-/// `def optimize_file` inside `create_class do...end` blocks within `it` examples.
-/// `create_class` is a custom anonymous-class creation helper (not `Class.new`).
-/// RuboCop's `valid_usage?` checks `each_ancestor(:block)` for `dynamic_class?`
-/// (which matches `Class.new` only). Since `create_class` is not `Class.new`, these
-/// SHOULD be flagged by both tools. The FP may be a corpus artifact (project config
-/// or rubocop-rspec version difference). Without cloned corpus repos, cannot confirm
-/// root cause. FN=2 also from same repo, likely related. No code fix applied.
+/// **FP=2 (asciidoctor-pdf):** Both FPs are `@quality` reads inside `def optimize_file`
+/// inside `create_class do...end` blocks within `it` examples. Root cause: the file
+/// uses `describe 'Name', &(proc do...end)` syntax (block argument, not standard block).
+/// In RuboCop's AST, `&(proc do...end)` is a `block_pass`, not a `block` node, so
+/// RuboCop's `TopLevelGroup` (which matches `(block ...)`) doesn't recognize it as a
+/// top-level group and never processes the file. Fix: check for `BlockNode` specifically
+/// (via `has_standard_block`), not just `block().is_some()` which also matches
+/// `BlockArgumentNode`.
+///
+/// **FN=2 (travis-ci/dpl):** Both FNs are `@body` reads inside `matcher key do...end`
+/// where `key` is a local variable from `%i[...].each`. RuboCop's `custom_matcher?`
+/// pattern is `(send nil? :matcher sym)` which requires a symbol literal argument.
+/// `matcher key` with a variable arg does NOT match, so RuboCop flags ivars inside it.
+/// Fix: `is_custom_matcher_call` now checks that the first argument is a `SymbolNode`,
+/// matching RuboCop's `sym` requirement.
 pub struct InstanceVariable;
 
 impl Cop for InstanceVariable {
@@ -239,7 +246,7 @@ fn find_top_level_group_offsets(program: &ruby_prism::ProgramNode<'_>) -> HashSe
 /// top-level statements (the `:begin` case in RuboCop).
 fn check_direct_spec_group(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
     if let Some(call) = node.as_call_node() {
-        if call.block().is_some() && is_spec_group_call(&call) {
+        if has_standard_block(&call) && is_spec_group_call(&call) {
             offsets.insert(call.location().start_offset());
         }
     }
@@ -251,7 +258,7 @@ fn check_direct_spec_group(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<us
 fn collect_top_level_groups(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
     // Check if this node is a spec group call (describe/context/etc with a block)
     if let Some(call) = node.as_call_node() {
-        if call.block().is_some() && is_spec_group_call(&call) {
+        if has_standard_block(&call) && is_spec_group_call(&call) {
             offsets.insert(call.location().start_offset());
             return;
         }
@@ -329,11 +336,27 @@ fn is_dynamic_class_call(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
+/// Check if a call node has a standard block (BlockNode), not a block argument (&proc).
+/// RuboCop's NodePattern `(block ...)` only matches standard blocks, not `block_pass`.
+fn has_standard_block(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.block().is_some_and(|b| b.as_block_node().is_some())
+}
+
 /// Check if a call is `RSpec::Matchers.define :name` or `matcher :name`
+/// RuboCop's pattern requires a symbol argument: `(send nil? :matcher sym)`
 fn is_custom_matcher_call(call: &ruby_prism::CallNode<'_>) -> bool {
     let method = call.name().as_slice();
     if method == b"matcher" && call.receiver().is_none() {
-        return true;
+        // Only match when the first argument is a symbol literal (matching RuboCop's `sym` pattern).
+        // `matcher :have_color do...end` is a custom matcher definition.
+        // `matcher key do...end` (variable arg) is NOT — it should be checked for ivar usage.
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if let Some(first) = arg_list.first() {
+                return first.as_symbol_node().is_some();
+            }
+        }
+        return false;
     }
     if method == b"define" {
         if let Some(recv) = call.receiver() {
@@ -355,7 +378,7 @@ fn is_custom_matcher_call(call: &ruby_prism::CallNode<'_>) -> bool {
 
 impl<'pr> Visit<'pr> for IvarChecker<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        let has_block = node.block().is_some();
+        let has_block = has_standard_block(node);
 
         // Only enter example group mode for top-level spec groups.
         // RuboCop's TopLevelGroup only processes describe/context blocks at the
