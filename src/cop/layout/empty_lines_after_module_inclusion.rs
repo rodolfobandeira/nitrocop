@@ -10,35 +10,26 @@ use crate::parse::source::SourceFile;
 /// Checks for an empty line after a module inclusion method (`extend`,
 /// `include` and `prepend`), or a group of them.
 ///
-/// ## Investigation findings (2026-03-11)
+/// ## Investigation findings (2026-03-11, 2026-03-14)
 ///
-/// **Root cause of 493 FPs (2026-03-11):** nitrocop was firing on include/extend/prepend
-/// inside `if`/`unless` bodies. RuboCop's `next_line_node` method returns nil
-/// when `node.parent.if_type?`, which blanket-skips all includes inside
-/// conditional branches. nitrocop had no equivalent check.
+/// Corpus work on this cop found two separate logic gaps:
 ///
-/// **Fix:** Added `in_if_body` flag to the visitor, set when visiting
-/// `IfNode` and `UnlessNode` bodies. The cop now skips include calls
-/// when this flag is true, matching RuboCop's behavior.
+/// - RuboCop skips include/extend/prepend when the direct parent is an
+///   `if`/`unless` body, so nitrocop now tracks `in_if_body` and resets that
+///   state when entering nested class/module/singleton-class bodies.
+/// - RuboCop still checks bare method-local include/extend/prepend calls, so
+///   nitrocop must not treat method bodies as a blanket skip context.
 ///
-/// **Also handles:** RuboCop's `allowed_method?` unwraps modifier forms
-/// (`include Baz if condition`) — nitrocop's line-based check already
-/// handles this because `is_module_inclusion_line` matches lines starting
-/// with `include`/`extend`/`prepend` regardless of trailing modifiers.
+/// The 2026-03-14 corpus pass also showed several line-structure mismatches:
 ///
-/// ## Investigation findings (2026-03-14)
+/// - Whitespace-only lines after an inclusion should count as blank.
+/// - Inline/same-line continuations like `class A; include M; end` should not
+///   require a synthetic blank line.
+/// - Structural/clause followers such as `})`, `else`, `rescue`, `ensure`,
+///   `elsif`, and `when` should be treated as allowed siblings.
 ///
-/// **FP root cause (447):** `is_blank_or_whitespace_line()` only matches truly empty lines,
-/// not whitespace-only lines. RuboCop's `blank?` considers whitespace-only
-/// lines as blank. Many real-world files have trailing spaces/tabs on
-/// "empty" lines after includes. Fix: use `is_blank_or_whitespace_line()`.
-///
-/// **FN root cause (181):** `in_if_body` flag was not reset when entering
-/// class/module/singleton class bodies. RuboCop only checks if the include's
-/// DIRECT parent is `if_type?`. When `include` is inside a class nested in
-/// an `if` block, the parent is the class body (begin/StatementsNode), not
-/// the `if` node. Fix: reset `in_if_body` in class/module/singleton class
-/// visitors, same as `in_block_or_send` was already reset.
+/// The cop now follows RuboCop's sibling-oriented behavior instead of trying
+/// to infer a narrower "real module body" context from surrounding nodes.
 pub struct EmptyLinesAfterModuleInclusion;
 
 const MODULE_INCLUSION_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -54,6 +45,49 @@ fn is_module_inclusion_line(trimmed: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn trim_leading(line: &[u8]) -> &[u8] {
+    let start = line
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(line.len());
+    &line[start..]
+}
+
+fn is_enable_directive_comment(trimmed: &[u8]) -> bool {
+    trimmed.starts_with(b"# rubocop:enable") || trimmed.starts_with(b"#rubocop:enable")
+}
+
+fn starts_with_keyword(trimmed: &[u8], keyword: &[u8]) -> bool {
+    trimmed.starts_with(keyword)
+        && (trimmed.len() == keyword.len()
+            || !matches!(trimmed[keyword.len()], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
+}
+
+fn is_allowed_following_line(trimmed: &[u8]) -> bool {
+    is_module_inclusion_line(trimmed)
+        || starts_with_keyword(trimmed, b"end")
+        || starts_with_keyword(trimmed, b"else")
+        || starts_with_keyword(trimmed, b"elsif")
+        || starts_with_keyword(trimmed, b"rescue")
+        || starts_with_keyword(trimmed, b"ensure")
+        || starts_with_keyword(trimmed, b"when")
+        || trimmed.starts_with(b"}")
+        || trimmed.starts_with(b")")
+        || trimmed.starts_with(b"]")
+}
+
+fn line_has_trailing_code(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> bool {
+    let bytes = source.as_bytes();
+    let end = loc.end_offset().min(bytes.len());
+    let line_end = bytes[end..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|offset| end + offset)
+        .unwrap_or(bytes.len());
+    let trailing = trim_leading(&bytes[end..line_end]);
+    !trailing.is_empty() && !trailing.starts_with(b"#")
 }
 
 impl Cop for EmptyLinesAfterModuleInclusion {
@@ -141,6 +175,10 @@ impl InclusionVisitor<'_> {
             .offset_to_line_col(loc.end_offset().saturating_sub(1));
         let lines: Vec<&[u8]> = self.source.lines().collect();
 
+        if line_has_trailing_code(self.source, &loc) {
+            return;
+        }
+
         // Check if the next line exists
         if last_line >= lines.len() {
             return; // End of file
@@ -153,56 +191,13 @@ impl InclusionVisitor<'_> {
             return;
         }
 
-        // If next line is end of class/module, no offense
-        let next_trimmed: Vec<u8> = next_line
-            .iter()
-            .copied()
-            .skip_while(|&b| b == b' ' || b == b'\t')
-            .collect();
-        if next_trimmed.starts_with(b"end") {
-            let after_end = next_trimmed.get(3);
-            if after_end.is_none()
-                || matches!(
-                    after_end,
-                    Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'#')
-                )
-            {
-                return;
-            }
-        }
-
-        // If next line is another module inclusion, no offense
-        if is_module_inclusion_line(&next_trimmed) {
+        let next_trimmed = trim_leading(next_line);
+        if is_allowed_following_line(next_trimmed) {
             return;
         }
 
-        // If next line is a comment, skip over comments and check if followed
-        // by another module inclusion (RuboCop treats comments between includes
-        // as part of the include block)
-        if next_trimmed.starts_with(b"#") {
-            let mut idx = last_line + 1;
-            while idx < lines.len() {
-                let line_trimmed: Vec<u8> = lines[idx]
-                    .iter()
-                    .copied()
-                    .skip_while(|&b| b == b' ' || b == b'\t')
-                    .collect();
-                if is_blank_or_whitespace_line(lines[idx]) || line_trimmed.starts_with(b"#") {
-                    idx += 1;
-                    continue;
-                }
-                // Found a non-blank, non-comment line
-                if is_module_inclusion_line(&line_trimmed) {
-                    return;
-                }
-                break;
-            }
-        }
-
         // If next line is a rubocop:enable directive comment, check the line after
-        if next_trimmed.starts_with(b"# rubocop:enable")
-            || next_trimmed.starts_with(b"#rubocop:enable")
-        {
+        if is_enable_directive_comment(next_trimmed) {
             // Check the line after the enable directive
             if last_line + 1 < lines.len() {
                 let line_after = lines[last_line + 1];
@@ -211,6 +206,21 @@ impl InclusionVisitor<'_> {
                 }
             } else {
                 return; // enable directive at end of file
+            }
+        }
+
+        if next_trimmed.starts_with(b"#") {
+            let mut idx = last_line + 1;
+            while idx < lines.len() {
+                let line_trimmed = trim_leading(lines[idx]);
+                if line_trimmed.starts_with(b"#") || is_blank_or_whitespace_line(lines[idx]) {
+                    idx += 1;
+                    continue;
+                }
+                if is_allowed_following_line(line_trimmed) {
+                    return;
+                }
+                break;
             }
         }
 
@@ -375,15 +385,10 @@ impl<'pr> Visit<'pr> for InclusionVisitor<'_> {
         self.in_if_body = was;
     }
 
-    // Method bodies should be treated as block context — include inside
-    // a method is not a module inclusion
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        let was = self.in_block_or_send;
-        self.in_block_or_send = true;
         if let Some(body) = node.body() {
             self.visit(&body);
         }
-        self.in_block_or_send = was;
     }
 }
 

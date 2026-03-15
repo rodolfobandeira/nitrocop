@@ -43,3 +43,15 @@ if some_condition
     attr_reader :data
   end
 end
+
+require "support/helpers"
+
+include Support::Helpers
+^^^^^^^^^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+records = build_records
+
+def setup
+  include MyHelper
+  ^^^^^^^^^^^^^^^^ Layout/EmptyLinesAfterModuleInclusion: Add an empty line after module inclusion.
+  do_stuff
+end

@@ -44,10 +44,32 @@ it "includes the item" do
   expect(result).to include(item)
 end
 
-# include inside method body
-def setup
-  include MyHelper
-  do_stuff
+# include in a single-line class body
+class InlineWidget; include Comparable; end
+
+# include followed by a block close continuation
+builder = Class.new do
+  include AccountableConcern
+end.new
+
+# grouped includes followed by a block close
+tests(Module.new {
+  include LegacyTagHelpers
+  include ModernTagHelpers
+})
+
+# include before else is allowed
+if feature_enabled?
+  include FeatureSupport
+else
+  disable_feature
+end
+
+# extend before rescue is allowed
+begin
+  extend DynamicBehavior
+rescue NameError
+  use_fallback
 end
 
 # include inside if/else branches (RuboCop skips when parent is if_type?)

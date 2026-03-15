@@ -43,3 +43,15 @@ if some_condition
     attr_reader :data
   end
 end
+
+require "support/helpers"
+
+include Support::Helpers
+
+records = build_records
+
+def setup
+  include MyHelper
+
+  do_stuff
+end
