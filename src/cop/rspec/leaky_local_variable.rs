@@ -134,6 +134,7 @@ use crate::parse::source::SourceFile;
 ///   - `result = nil` at group scope, `result = compute()` in `before` hook
 ///   - `data = []` at group scope, `data = [1,2,3]` in first `it` block,
 ///     `expect(data)` in second `it` block
+///
 /// Our previous implementation (`check_var_used_in_example_scopes_with_reassign`)
 /// checked each example scope independently but didn't do linear flow analysis
 /// across statements. The new `var_value_reaches_example_scope_in_stmts` walks
