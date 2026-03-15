@@ -15,6 +15,16 @@
 /// (`Module::CONST = ...` via `ConstantPathWriteNode`), setter calls (`obj.x = val`,
 /// `hash[key] = val` via `CallNode`), and compound setter/index assignments
 /// (`obj.x ||= val`, `hash[key] += val` via `Call*WriteNode`/`Index*WriteNode`). All added.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// **FP root cause (149 FPs):** Multiline bracket LHS assignments like
+/// `headers[\n  "key"\n] = "value"` were falsely flagged. The cop compared the
+/// receiver/name line to the value line to decide if the RHS was on a new line, but
+/// RuboCop compares the *operator* (`=`) line to the value line (`same_line?(node.loc.operator, rhs)`).
+/// For `] = "value"`, the `=` and value are on the same line, so it's not a multi-line
+/// RHS. Fixed by adding an `operator_offset` parameter to `check_write` and using the
+/// operator line for the same-line check instead of the name line.
 use crate::cop::node_type::{
     CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE,
     CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
@@ -40,15 +50,19 @@ impl AssignmentIndentation {
         &self,
         source: &SourceFile,
         name_offset: usize,
+        operator_offset: usize,
         value: &ruby_prism::Node<'_>,
         width: usize,
     ) -> Vec<Diagnostic> {
-        let (name_line, name_col) = source.offset_to_line_col(name_offset);
+        let (_name_line, name_col) = source.offset_to_line_col(name_offset);
+        let (operator_line, _operator_col) = source.offset_to_line_col(operator_offset);
         let value_loc = value.location();
         let (value_line, value_col) = source.offset_to_line_col(value_loc.start_offset());
 
-        // Only check when RHS is on a different line
-        if value_line == name_line {
+        // Only check when RHS is on a different line than the operator (=).
+        // For `headers[\n"key"\n] = "value"`, the operator and value are on the
+        // same line, so this is not a multi-line RHS — skip it.
+        if value_line == operator_line {
             return Vec::new();
         }
 
@@ -140,6 +154,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -149,6 +164,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -158,6 +174,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -167,6 +184,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -176,6 +194,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -186,6 +205,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -195,6 +215,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -204,6 +225,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -213,6 +235,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -222,6 +245,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -232,6 +256,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -241,6 +266,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -250,6 +276,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -259,6 +286,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -268,6 +296,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -278,6 +307,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -287,6 +317,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -296,6 +327,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -305,6 +337,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -314,6 +347,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.name_loc().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -325,6 +359,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.location().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -335,6 +370,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.target().location().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -344,6 +380,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.target().location().start_offset(),
+                n.binary_operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -353,6 +390,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.target().location().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -362,6 +400,7 @@ impl Cop for AssignmentIndentation {
             diagnostics.extend(self.check_write(
                 source,
                 n.target().location().start_offset(),
+                n.operator_loc().start_offset(),
                 &n.value(),
                 width,
             ));
@@ -389,7 +428,20 @@ impl Cop for AssignmentIndentation {
                         } else {
                             n.location().start_offset()
                         };
-                        diagnostics.extend(self.check_write(source, base_offset, last_arg, width));
+                        // Use equal_loc for the operator position; fall back to
+                        // message_loc (the method name like `[]=`)
+                        let op_offset = n
+                            .equal_loc()
+                            .or(n.message_loc())
+                            .map(|l| l.start_offset())
+                            .unwrap_or(base_offset);
+                        diagnostics.extend(self.check_write(
+                            source,
+                            base_offset,
+                            op_offset,
+                            last_arg,
+                            width,
+                        ));
                     }
                 }
             }
@@ -402,7 +454,13 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(source, base_offset, &n.value(), width));
+            diagnostics.extend(self.check_write(
+                source,
+                base_offset,
+                n.operator_loc().start_offset(),
+                &n.value(),
+                width,
+            ));
         }
 
         if let Some(n) = node.as_call_and_write_node() {
@@ -411,7 +469,13 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(source, base_offset, &n.value(), width));
+            diagnostics.extend(self.check_write(
+                source,
+                base_offset,
+                n.operator_loc().start_offset(),
+                &n.value(),
+                width,
+            ));
         }
 
         if let Some(n) = node.as_call_operator_write_node() {
@@ -420,7 +484,13 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(source, base_offset, &n.value(), width));
+            diagnostics.extend(self.check_write(
+                source,
+                base_offset,
+                n.binary_operator_loc().start_offset(),
+                &n.value(),
+                width,
+            ));
         }
 
         // Index compound writes (hash[key] ||= val, hash[key] &&= val, hash[key] += val)
@@ -430,7 +500,13 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(source, base_offset, &n.value(), width));
+            diagnostics.extend(self.check_write(
+                source,
+                base_offset,
+                n.operator_loc().start_offset(),
+                &n.value(),
+                width,
+            ));
         }
 
         if let Some(n) = node.as_index_and_write_node() {
@@ -439,7 +515,13 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(source, base_offset, &n.value(), width));
+            diagnostics.extend(self.check_write(
+                source,
+                base_offset,
+                n.operator_loc().start_offset(),
+                &n.value(),
+                width,
+            ));
         }
 
         if let Some(n) = node.as_index_operator_write_node() {
@@ -448,7 +530,13 @@ impl Cop for AssignmentIndentation {
             } else {
                 n.location().start_offset()
             };
-            diagnostics.extend(self.check_write(source, base_offset, &n.value(), width));
+            diagnostics.extend(self.check_write(
+                source,
+                base_offset,
+                n.binary_operator_loc().start_offset(),
+                &n.value(),
+                width,
+            ));
         }
     }
 }

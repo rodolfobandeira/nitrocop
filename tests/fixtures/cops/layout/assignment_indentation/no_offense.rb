@@ -51,3 +51,24 @@ self.name =
 
 obj.attr ||=
   default_value
+
+# Multiline bracket LHS with value on same line as `=` — not a multi-line assignment
+headers[
+  "X-Custom-Header"
+] = "some_value"
+
+serializer_opts[:field_map][
+  "#{prefix}#{field_id}"
+] = field_id
+
+config[
+  key
+] = value
+
+obj.attributes[
+  "name"
+] ||= "default"
+
+items[
+  index
+] += extra
