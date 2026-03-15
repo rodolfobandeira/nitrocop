@@ -29,6 +29,12 @@ use ruby_prism::Visit;
 ///
 /// **Fix (round 2):** Added visitors for all constant write node types. Changed class/module
 /// visitors to recurse into their bodies so constants inside them are also detected.
+///
+/// **Root cause of FN=300 (round 3):** `visit_module_node` and `visit_class_node` only
+/// recursed into their bodies when `example_group_depth > 0`. Spec files that wrap
+/// describe blocks inside module/class declarations (at depth 0) had their inner
+/// describe blocks completely skipped. Fix: always recurse into module/class bodies,
+/// only emit module/class offenses when depth > 0.
 pub struct LeakyConstantDeclaration;
 
 impl Cop for LeakyConstantDeclaration {
@@ -174,12 +180,13 @@ impl Visit<'_> for LeakyVisitor<'_> {
                     "Stub class constant instead of declaring explicitly.".to_string(),
                 ));
             }
-            // Recurse into class body — RuboCop's `inside_describe_block?` checks
-            // ancestor blocks (classes aren't blocks), so constants inside a class
-            // inside an example group are still flagged.
-            if let Some(body) = node.body() {
-                self.visit(&body);
-            }
+        }
+        // Always recurse into class body regardless of depth. At depth 0, the class itself
+        // is not flagged, but describe blocks nested inside it still need to be found.
+        // RuboCop's `inside_describe_block?` checks ancestor blocks (classes aren't blocks),
+        // so constants inside a class inside an example group are still flagged.
+        if let Some(body) = node.body() {
+            self.visit(&body);
         }
     }
 
@@ -196,10 +203,11 @@ impl Visit<'_> for LeakyVisitor<'_> {
                     "Stub module constant instead of declaring explicitly.".to_string(),
                 ));
             }
-            // Recurse into module body — same reasoning as class.
-            if let Some(body) = node.body() {
-                self.visit(&body);
-            }
+        }
+        // Always recurse into module body regardless of depth. At depth 0, the module itself
+        // is not flagged, but describe blocks nested inside it still need to be found.
+        if let Some(body) = node.body() {
+            self.visit(&body);
         }
     }
 }

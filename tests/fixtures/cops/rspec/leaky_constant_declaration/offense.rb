@@ -96,3 +96,28 @@ describe SomeClass do
     ^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
   end
 end
+
+# Module wrapper around describe block
+module SomeWrapper
+  describe SomeClass do
+    CONSTANT = "leaked"
+    ^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+  end
+end
+
+# Class wrapper around describe block
+class SomeTest
+  describe SomeClass do
+    CONSTANT = "leaked"
+    ^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+  end
+end
+
+# Module wrapper with nested class offense
+module AnotherWrapper
+  describe SomeClass do
+    class InnerClass
+    ^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub class constant instead of declaring explicitly.
+    end
+  end
+end
