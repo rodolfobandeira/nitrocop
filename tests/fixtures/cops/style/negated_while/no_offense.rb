@@ -13,3 +13,13 @@ end
 until done?
   work
 end
+
+while !!flag
+  do_something
+end
+
+while obj&.empty?&.!
+  do_something
+end
+
+x += 1 while condition

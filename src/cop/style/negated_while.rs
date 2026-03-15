@@ -1,9 +1,71 @@
-use crate::cop::node_type::{CALL_NODE, WHILE_NODE};
+use crate::cop::node_type::{CALL_NODE, UNTIL_NODE, WHILE_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/NegatedWhile flags `while !condition` / `while not condition` and suggests
+/// `until`, and also flags `until !condition` / `until not condition` suggesting `while`.
+///
+/// Key behaviors matching RuboCop's NegativeConditional mixin:
+/// - Unwraps parentheses around the condition before checking for negation
+///   (e.g. `while (!foo)` and `while (not bar)` are flagged)
+/// - Skips double negation `!!` (not a true negation, it's a boolean cast)
+/// - Skips safe-navigation chains ending in `&.!` (rewriting is problematic)
+/// - Handles both prefix and modifier (postfix) forms
+/// - Handles both `while` and `until` nodes
+///
+/// Root causes of prior FPs/FNs:
+/// - FNs: `not` keyword was not detected (Prism parses `not expr` as CallNode
+///   with name `!`, same as `!expr`, so it was actually the parentheses issue)
+/// - FNs: parenthesized conditions `while(!cond)` and `while (not cond)` were
+///   missed because `predicate.as_call_node()` returned None for the
+///   ParenthesesNode wrapper
+/// - FNs: `until !condition` was not handled at all (cop only checked WhileNode)
+/// - FPs: `!!condition` double negation was not excluded
+/// - FPs: safe-navigation chains `&.!` were not excluded
 pub struct NegatedWhile;
+
+/// Unwrap parentheses from a node, returning the inner expression.
+/// Handles `(expr)`, `((expr))`, etc.
+fn unwrap_parentheses<'a>(node: ruby_prism::Node<'a>) -> ruby_prism::Node<'a> {
+    let mut current = node;
+    while let Some(paren) = current.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let stmts_body = stmts.body();
+                if stmts_body.len() == 1 {
+                    current = stmts_body.iter().next().unwrap();
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    current
+}
+
+/// Check if a node is a single negation (`!expr` or `not expr`),
+/// excluding double negation (`!!expr`) and safe-navigation `&.!`.
+fn is_single_negation(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        if call.name().as_slice() == b"!" {
+            // Skip safe-navigation `&.!` — rewriting is problematic
+            if call.call_operator_loc().is_some() {
+                return false;
+            }
+            // Check for double negation: `!!expr`
+            if let Some(recv) = call.receiver() {
+                if let Some(inner_call) = recv.as_call_node() {
+                    if inner_call.name().as_slice() == b"!" {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
 
 impl Cop for NegatedWhile {
     fn name(&self) -> &'static str {
@@ -11,7 +73,7 @@ impl Cop for NegatedWhile {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, WHILE_NODE]
+        &[CALL_NODE, WHILE_NODE, UNTIL_NODE]
     }
 
     fn check_node(
@@ -23,21 +85,33 @@ impl Cop for NegatedWhile {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let while_node = match node.as_while_node() {
-            Some(n) => n,
-            None => return,
-        };
-
-        let predicate = while_node.predicate();
-        if let Some(call) = predicate.as_call_node() {
-            if call.name().as_slice() == b"!" {
-                let kw_loc = while_node.keyword_loc();
-                let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
+        // Handle WhileNode: `while !cond` -> suggest `until`
+        if let Some(while_node) = node.as_while_node() {
+            let predicate = while_node.predicate();
+            let unwrapped = unwrap_parentheses(predicate);
+            if is_single_negation(&unwrapped) {
+                let (line, column) = source.offset_to_line_col(node.location().start_offset());
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
                     column,
                     "Favor `until` over `while` for negative conditions.".to_string(),
+                ));
+            }
+            return;
+        }
+
+        // Handle UntilNode: `until !cond` -> suggest `while`
+        if let Some(until_node) = node.as_until_node() {
+            let predicate = until_node.predicate();
+            let unwrapped = unwrap_parentheses(predicate);
+            if is_single_negation(&unwrapped) {
+                let (line, column) = source.offset_to_line_col(node.location().start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Favor `while` over `until` for negative conditions.".to_string(),
                 ));
             }
         }
@@ -49,4 +123,78 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(NegatedWhile, "cops/style/negated_while");
+
+    #[test]
+    fn parenthesized_negation() {
+        use crate::testutil::run_cop_full;
+        let source = b"while (!foo)\n  bar\nend\n";
+        let diags = run_cop_full(&NegatedWhile, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag parenthesized negation: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn not_keyword() {
+        use crate::testutil::run_cop_full;
+        let source = b"while not condition\n  do_something\nend\n";
+        let diags = run_cop_full(&NegatedWhile, source);
+        assert_eq!(diags.len(), 1, "Should flag 'not' keyword: {:?}", diags);
+    }
+
+    #[test]
+    fn double_negation_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"while !!condition\n  do_something\nend\n";
+        let diags = run_cop_full(&NegatedWhile, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should NOT flag double negation: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn safe_nav_chain_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"while obj&.empty?&.!\n  do_something\nend\n";
+        let diags = run_cop_full(&NegatedWhile, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should NOT flag safe-nav chain: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn until_negated_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"until !done?\n  process\nend\n";
+        let diags = run_cop_full(&NegatedWhile, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag until with negation: {:?}",
+            diags
+        );
+        assert!(diags[0].message.contains("while"), "Should suggest 'while'");
+    }
+
+    #[test]
+    fn modifier_until_negated() {
+        use crate::testutil::run_cop_full;
+        let source = b"x += 1 until !list.include?(x)\n";
+        let diags = run_cop_full(&NegatedWhile, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag modifier until with negation: {:?}",
+            diags
+        );
+    }
 }
