@@ -26,3 +26,12 @@ unless foo.present?
 ^^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `if foo.blank?` instead of `unless foo.present?`.
   something
 end
+
+!foo || foo.empty?
+^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `foo.blank?` instead of `!foo || foo.empty?`.
+
+!methods || methods.empty?
+^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `methods.blank?` instead of `!methods || methods.empty?`.
+
+!url || url.empty?
+^^^^^^^^^^^^^^^^^^ Rails/Blank: Use `url.blank?` instead of `!url || url.empty?`.

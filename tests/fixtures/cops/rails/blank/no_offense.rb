@@ -17,11 +17,6 @@ else
   something_else
 end
 
-# !foo is a boolean negation, not a nil check — should not trigger NilOrEmpty
-!foo || foo.empty?
-!record || record.empty?
-!@item || @item.empty?
-
 # present? called with argument (class method style) should NOT be flagged
 # RuboCop's NodePattern `(send (send $_ :present?) :!)` requires present? with no arguments
 !Helpers.present?(value)
@@ -37,3 +32,10 @@ unless object&.present?
   do_something
 end
 foo.nil? || foo&.empty?
+
+# pattern match guard: `in pattern unless condition` is not a regular unless
+# RuboCop's on_if handler does not visit pattern match guards
+case element.name
+in "div" unless element.at("div").present?
+  element.name = "p"
+end

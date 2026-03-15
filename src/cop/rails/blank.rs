@@ -54,9 +54,24 @@ use ruby_prism::Visit;
 /// Fix: Added `call_operator_loc() == &.` check to skip safe navigation calls in
 /// `check_unless_present` and `check_nil_or_empty`.
 ///
-/// Remaining FP=2 (danbooru): Pattern match guards `in "div" unless element.at("div").present?`
-/// — these are UnlessNodes inside InNode guards, visited by the cop but apparently not by
-/// RuboCop's `on_if` handler. Deferred (low impact, complex to fix).
+/// ## Investigation (2026-03-15, second pass)
+///
+/// **FP root cause (2 FP remaining):** Pattern match guards `in "div" unless element.at("div").present?`
+/// are parsed by Prism as `UnlessNode` inside `InNode`. RuboCop's `on_if` handler does not
+/// visit these guard nodes. The cop was incorrectly visiting them.
+///
+/// Fix: Added `inside_in_node` context tracking. When inside an `InNode`, `check_unless_present`
+/// is skipped.
+///
+/// **FN root cause (112 FN):** The `!foo || foo.empty?` pattern was not matched by
+/// `nil_check_receiver`. RuboCop's `nil_or_empty?` NodePattern includes `(send $_ :!)` as one
+/// of the left-side alternatives, meaning `!foo || foo.empty?` is a valid NilOrEmpty offense.
+/// The previous fix (2026-03-10) incorrectly removed this pattern, because the old
+/// implementation was treating `!foo` as the full left source text instead of extracting `foo`
+/// (the receiver of `!`) as the variable to compare with `empty?`'s receiver.
+///
+/// Fix: Re-added `!` method name to `nil_check_receiver`. Now correctly extracts the receiver
+/// of `!` (i.e., `foo` from `!foo`) as the variable, matching RuboCop's `(send $_ :!)` capture.
 pub struct Blank;
 
 /// Extract the receiver source text from a CallNode, returning None if absent.
@@ -64,14 +79,14 @@ fn receiver_source<'a>(call: &ruby_prism::CallNode<'a>) -> Option<&'a [u8]> {
     call.receiver().map(|r| r.location().as_slice())
 }
 
-/// Check if the left side of an OR node matches a nil-check pattern:
+/// Check if the left side of an OR node matches a nil-check-like pattern:
 /// - `foo.nil?`
 /// - `foo == nil`
 /// - `nil == foo`
+/// - `!foo` (boolean negation — RuboCop's `(send $_ :!)` pattern)
 ///
 /// Returns (receiver source bytes, left side source bytes) if matched.
-/// Note: `!foo` is NOT a nil check (it's boolean negation) and is intentionally excluded.
-/// RuboCop's `nil_or_empty?` NodePattern only matches `nil?`, `== nil`, `nil ==`.
+/// RuboCop's `nil_or_empty?` NodePattern matches all four forms.
 fn nil_check_receiver<'a>(node: &ruby_prism::Node<'a>) -> Option<(&'a [u8], &'a [u8])> {
     let call = node.as_call_node()?;
     let method = call.name().as_slice();
@@ -79,6 +94,11 @@ fn nil_check_receiver<'a>(node: &ruby_prism::Node<'a>) -> Option<(&'a [u8], &'a 
 
     if method == b"nil?" {
         // foo.nil?
+        return receiver_source(&call).map(|r| (r, left_src));
+    }
+
+    if method == b"!" {
+        // !foo — boolean negation. RuboCop's `(send $_ :!)` captures the receiver.
         return receiver_source(&call).map(|r| (r, left_src));
     }
 
@@ -134,6 +154,7 @@ impl Cop for Blank {
             not_present,
             unless_present,
             inside_def_blank: false,
+            inside_in_node: false,
             diagnostics: Vec::new(),
         };
         visitor.visit(&parse_result.node());
@@ -148,6 +169,7 @@ struct BlankVisitor<'a, 'src> {
     not_present: bool,
     unless_present: bool,
     inside_def_blank: bool,
+    inside_in_node: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -234,6 +256,13 @@ impl<'pr> BlankVisitor<'_, '_> {
 
     /// Check UnlessPresent: `unless foo.present?` or `something unless foo.present?`
     fn check_unless_present(&mut self, unless_node: &ruby_prism::UnlessNode<'pr>) {
+        // Skip pattern match guards: `in pattern unless condition`
+        // In Prism, pattern match guards are represented as UnlessNodes inside InNodes.
+        // RuboCop's `on_if` handler does not visit these guards.
+        if self.inside_in_node {
+            return;
+        }
+
         // Skip unless-with-else (Style/UnlessElse interaction)
         // Conservative: always skip when else clause is present
         if unless_node.else_clause().is_some() {
@@ -355,6 +384,13 @@ impl<'pr> Visit<'pr> for BlankVisitor<'_, '_> {
         if let Some(else_clause) = node.else_clause() {
             self.visit(&else_clause.as_node());
         }
+    }
+
+    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
+        let was_inside = self.inside_in_node;
+        self.inside_in_node = true;
+        ruby_prism::visit_in_node(self, node);
+        self.inside_in_node = was_inside;
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
