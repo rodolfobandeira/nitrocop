@@ -644,7 +644,7 @@ fn is_different_conditional_branch(
     }
 }
 
-/// Check if a CallNode is `Ractor.new(...)`.
+/// Check if a CallNode is `Ractor.new(...)` or `::Ractor.new(...)`.
 fn is_ractor_new_call(node: &ruby_prism::CallNode<'_>) -> bool {
     let name = std::str::from_utf8(node.name().as_slice()).unwrap_or("");
     if name != "new" {
@@ -654,6 +654,12 @@ fn is_ractor_new_call(node: &ruby_prism::CallNode<'_>) -> bool {
         if let Some(constant) = receiver.as_constant_read_node() {
             let const_name = std::str::from_utf8(constant.name().as_slice()).unwrap_or("");
             return const_name == "Ractor";
+        }
+        if let Some(path) = receiver.as_constant_path_node() {
+            if let Some(child) = path.name() {
+                let const_name = std::str::from_utf8(child.as_slice()).unwrap_or("");
+                return const_name == "Ractor";
+            }
         }
     }
     false
