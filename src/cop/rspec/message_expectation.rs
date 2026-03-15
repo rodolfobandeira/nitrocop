@@ -11,6 +11,16 @@ use crate::parse::source::SourceFile;
 /// when `.to` has exactly one argument (no block_pass). When `&proc` is passed as a
 /// block argument, the Parser AST adds it as a `block_pass` child of the send node,
 /// making the pattern not match. Fixed by checking if `.to` has a BlockArgumentNode.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// FN=43: Missed `expect(...).to all(receive(...))` and similar patterns where
+/// `receive` is nested inside matcher arguments (e.g., `all`, compound matchers)
+/// rather than being at the root of the receiver chain. RuboCop uses
+/// `def_node_search :receive_message?` which does a full subtree search, while
+/// nitrocop only walked the receiver chain. Fixed by replacing
+/// `call_chain_includes_receive` with `subtree_includes_receive` that recursively
+/// searches receiver, arguments, and nested call nodes.
 pub struct MessageExpectation;
 
 /// Default style is `allow` — flags `expect(...).to receive` in favor of `allow`.
@@ -82,11 +92,7 @@ impl Cop for MessageExpectation {
         }
 
         let first_arg = &arg_list[0];
-        let matcher_call = match first_arg.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-        if !call_chain_includes_receive(matcher_call) {
+        if !subtree_includes_receive(first_arg) {
             return;
         }
 
@@ -135,17 +141,31 @@ impl Cop for MessageExpectation {
     }
 }
 
-fn call_chain_includes_receive(call: ruby_prism::CallNode<'_>) -> bool {
-    if call.name().as_slice() == b"receive" && call.receiver().is_none() {
-        return true;
-    }
-
-    if let Some(recv) = call.receiver() {
-        if let Some(recv_call) = recv.as_call_node() {
-            return call_chain_includes_receive(recv_call);
+/// Deep-search a node subtree for `receive(...)` (a bare `receive` call with no
+/// receiver). This mirrors RuboCop's `def_node_search :receive_message?` which
+/// searches the entire subtree, not just the receiver chain. This matters for
+/// patterns like `expect(foo).to all(receive(:bar))` where `receive` is nested
+/// inside the argument of `all`, not in the receiver chain.
+fn subtree_includes_receive(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        if call.name().as_slice() == b"receive" && call.receiver().is_none() {
+            return true;
+        }
+        // Recurse into receiver chain
+        if let Some(recv) = call.receiver() {
+            if subtree_includes_receive(&recv) {
+                return true;
+            }
+        }
+        // Recurse into arguments (handles `all(receive(...))` etc.)
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                if subtree_includes_receive(&arg) {
+                    return true;
+                }
+            }
         }
     }
-
     false
 }
 

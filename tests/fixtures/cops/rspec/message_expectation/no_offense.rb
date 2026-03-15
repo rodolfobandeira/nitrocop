@@ -9,3 +9,5 @@ expect(obj).to_not receive(:qux)
 # &proc block argument: RuboCop's NodePattern (send ... :to receive?) doesn't match
 # when there's a block_pass child (extra argument in Parser AST)
 expect(fake_request).to receive(:on).with(:close), &on_close
+allow(items).to all receive(:process)
+allow(items).to all(receive(:process).with(:arg))
