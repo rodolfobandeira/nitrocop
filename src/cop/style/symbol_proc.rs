@@ -293,8 +293,7 @@ fn is_proc_constant(node: &ruby_prism::Node<'_>) -> bool {
 fn is_hash_literal_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
     call.receiver()
         .as_ref()
-        .and_then(|r| r.as_hash_node())
-        .is_some()
+        .is_some_and(|r| r.as_hash_node().is_some() || r.as_keyword_hash_node().is_some())
 }
 
 /// Check if the call's receiver is an array literal.
