@@ -122,6 +122,37 @@ use crate::parse::source::SourceFile;
 /// - The 64 FNs likely stem from the same root cause: RuboCop's VariableForce
 ///   tracks variable lifetime across all Ruby scope boundaries, while our
 ///   AST-walking approach uses heuristics for common patterns.
+///
+/// ## Investigation (FP=53, FN=75, 2026-03-15)
+///
+/// **FP fix: flow-aware dead assignment analysis**
+/// RuboCop's VariableForce tracks per-assignment references: if a variable
+/// assigned at group scope is unconditionally reassigned inside an example
+/// scope (e.g., a `before` hook or `it` block) before being read, subsequent
+/// example-scope reads belong to the example-scope assignment, not the
+/// group-level one. Common patterns:
+///   - `result = nil` at group scope, `result = compute()` in `before` hook
+///   - `data = []` at group scope, `data = [1,2,3]` in first `it` block,
+///     `expect(data)` in second `it` block
+/// Our previous implementation (`check_var_used_in_example_scopes_with_reassign`)
+/// checked each example scope independently but didn't do linear flow analysis
+/// across statements. The new `var_value_reaches_example_scope_in_stmts` walks
+/// statements linearly after the assignment, tracking whether the group-level
+/// value has been "killed" by an example-scope reassignment. Once killed,
+/// subsequent example-scope reads don't count as references to the group-level
+/// assignment.
+///
+/// **Remaining gaps:**
+/// - FPs from rswag/swagger DSL patterns (discourse): variables assigned inside
+///   `post`/`response` blocks (non-standard DSL methods) are collected as
+///   group-level assignments. These may require recognizing rswag DSL methods
+///   as scope boundaries.
+/// - FPs from `||=` and flow-through reassignment at file level (dev-sec):
+///   `flags = parse(...)`, `flags ||= ''`, `flags = flags.split(' ')` —
+///   requires tracking that `||=` and reads-then-writes are different from
+///   unconditional writes.
+/// - 75 FNs: VariableForce's comprehensive scope tracking across all Ruby
+///   scope boundaries that our AST-walking approach doesn't replicate.
 pub struct LeakyLocalVariable;
 
 impl Cop for LeakyLocalVariable {
@@ -471,15 +502,13 @@ fn check_scope_for_leaky_vars(
 
     // For each live assignment, check if the variable is referenced inside any
     // example scope within this block. Use the scope-aware check that handles
-    // reassignment in nested example groups.
+    // reassignment in nested example groups. Also applies flow-aware dead-value
+    // analysis: if the variable is unconditionally reassigned in an example scope
+    // (e.g., a before hook or an it block), subsequent example-scope reads belong
+    // to the example-scope assignment, not the group-level one.
     for assign in &live_assignments {
-        let mut used_in_example_scope = false;
-        for stmt in stmts.body().iter() {
-            if check_var_used_in_example_scopes_with_reassign(&stmt, &assign.name) {
-                used_in_example_scope = true;
-                break;
-            }
-        }
+        let used_in_example_scope =
+            var_value_reaches_example_scope_in_stmts(&stmts, &assign.name, assign.offset);
 
         if used_in_example_scope {
             let (line, column) = source.offset_to_line_col(assign.offset);
@@ -493,6 +522,333 @@ fn check_scope_for_leaky_vars(
                 ),
             );
         }
+    }
+}
+
+/// Flow-aware check: does the group-level assignment's value actually reach any
+/// example scope? Walks statements linearly starting after `assign_offset`,
+/// tracking whether the value is still "live." The value becomes dead when the
+/// variable is unconditionally reassigned in an example scope (before/after/
+/// around/it/let/subject) — subsequent example-scope reads belong to that
+/// example-scope assignment, not the group-level one.
+///
+/// This matches RuboCop's VariableForce behavior: it tracks per-assignment
+/// references using linear dataflow, so if a hook reassigns the variable before
+/// any example reads it, the group-level assignment has zero references in
+/// example scopes.
+fn var_value_reaches_example_scope_in_stmts(
+    stmts: &ruby_prism::StatementsNode<'_>,
+    var_name: &[u8],
+    assign_offset: usize,
+) -> bool {
+    let mut past_assignment = false;
+    // Track whether the group-level value has been "killed" by an example-scope
+    // reassignment. Once killed, subsequent example-scope reads don't count.
+    let mut value_killed = false;
+
+    for stmt in stmts.body().iter() {
+        if !past_assignment {
+            if stmt_contains_offset(&stmt, assign_offset) {
+                past_assignment = true;
+            }
+            continue;
+        }
+
+        // Check this statement for example-scope interactions with the variable.
+        // We need to distinguish between:
+        // (a) example scopes that reassign the variable before reading it (kills value)
+        // (b) example scopes that read the variable (uses value, if not killed)
+        // (c) nested example groups (recurse with the same flow logic)
+        match stmt_example_scope_var_interaction(&stmt, var_name) {
+            VarInteraction::ReadOnly => {
+                if !value_killed {
+                    return true;
+                }
+            }
+            VarInteraction::WriteBeforeRead => {
+                // This example scope reassigns the variable before reading it.
+                // In RuboCop's VariableForce linear flow, this kills the group-level
+                // value for all subsequent scopes.
+                value_killed = true;
+            }
+            VarInteraction::WriteAndReadBeforeWrite => {
+                // The scope both reads then writes, or reads the group-level value.
+                if !value_killed {
+                    return true;
+                }
+                value_killed = true;
+            }
+            VarInteraction::None => {}
+        }
+    }
+
+    false
+}
+
+/// How an example scope interacts with a variable.
+enum VarInteraction {
+    /// No reference to the variable in this statement's example scopes.
+    None,
+    /// The variable is read in an example scope without prior reassignment.
+    ReadOnly,
+    /// The variable is unconditionally reassigned in an example scope before
+    /// being read (e.g., `before { result = compute() }`).
+    WriteBeforeRead,
+    /// The variable is read in an example scope AND also written, but the read
+    /// happens before the write (or both happen).
+    WriteAndReadBeforeWrite,
+}
+
+/// Analyze how a statement's example scopes interact with a variable.
+/// Returns the combined interaction across all example scopes in the statement.
+fn stmt_example_scope_var_interaction(
+    node: &ruby_prism::Node<'_>,
+    var_name: &[u8],
+) -> VarInteraction {
+    if let Some(call) = node.as_call_node() {
+        let name = call.name().as_slice();
+        let no_recv = call.receiver().is_none();
+
+        // Example scopes: it, before, let, subject, etc.
+        if no_recv && is_example_scope(name) {
+            if let Some(blk) = call.block() {
+                if let Some(bn) = blk.as_block_node() {
+                    if block_has_param(&bn, var_name) {
+                        return VarInteraction::None; // shadowed by block param
+                    }
+                    if let Some(body) = bn.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            if var_written_before_read_in_stmts(&stmts, var_name) {
+                                return VarInteraction::WriteBeforeRead;
+                            }
+                            // Check if the variable is referenced at all
+                            for s in stmts.body().iter() {
+                                if node_references_var(&s, var_name) {
+                                    return VarInteraction::ReadOnly;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Also check args (example description/metadata)
+            // But args references are "allowed" per RuboCop, so don't count
+            return VarInteraction::None;
+        }
+
+        // Includes methods: it_behaves_like, include_examples, etc.
+        if no_recv && is_includes_method(name) {
+            if let Some(args) = call.arguments() {
+                let arg_list: Vec<_> = args.arguments().iter().collect();
+                for (i, arg) in arg_list.iter().enumerate() {
+                    if i == 0 {
+                        continue;
+                    }
+                    if is_interpolated_string_or_symbol(arg) {
+                        continue;
+                    }
+                    if node_references_var(arg, var_name) {
+                        return VarInteraction::ReadOnly;
+                    }
+                }
+            }
+            if let Some(blk) = call.block() {
+                if let Some(bn) = blk.as_block_node() {
+                    if !block_has_param(&bn, var_name) {
+                        if let Some(body) = bn.body() {
+                            if let Some(stmts) = body.as_statements_node() {
+                                for s in stmts.body().iter() {
+                                    if node_references_var(&s, var_name) {
+                                        return VarInteraction::ReadOnly;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return VarInteraction::None;
+        }
+
+        // Nested example groups: recurse into their statements
+        if no_recv && is_rspec_example_group(name) {
+            if let Some(blk) = call.block() {
+                if let Some(bn) = blk.as_block_node() {
+                    if let Some(body) = bn.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            // Check if the variable is reassigned at the nested
+                            // group's scope level before any example reads it
+                            if var_reassigned_before_example_ref_in_stmts(&stmts, var_name) {
+                                return VarInteraction::None;
+                            }
+                            // Recurse: check nested group's statements
+                            let mut result = VarInteraction::None;
+                            for s in stmts.body().iter() {
+                                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                                result = combine_var_interactions(result, inner);
+                            }
+                            return result;
+                        }
+                    }
+                }
+            }
+            return VarInteraction::None;
+        }
+
+        // Other calls with blocks: recurse into block body
+        if let Some(blk) = call.block() {
+            if let Some(bn) = blk.as_block_node() {
+                if let Some(body) = bn.body() {
+                    if let Some(stmts) = body.as_statements_node() {
+                        let mut result = VarInteraction::None;
+                        for s in stmts.body().iter() {
+                            let inner = stmt_example_scope_var_interaction(&s, var_name);
+                            result = combine_var_interactions(result, inner);
+                        }
+                        return result;
+                    }
+                }
+            }
+        }
+        return VarInteraction::None;
+    }
+
+    // Recurse through control flow
+    if let Some(if_node) = node.as_if_node() {
+        let mut result = VarInteraction::None;
+        if let Some(stmts) = if_node.statements() {
+            for s in stmts.body().iter() {
+                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                result = combine_var_interactions(result, inner);
+            }
+        }
+        if let Some(subsequent) = if_node.subsequent() {
+            let inner = stmt_example_scope_var_interaction(&subsequent, var_name);
+            result = combine_var_interactions(result, inner);
+        }
+        return result;
+    }
+    if let Some(unless_node) = node.as_unless_node() {
+        let mut result = VarInteraction::None;
+        if let Some(stmts) = unless_node.statements() {
+            for s in stmts.body().iter() {
+                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                result = combine_var_interactions(result, inner);
+            }
+        }
+        if let Some(else_clause) = unless_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                for s in stmts.body().iter() {
+                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    result = combine_var_interactions(result, inner);
+                }
+            }
+        }
+        return result;
+    }
+    if let Some(else_node) = node.as_else_node() {
+        let mut result = VarInteraction::None;
+        if let Some(stmts) = else_node.statements() {
+            for s in stmts.body().iter() {
+                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                result = combine_var_interactions(result, inner);
+            }
+        }
+        return result;
+    }
+    if let Some(case_node) = node.as_case_node() {
+        let mut result = VarInteraction::None;
+        for cond in case_node.conditions().iter() {
+            if let Some(when_node) = cond.as_when_node() {
+                if let Some(stmts) = when_node.statements() {
+                    for s in stmts.body().iter() {
+                        let inner = stmt_example_scope_var_interaction(&s, var_name);
+                        result = combine_var_interactions(result, inner);
+                    }
+                }
+            }
+        }
+        if let Some(else_clause) = case_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                for s in stmts.body().iter() {
+                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    result = combine_var_interactions(result, inner);
+                }
+            }
+        }
+        return result;
+    }
+    if let Some(begin_node) = node.as_begin_node() {
+        let mut result = VarInteraction::None;
+        if let Some(stmts) = begin_node.statements() {
+            for s in stmts.body().iter() {
+                let inner = stmt_example_scope_var_interaction(&s, var_name);
+                result = combine_var_interactions(result, inner);
+            }
+        }
+        if let Some(rescue_clause) = begin_node.rescue_clause() {
+            let inner = rescue_var_interaction(&rescue_clause, var_name);
+            result = combine_var_interactions(result, inner);
+        }
+        if let Some(else_clause) = begin_node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                for s in stmts.body().iter() {
+                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    result = combine_var_interactions(result, inner);
+                }
+            }
+        }
+        if let Some(ensure_clause) = begin_node.ensure_clause() {
+            if let Some(stmts) = ensure_clause.statements() {
+                for s in stmts.body().iter() {
+                    let inner = stmt_example_scope_var_interaction(&s, var_name);
+                    result = combine_var_interactions(result, inner);
+                }
+            }
+        }
+        return result;
+    }
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            return stmt_example_scope_var_interaction(&body, var_name);
+        }
+    }
+
+    VarInteraction::None
+}
+
+/// Check rescue chain for variable interaction.
+fn rescue_var_interaction(
+    rescue_node: &ruby_prism::RescueNode<'_>,
+    var_name: &[u8],
+) -> VarInteraction {
+    let mut result = VarInteraction::None;
+    if let Some(stmts) = rescue_node.statements() {
+        for s in stmts.body().iter() {
+            let inner = stmt_example_scope_var_interaction(&s, var_name);
+            result = combine_var_interactions(result, inner);
+        }
+    }
+    if let Some(subsequent) = rescue_node.subsequent() {
+        let inner = rescue_var_interaction(&subsequent, var_name);
+        result = combine_var_interactions(result, inner);
+    }
+    result
+}
+
+/// Combine two VarInteraction values. A read anywhere dominates.
+fn combine_var_interactions(a: VarInteraction, b: VarInteraction) -> VarInteraction {
+    match (&a, &b) {
+        // Any read makes the combined result a read
+        (VarInteraction::ReadOnly, _) | (_, VarInteraction::ReadOnly) => VarInteraction::ReadOnly,
+        (VarInteraction::WriteAndReadBeforeWrite, _)
+        | (_, VarInteraction::WriteAndReadBeforeWrite) => VarInteraction::WriteAndReadBeforeWrite,
+        // Write-before-read in at least one scope
+        (VarInteraction::WriteBeforeRead, _) | (_, VarInteraction::WriteBeforeRead) => {
+            VarInteraction::WriteBeforeRead
+        }
+        // Neither
+        _ => VarInteraction::None,
     }
 }
 
@@ -854,210 +1210,6 @@ fn collect_assignments_in_rescue_node(
     if let Some(subsequent) = rescue_node.subsequent() {
         collect_assignments_in_rescue_node(&subsequent, assigns);
     }
-}
-
-/// Scope-aware version of `check_var_used_in_example_scopes` that also checks
-/// whether the variable is reassigned inside nested example groups (making the
-/// outer assignment dead with respect to those groups' examples).
-fn check_var_used_in_example_scopes_with_reassign(
-    node: &ruby_prism::Node<'_>,
-    var_name: &[u8],
-) -> bool {
-    if let Some(call) = node.as_call_node() {
-        let name = call.name().as_slice();
-        let no_recv = call.receiver().is_none();
-
-        // Example scopes: it, before, let, subject, etc.
-        if no_recv && is_example_scope(name) {
-            if let Some(blk) = call.block() {
-                if let Some(bn) = blk.as_block_node() {
-                    if block_body_references_var(bn, var_name) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Includes methods
-        if no_recv && is_includes_method(name) {
-            if let Some(args) = call.arguments() {
-                let arg_list: Vec<_> = args.arguments().iter().collect();
-                for (i, arg) in arg_list.iter().enumerate() {
-                    if i == 0 {
-                        continue;
-                    }
-                    if is_interpolated_string_or_symbol(arg) {
-                        continue;
-                    }
-                    if node_references_var(arg, var_name) {
-                        return true;
-                    }
-                }
-            }
-            if let Some(blk) = call.block() {
-                if let Some(bn) = blk.as_block_node() {
-                    if block_body_references_var(bn, var_name) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Nested example groups: check if variable is reassigned in the nested
-        // group's scope before any example reference. If so, the outer assignment
-        // is dead with respect to this group's examples.
-        if no_recv && is_rspec_example_group(name) {
-            if let Some(blk) = call.block() {
-                if let Some(bn) = blk.as_block_node() {
-                    if let Some(body) = bn.body() {
-                        if let Some(stmts) = body.as_statements_node() {
-                            // Check if the variable is reassigned at the nested
-                            // group's scope level before any example reads it
-                            if var_reassigned_before_example_ref_in_stmts(&stmts, var_name) {
-                                return false;
-                            }
-                            for s in stmts.body().iter() {
-                                if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Other calls with blocks
-        if let Some(blk) = call.block() {
-            if let Some(bn) = blk.as_block_node() {
-                if let Some(body) = bn.body() {
-                    if let Some(stmts) = body.as_statements_node() {
-                        for s in stmts.body().iter() {
-                            if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    // Recurse through control flow (same as check_var_used_in_example_scopes)
-    if let Some(if_node) = node.as_if_node() {
-        if let Some(stmts) = if_node.statements() {
-            for s in stmts.body().iter() {
-                if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                    return true;
-                }
-            }
-        }
-        if let Some(subsequent) = if_node.subsequent() {
-            if check_var_used_in_example_scopes_with_reassign(&subsequent, var_name) {
-                return true;
-            }
-        }
-        return false;
-    }
-    if let Some(unless_node) = node.as_unless_node() {
-        if let Some(stmts) = unless_node.statements() {
-            for s in stmts.body().iter() {
-                if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                    return true;
-                }
-            }
-        }
-        if let Some(else_clause) = unless_node.else_clause() {
-            if let Some(stmts) = else_clause.statements() {
-                for s in stmts.body().iter() {
-                    if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-    if let Some(else_node) = node.as_else_node() {
-        if let Some(stmts) = else_node.statements() {
-            for s in stmts.body().iter() {
-                if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-    if let Some(case_node) = node.as_case_node() {
-        for cond in case_node.conditions().iter() {
-            if let Some(when_node) = cond.as_when_node() {
-                if let Some(stmts) = when_node.statements() {
-                    for s in stmts.body().iter() {
-                        if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(else_clause) = case_node.else_clause() {
-            if let Some(stmts) = else_clause.statements() {
-                for s in stmts.body().iter() {
-                    if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-    if let Some(begin_node) = node.as_begin_node() {
-        if let Some(stmts) = begin_node.statements() {
-            for s in stmts.body().iter() {
-                if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                    return true;
-                }
-            }
-        }
-        if let Some(rescue_clause) = begin_node.rescue_clause() {
-            if check_var_in_rescue_scopes_inner(&rescue_clause, var_name) {
-                return true;
-            }
-        }
-        if let Some(else_clause) = begin_node.else_clause() {
-            if let Some(stmts) = else_clause.statements() {
-                for s in stmts.body().iter() {
-                    if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                        return true;
-                    }
-                }
-            }
-        }
-        if let Some(ensure_clause) = begin_node.ensure_clause() {
-            if let Some(stmts) = ensure_clause.statements() {
-                for s in stmts.body().iter() {
-                    if check_var_used_in_example_scopes_with_reassign(&s, var_name) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-    if let Some(paren) = node.as_parentheses_node() {
-        if let Some(body) = paren.body() {
-            if check_var_used_in_example_scopes_with_reassign(&body, var_name) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    false
 }
 
 /// Check if a variable is reassigned at the top level of a statement list

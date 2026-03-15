@@ -228,3 +228,63 @@ describe OtherClass do
     expect(true).to eq(true)
   end
 end
+
+# Variable initialized at group scope, reassigned in before hook (VariableForce: dead assignment)
+# RuboCop's VariableForce tracks that the before hook reassigns the variable before
+# any example reads it (hooks run before examples), making the group-level value dead.
+describe SomeClass do
+  result = nil
+
+  before :each do
+    result = compute_something()
+  end
+
+  it 'checks the result' do
+    expect(result).to eq(42)
+  end
+end
+
+# Variable initialized at group scope, reassigned in before hook, read in multiple its
+describe SomeClass do
+  response = nil
+
+  before do
+    response = make_request()
+  end
+
+  it 'returns a response' do
+    expect(response).to be_instance_of(Response)
+  end
+
+  it 'has a body' do
+    expect(response.body).to eq('ok')
+  end
+end
+
+# Variable initialized at group scope, reassigned in before :all hook
+describe SomeClass do
+  path = nil
+
+  before :all do
+    path = Dir.mktmpdir('test')
+  end
+
+  it 'uses the path' do
+    expect(File.exist?(path)).to be true
+  end
+end
+
+# Variable reassigned in first it block, read in second it block
+# VariableForce sees linear flow: group assign -> it1 reassign -> it2 read
+# and attributes the read to the it1 assignment, not the group assignment.
+describe SomeClass do
+  data = []
+
+  it 'populates data' do
+    data = [1, 2, 3]
+  end
+
+  it 'checks data' do
+    expect(data).to eq([1, 2, 3])
+  end
+end
