@@ -63,3 +63,37 @@ foo browser {
 
 # Chained multi-line brace blocks — inner blocks suppressed by outermost offense
 # (see inline tests for chain behavior: offense_only_outermost_in_chain)
+
+# Block inside operator method argument (non-parenthesized) — ignored
+# because changing delimiters would change binding
+"prefix" + items.map { |x|
+  x.to_s
+}.join(", ")
+
+# Block chained inside << operator argument
+result << items.collect { |item|
+  item.name
+}.join(", ")
+
+# Lambda in non-parenthesized keyword arg — block inside lambda is suppressed
+render node: -> {
+  items.map { |item|
+    item.name
+  }
+} do
+  something
+end
+
+# super with single-line braces — correct
+super(arg) { do_something }
+
+# super with multi-line do-end — correct
+super(arg) do
+  do_something
+end
+
+# forwarding super with multi-line do-end — correct
+super do
+  yield if block_given?
+  process
+end

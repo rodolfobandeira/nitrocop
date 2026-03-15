@@ -25,3 +25,16 @@ items.select {
        ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for multi-line blocks.
   puts x
 }
+
+# super with args and multi-line braces should be flagged
+super(arg) {
+           ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for multi-line blocks.
+  do_something
+}
+
+# forwarding super (no args) with multi-line braces
+super {
+      ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for multi-line blocks.
+  yield if block_given?
+  process
+}

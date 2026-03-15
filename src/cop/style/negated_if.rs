@@ -3,7 +3,62 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/NegatedIf flags `if !condition` and `if not condition` (both prefix
+/// and modifier forms) and suggests using `unless` instead.
+///
+/// Key behaviors matching RuboCop's NegativeConditional mixin:
+/// - Unwraps parentheses around the condition before checking for negation
+///   (e.g. `if (!foo)` and `if (not bar)` are flagged)
+/// - Skips double negation `!!` (not a true negation, it's a boolean cast)
+/// - Skips `if/elsif/else` chains (only bare `if` without else)
+/// - Reports at the start of the full if-node (for modifier form, this is the
+///   start of the body expression, not the `if` keyword)
+///
+/// Root causes of prior FPs/FNs:
+/// - FPs: `!!condition` was not excluded (double negation)
+/// - FNs: parenthesized conditions `if (!cond)` were missed because
+///   `predicate.as_call_node()` returned None for the ParenthesesNode wrapper
+/// - FPs/FNs: modifier-form location was reported at `if` keyword instead of
+///   at the start of the full expression, causing line mismatches vs RuboCop
 pub struct NegatedIf;
+
+/// Unwrap parentheses from a node, returning the inner expression.
+/// Handles `(expr)`, `((expr))`, etc.
+fn unwrap_parentheses<'a>(node: ruby_prism::Node<'a>) -> ruby_prism::Node<'a> {
+    let mut current = node;
+    while let Some(paren) = current.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let stmts_body = stmts.body();
+                if stmts_body.len() == 1 {
+                    current = stmts_body.iter().next().unwrap();
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    current
+}
+
+/// Check if a node is a single negation (`!expr` or `not expr`),
+/// excluding double negation (`!!expr`).
+fn is_single_negation(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        if call.name().as_slice() == b"!" {
+            // Check for double negation: `!!expr`
+            if let Some(recv) = call.receiver() {
+                if let Some(inner_call) = recv.as_call_node() {
+                    if inner_call.name().as_slice() == b"!" {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
 
 impl Cop for NegatedIf {
     fn name(&self) -> &'static str {
@@ -40,13 +95,12 @@ impl Cop for NegatedIf {
             return;
         }
 
-        // Must not have an else clause
+        // Must not have an else/elsif clause
         if if_node.subsequent().is_some() {
             return;
         }
 
         // Detect modifier (postfix) form: `do_something if condition`
-        // In modifier form, the `if` keyword comes after the body in source
         let is_modifier = if_node.end_keyword_loc().is_none();
 
         // EnforcedStyle filtering
@@ -56,18 +110,21 @@ impl Cop for NegatedIf {
             _ => {} // "both" checks all forms
         }
 
-        // Check if predicate is a `!` call
+        // Unwrap parentheses from the predicate, then check for single negation
         let predicate = if_node.predicate();
-        if let Some(call) = predicate.as_call_node() {
-            if call.name().as_slice() == b"!" {
-                let (line, column) = source.offset_to_line_col(if_kw_loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Favor `unless` over `if` for negative conditions.".to_string(),
-                ));
-            }
+        let unwrapped = unwrap_parentheses(predicate);
+
+        if is_single_negation(&unwrapped) {
+            // Report at the start of the full if-node expression.
+            // For modifier form `body if !cond`, this is the start of `body`.
+            // For prefix form `if !cond`, this is the `if` keyword.
+            let (line, column) = source.offset_to_line_col(node.location().start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Favor `unless` over `if` for negative conditions.".to_string(),
+            ));
         }
     }
 }
@@ -78,6 +135,97 @@ mod tests {
     use crate::testutil::run_cop_full_with_config;
 
     crate::cop_fixture_tests!(NegatedIf, "cops/style/negated_if");
+
+    #[test]
+    fn parenthesized_negation() {
+        use crate::testutil::run_cop_full;
+        let source = b"if (!foo)\n  bar\nend\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag parenthesized negation: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn parenthesized_negation_no_space() {
+        use crate::testutil::run_cop_full;
+        let source = b"if(!foo)\n  bar\nend\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag parenthesized negation without space: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn double_negation_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"if !!condition\n  do_something\nend\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should NOT flag double negation: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn not_keyword() {
+        use crate::testutil::run_cop_full;
+        let source = b"if not condition\n  do_something\nend\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(diags.len(), 1, "Should flag 'not' keyword: {:?}", diags);
+    }
+
+    #[test]
+    fn modifier_double_negation_not_flagged() {
+        use crate::testutil::run_cop_full;
+        let source = b"return if !!ENV[\"testing\"]\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "Should NOT flag modifier double negation: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn modifier_parenthesized_negation() {
+        use crate::testutil::run_cop_full;
+        let source = b"something if (!x.even?)\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag modifier parenthesized negation: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn multiline_modifier_position() {
+        use crate::testutil::run_cop_full;
+        // Multi-line modifier form: report at start of expression (line 1)
+        let source = b"return {\n  status: \"err\"\n}.to_json if !info\n";
+        let diags = run_cop_full(&NegatedIf, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag multiline modifier: {:?}",
+            diags
+        );
+        assert_eq!(
+            diags[0].location.line, 1,
+            "Should report at line 1 (start of return), not at 'if' keyword line"
+        );
+    }
 
     #[test]
     fn enforced_style_prefix_ignores_postfix() {

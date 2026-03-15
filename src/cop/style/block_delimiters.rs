@@ -42,8 +42,24 @@ use std::collections::HashSet;
 /// `single_argument_operator_method?` check skips the ignore logic for these cases.
 /// Fix: added `is_operator_method` check to skip `collect_ignored_blocks` for operators.
 ///
-/// Remaining FN gap: `super(...)` with blocks uses `SuperNode` in Prism, not `CallNode`.
-/// Our visitor only handles `visit_call_node`, so `super` blocks are missed entirely.
+/// ## Investigation findings (2026-03-15, second pass)
+///
+/// Root cause of 68 FPs: `is_single_arg_operator` was too broad. It checked only
+/// `args.len() == 1` without verifying the argument is a block node. RuboCop's
+/// `single_argument_operator_method?` additionally checks `first_argument.block_type?`.
+/// When the operator's argument is a send/call chain (e.g., `a + items.map { }.join`),
+/// the argument is NOT a block type, so RuboCop proceeds to call `get_blocks` on it,
+/// finding and ignoring blocks within the expression tree. Fix: added block-type check.
+///
+/// Additional FP source: lambda nodes (`-> { }`) in non-parenthesized keyword args.
+/// In Parser AST, lambdas are block nodes, so RuboCop's `get_blocks` yields them and
+/// `ignore_node` suppresses all nested blocks. In Prism, lambdas are `LambdaNode`,
+/// which `collect_ignored_blocks` didn't handle. Fix: added LambdaNode handling that
+/// recurses into the lambda body to find and ignore nested blocks.
+///
+/// Root cause of 14 FNs: `super(...)` with blocks uses `SuperNode` / `ForwardingSuperNode`
+/// in Prism, not `CallNode`. The visitor only had `visit_call_node`. Fix: added
+/// `visit_super_node` and `visit_forwarding_super_node` handlers.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -216,10 +232,20 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         // RuboCop's `single_argument_operator_method?` check: for `a + b { }`,
         // the `+` call should NOT mark `b`'s block as ignored, because the
         // block is genuinely part of `b`'s call, not an ambiguous binding case.
+        // IMPORTANT: Only skip when the single argument IS itself a block node
+        // (i.e., a call whose block is the argument). When the argument is a
+        // send/call chain (e.g., `a + items.map { }.join`), the block is nested
+        // inside the expression and should be found via collect_ignored_blocks.
         let is_single_arg_operator = is_operator_method(method_name)
-            && node
-                .arguments()
-                .is_some_and(|args| args.arguments().len() == 1);
+            && node.arguments().is_some_and(|args| {
+                args.arguments().len() == 1
+                    && args.arguments().iter().next().is_some_and(|arg| {
+                        arg.as_call_node()
+                            .and_then(|c| c.block())
+                            .and_then(|b| b.as_block_node())
+                            .is_some()
+                    })
+            });
 
         if !is_parenthesized && !is_assignment && !is_single_arg_operator {
             if let Some(args) = node.arguments() {
@@ -260,6 +286,44 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 
         // Recurse into children
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'_>) {
+        // SuperNode: `super(args) { ... }` or `super(args) do ... end`
+        if let Some(block) = node.block() {
+            if let Some(block_node) = block.as_block_node() {
+                let offset = block_node.opening_loc().start_offset();
+                let block_end = block_node.closing_loc().end_offset();
+                let call_start = node.location().start_offset();
+                let call_end = node.location().end_offset();
+
+                if !self.is_suppressed(offset, block_end) {
+                    let flagged = self.check_block(&block_node, b"super");
+                    if flagged {
+                        self.suppress_range(call_start, call_end);
+                    }
+                }
+            }
+        }
+        ruby_prism::visit_super_node(self, node);
+    }
+
+    fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'_>) {
+        // ForwardingSuperNode: `super { ... }` or `super do ... end` (no explicit args)
+        if let Some(block_node) = node.block() {
+            let offset = block_node.opening_loc().start_offset();
+            let block_end = block_node.closing_loc().end_offset();
+            let call_start = node.location().start_offset();
+            let call_end = node.location().end_offset();
+
+            if !self.is_suppressed(offset, block_end) {
+                let flagged = self.check_block(&block_node, b"super");
+                if flagged {
+                    self.suppress_range(call_start, call_end);
+                }
+            }
+        }
+        ruby_prism::visit_forwarding_super_node(self, node);
     }
 }
 
@@ -357,7 +421,56 @@ fn collect_ignored_blocks(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usi
         if let Some(value) = splat.value() {
             collect_ignored_blocks(&value, ignored);
         }
+        return;
     }
+
+    // LambdaNode (`-> { ... }`) — in Parser AST, lambdas are block nodes.
+    // RuboCop's `get_blocks` yields them, so `ignore_node` is called on the
+    // lambda block. Any blocks nested inside the lambda body are then
+    // suppressed by `part_of_ignored_node?`. We must recurse into the lambda's
+    // body to find and ignore nested blocks.
+    if let Some(lambda) = node.as_lambda_node() {
+        if let Some(body) = lambda.body() {
+            collect_ignored_blocks_from_body(&body, ignored);
+        }
+    }
+}
+
+/// Recursively find all blocks inside a node body and mark them as ignored.
+/// Used for lambda bodies where we need to suppress all nested blocks.
+fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usize>) {
+    if let Some(call) = node.as_call_node() {
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                ignored.insert(block_node.opening_loc().start_offset());
+            }
+        }
+        if let Some(receiver) = call.receiver() {
+            collect_ignored_blocks_from_body(&receiver, ignored);
+        }
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                collect_ignored_blocks_from_body(&arg, ignored);
+            }
+        }
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                if let Some(body) = block_node.body() {
+                    collect_ignored_blocks_from_body(&body, ignored);
+                }
+            }
+        }
+        return;
+    }
+
+    if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_ignored_blocks_from_body(&stmt, ignored);
+        }
+    }
+
+    // For other node types, recurse through children generically isn't needed
+    // because we only care about call nodes with blocks.
 }
 
 #[cfg(test)]
@@ -511,6 +624,111 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not flag single-line do-end with rescue+semicolon, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_block_in_string_concat_operator() {
+        // `a + b.collect { ... }.join` — the `+` operator's argument is a send node
+        // (not a block), so RuboCop does NOT skip ignore_node logic. The block is
+        // found via get_blocks recursion and ignored.
+        let source = b"result = prefix + items.collect { |i|\n  i.to_s\n}.join(\", \")\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag block inside operator argument chain, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_block_in_string_concat_multi_plus() {
+        // Multiple `+` concatenation: `a + b.map { }.join + c`
+        let source = b"x = \"prefix\" + items.map { |i|\n  i.to_s\n}.join(\", \") + \"suffix\"\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag block in multi-plus concat, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_block_as_rhs_of_or_assign_with_plus() {
+        // `@x ||= a + b.collect { ... }.flatten` — the `+` operator's argument
+        // is a send node (.flatten), so RuboCop ignores the inner block.
+        let source = b"@x ||= prefix + items.collect { |m|\n  m.ancestors\n}.flatten\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag block in operator arg of ||= expression, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn offense_super_multi_line_braces() {
+        // `super(args) { ... }` — multi-line brace block on super should be flagged
+        let source = b"super(num_waits) {\n  yield if block_given?\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag multi-line brace block on super, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn offense_super_single_line_do_end() {
+        // `super(*args) do |item| yielder << item end` — single-line do-end on super
+        let source = b"super(*args) do |item| yielder << item end\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag single-line do-end block on super, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_super_multi_line_do_end() {
+        // `super(args) do ... end` — correct style for multi-line
+        let source = b"super(num_waits) do\n  yield if block_given?\nend\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert!(
+            diags.is_empty(),
+            "Should not flag multi-line do-end block on super, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn offense_forwarding_super_multi_line_braces() {
+        // `super { ... }` with ForwardingSuperNode — multi-line braces should be flagged
+        let source = b"super {\n  yield\n}\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag multi-line brace block on bare super, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_block_in_parenthesized_arg() {
+        // Block inside a parenthesized method call argument — parenthesized calls
+        // don't trigger ignore_node, so block is checked normally.
+        // In line_count_based, multi-line braces = offense.
+        let source = b"foo(bar.map { |x|\n  x.to_s\n})\n";
+        let diags = crate::testutil::run_cop_full(&BlockDelimiters, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag multi-line brace block in parenthesized arg, got: {:?}",
             diags
         );
     }
