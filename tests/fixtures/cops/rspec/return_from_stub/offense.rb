@@ -47,3 +47,18 @@ it do
   allow(Foo).to receive(:bar) { "foo".freeze }
                               ^ RSpec/ReturnFromStub: Use `and_return` for static values.
 end
+# Block on chained .with(...) — block binds to .with, not to .to
+it do
+  allow(Question).to receive(:meaning).with(:universe) { 42 }
+                                                       ^ RSpec/ReturnFromStub: Use `and_return` for static values.
+end
+# Block on chained .once — block binds to .once, not to .to
+it do
+  expect(Foo).to receive(:bar).once { 42 }
+                                    ^ RSpec/ReturnFromStub: Use `and_return` for static values.
+end
+# Block on chained .with and static array — block binds to .with
+it do
+  allow(Foo).to receive(:bar).with(1, 2) { [1, 2] }
+                                         ^ RSpec/ReturnFromStub: Use `and_return` for static values.
+end

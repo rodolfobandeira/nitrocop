@@ -343,6 +343,20 @@ mod tests {
     }
 
     #[test]
+    fn chained_with_detects_offense() {
+        let source = b"allow(Question).to receive(:meaning).with(:universe) { 42 }\n";
+        let diags = crate::testutil::run_cop_full(&ReturnFromStub, source);
+        assert_eq!(diags.len(), 1, "should detect block on chained .with()");
+    }
+
+    #[test]
+    fn chained_once_detects_offense() {
+        let source = b"expect(Foo).to receive(:bar).once { 42 }\n";
+        let diags = crate::testutil::run_cop_full(&ReturnFromStub, source);
+        assert_eq!(diags.len(), 1, "should detect block on chained .once");
+    }
+
+    #[test]
     fn block_style_does_not_flag_block_form() {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
