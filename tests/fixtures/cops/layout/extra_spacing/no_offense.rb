@@ -34,3 +34,52 @@ config = {
 # Compound assignment alignment (e.g. += aligns with =)
 retries     += 1
 @http_client = http_client
+
+# Whitespace at the beginning of the line (indentation)
+  m = "hello"
+
+# Whitespace inside a string
+m = "hello   this"
+
+# Trailing whitespace (handled by Layout/TrailingWhitespace, not here)
+class Benchmarker < Performer
+end
+
+# Aligned values of an implicit hash literal (multiline)
+register(street1:    '1 Market',
+         street2:    '#200',
+         :city =>    'Some Town',
+         state:      'CA')
+
+# Space between key and value in a hash with hash rockets (multiline)
+ospf_h = {
+  'ospfTest'    => {
+    'foo'      => {
+      area: '0.0.0.0', cost: 10, hello: 30, pass: true },
+    'longname' => {
+      area: '1.1.1.38', pass: false },
+    'vlan101'  => {
+      area: '2.2.2.101', cost: 5, hello: 20, pass: true }
+  }
+}
+
+# Lining up assignments with empty lines and comments in between
+# (allowed with AllowForAlignment: true)
+a   += 1
+
+# Comment
+aa   = 2
+bb   = 3
+
+a  ||= 1
+
+# Lining up different kinds of assignments
+type_name ||= value.class.name if value
+type_name   = type_name.to_s   if type_name
+
+# Aligned trailing comments (same column)
+one  # comment one
+two  # comment two
+
+# Only one space before comment is fine (no extra spacing)
+object.method(argument) # this is a comment

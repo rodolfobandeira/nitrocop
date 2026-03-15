@@ -6,6 +6,37 @@ use ruby_prism::Visit;
 use std::collections::HashSet;
 use std::ops::Range;
 
+/// Layout/ExtraSpacing: flags unnecessary whitespace between tokens.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// Root causes of FNs (671 in corpus baseline):
+/// 1. **Mode 2 alignment bug (fixed)**: `check_alignment` had a "same character"
+///    mode that checked if the same byte appeared at the same column on an adjacent
+///    line, without requiring it to be preceded by whitespace. This allowed
+///    coincidental character alignment (e.g., `d` in `do` aligning with `d` at the
+///    end of `_______________________d`) to suppress offense reports. RuboCop's
+///    `aligned_words?` requires either `\s\S` (space-then-nonspace) at the column
+///    or an exact full-token match. Removed Mode 2 to match RuboCop behavior.
+///
+/// 2. **Overly broad equals alignment (tightened)**: `check_equals_alignment`
+///    matched any `=` character on the adjacent line without verifying it was
+///    actually part of an assignment operator. Added a check requiring the `=` to
+///    be preceded by whitespace or an operator character (like `+`, `|`, etc.),
+///    preventing false alignment with `=` embedded in other contexts.
+///
+/// Root causes of FPs (139 in corpus baseline):
+/// - Likely minor edge cases in alignment detection; no systematic pattern
+///   identified from available data.
+///
+/// ## Key design notes
+/// - Works with raw text scanning (not tokens), using CodeMap to skip non-code regions
+/// - Alignment detection mirrors RuboCop's PrecedingFollowingAlignment mixin:
+///   Pass 1 checks nearest non-blank non-comment line, Pass 2 checks nearest
+///   line with same indentation
+/// - Hash pair ranges in multiline hashes are ignored (handled by Layout/HashAlignment)
+/// - ForceEqualSignAlignment is read from config but not yet implemented (produces
+///   a different offense message)
 pub struct ExtraSpacing;
 
 impl Cop for ExtraSpacing {
@@ -341,22 +372,23 @@ fn find_nearest_line(
     }
 }
 
-/// Check alignment: either space+non-space at the column, the same character
-/// at the column, or equals-sign alignment (e.g., '+=' aligns with '=').
-fn check_alignment(line: &[u8], col: usize, token_char: u8) -> bool {
+/// Check alignment: space+non-space at the column (a token boundary).
+///
+/// Matches RuboCop's `aligned_words?` check: `\s\S` at `left_edge - 1`.
+/// Previously this also had a "same character" mode that matched any character
+/// at the same column regardless of spacing, but that caused false negatives
+/// by allowing coincidental character alignment (e.g., `d` in `do` aligning
+/// with `d` at the end of `_______________________d`).
+fn check_alignment(line: &[u8], col: usize, _token_char: u8) -> bool {
     if col >= line.len() {
         return false;
     }
-    // Mode 1: space + non-space at the same column
+    // space + non-space at the same column (token boundary alignment)
     if line[col] != b' '
         && line[col] != b'\t'
         && col > 0
         && (line[col - 1] == b' ' || line[col - 1] == b'\t')
     {
-        return true;
-    }
-    // Mode 2: same character at the same column
-    if line[col] == token_char {
         return true;
     }
     false
@@ -365,13 +397,40 @@ fn check_alignment(line: &[u8], col: usize, token_char: u8) -> bool {
 /// Check if there's equals-sign alignment between the current line and
 /// the adjacent line. For compound assignment operators like +=, -=, ||=,
 /// &&=, the '=' sign should align with a '=' on the adjacent line.
+///
+/// Both the current and adjacent line's `=` must look like an assignment
+/// operator (preceded by space or an operator character like `+`, `|`, etc.)
+/// to avoid matching `=` inside strings or other non-assignment contexts.
 fn check_equals_alignment(current_line: &[u8], adj_line: &[u8], col: usize) -> bool {
     // Find the '=' in or near the token starting at col on the current line
     let eq_col = find_equals_col(current_line, col);
     if let Some(eq_col) = eq_col {
         // Check if the adjacent line has '=' at the same column
         if eq_col < adj_line.len() && adj_line[eq_col] == b'=' {
-            return true;
+            // Verify the `=` on the adjacent line looks like an assignment operator:
+            // it must be preceded by a space or operator character, not part of an
+            // identifier or embedded in a string.
+            if eq_col == 0 {
+                return true; // `=` at start of line is always an assignment
+            }
+            let prev = adj_line[eq_col - 1];
+            if prev == b' '
+                || prev == b'\t'
+                || prev == b'+'
+                || prev == b'-'
+                || prev == b'*'
+                || prev == b'/'
+                || prev == b'%'
+                || prev == b'|'
+                || prev == b'&'
+                || prev == b'^'
+                || prev == b'<'
+                || prev == b'>'
+                || prev == b'!'
+                || prev == b'='
+            {
+                return true;
+            }
         }
     }
     false
@@ -408,4 +467,55 @@ mod tests {
 
     crate::cop_fixture_tests!(ExtraSpacing, "cops/layout/extra_spacing");
     crate::cop_autocorrect_fixture_tests!(ExtraSpacing, "cops/layout/extra_spacing");
+
+    #[test]
+    fn coincidental_alignment_not_preceded_by_space() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // The `d` in `do` aligns with `d` at end of `_______________________d`
+        // but the `d` on the adjacent line is NOT preceded by space, so this
+        // is coincidental alignment, not intentional. Should be an offense.
+        let diags = run_cop_full(
+            &cop,
+            b"d_is_vertically_aligned  do\n  _______________________d\nend\n",
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 23);
+    }
+
+    #[test]
+    fn aligned_assignments_allowed() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Aligned assignments should be allowed with AllowForAlignment=true (default)
+        let diags = run_cop_full(&cop, b"website = \"example.org\"\nname    = \"Jill\"\n");
+        assert!(
+            diags.is_empty(),
+            "Aligned assignments should not be flagged"
+        );
+    }
+
+    #[test]
+    fn single_line_hash_extra_spaces_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Single-line hash with extra spaces should be flagged
+        let diags = run_cop_full(&cop, b"hash = {a:   1,  b:    2}\n");
+        assert_eq!(diags.len(), 3, "Expected 3 offenses in single-line hash");
+    }
+
+    #[test]
+    fn class_inheritance_extra_spaces() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        let diags = run_cop_full(&cop, b"class A   < String\nend\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+    }
 }
