@@ -23,3 +23,13 @@ end
 context `bad #{interpolated} description` do
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ContextWording: Context description should match /^when\b/, /^with\b/, /^without\b/.
 end
+
+# Interpolated string starting with interpolation (no leading text)
+context "#{var_name} elements" do
+        ^^^^^^^^^^^^^^^^^^^^ RSpec/ContextWording: Context description should match /^when\b/, /^with\b/, /^without\b/.
+end
+
+# Interpolated string that is purely interpolation
+context "#{description}" do
+        ^^^^^^^^^^^^^^^^ RSpec/ContextWording: Context description should match /^when\b/, /^with\b/, /^without\b/.
+end

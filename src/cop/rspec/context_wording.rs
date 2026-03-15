@@ -36,6 +36,17 @@ use crate::parse::source::SourceFile;
 /// Root cause: `&(proc do end)` stores a `BlockArgumentNode` in `call.block()`,
 /// not a `BlockNode`. RuboCop's `on_block` pattern only fires for `BlockNode`.
 /// Fix: require `call.block().as_block_node().is_some()` instead of `is_some()`.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// FN=112 (was FN=95): Interpolated strings starting with an interpolation
+/// (e.g., `"#{var} elements"`) were skipped entirely because
+/// `extract_interp_leading_text` returned `None` when the first part was
+/// an `EmbeddedStatementsNode` rather than a `StringNode`. RuboCop reports
+/// an offense because the description can't match any prefix.
+/// Fix: return empty string instead of None when no leading text exists,
+/// so the prefix check correctly fails and reports the offense. Same fix
+/// applied to interpolated xstr nodes.
 pub struct ContextWording;
 
 const DEFAULT_PREFIXES: &[&str] = &["when", "with", "without"];
@@ -115,11 +126,9 @@ impl Cop for ContextWording {
                 Err(_) => return,
             };
         } else if let Some(interp) = arg_list[0].as_interpolated_string_node() {
-            // For interpolated strings, extract leading text before first interpolation
-            content_str = match extract_interp_leading_text(&interp) {
-                Some(s) => s,
-                None => return,
-            };
+            // For interpolated strings, extract leading text before first interpolation.
+            // Returns empty string if string starts with interpolation (no prefix can match).
+            content_str = extract_interp_leading_text(&interp);
         } else if let Some(x) = arg_list[0].as_x_string_node() {
             let content = x.unescaped();
             content_str = match std::str::from_utf8(content) {
@@ -127,21 +136,21 @@ impl Cop for ContextWording {
                 Err(_) => return,
             };
         } else if let Some(interp_x) = arg_list[0].as_interpolated_x_string_node() {
-            // For interpolated xstr, extract leading text before first interpolation
+            // For interpolated xstr, extract leading text before first interpolation.
+            // Returns empty string if string starts with interpolation (no prefix can match).
             let parts: Vec<_> = interp_x.parts().iter().collect();
-            if let Some(first) = parts.first() {
+            content_str = if let Some(first) = parts.first() {
                 if let Some(s) = first.as_string_node() {
                     let text = s.unescaped();
-                    content_str = match std::str::from_utf8(text) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => return,
-                    };
+                    std::str::from_utf8(text)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
                 } else {
-                    return;
+                    String::new()
                 }
             } else {
-                return;
-            }
+                String::new()
+            };
         } else {
             return;
         };
@@ -201,12 +210,21 @@ impl Cop for ContextWording {
 }
 
 /// Extract leading text from an interpolated string's parts (before first interpolation).
-fn extract_interp_leading_text(interp: &ruby_prism::InterpolatedStringNode<'_>) -> Option<String> {
+/// Returns empty string if the string starts with an interpolation (no leading text).
+fn extract_interp_leading_text(interp: &ruby_prism::InterpolatedStringNode<'_>) -> String {
     let parts: Vec<_> = interp.parts().iter().collect();
-    let first = parts.first()?;
-    let s = first.as_string_node()?;
+    let Some(first) = parts.first() else {
+        return String::new();
+    };
+    let Some(s) = first.as_string_node() else {
+        // First part is an interpolation (EmbeddedStatementsNode), not text.
+        // The description starts with a dynamic value, so no prefix can match.
+        return String::new();
+    };
     let text = s.unescaped();
-    std::str::from_utf8(text).ok().map(|s| s.to_string())
+    std::str::from_utf8(text)
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
