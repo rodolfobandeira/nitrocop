@@ -144,7 +144,6 @@ const RUBY_EXTENSIONS: &[&str] = &[
     "ru",
     "ruby",
     "schema",
-    "spec",
     "thor",
     "watchr",
 ];
@@ -218,7 +217,9 @@ fn has_ruby_shebang(path: &Path) -> bool {
     if reader.read_line(&mut first_line).is_err() {
         return false;
     }
-    first_line.starts_with("#!") && first_line.contains("ruby")
+    // Match standard shebangs (#!) and malformed ones with extra leading hashes (##!).
+    let trimmed = first_line.trim_start_matches('#');
+    trimmed.starts_with('!') && first_line.contains("ruby")
 }
 
 #[cfg(test)]

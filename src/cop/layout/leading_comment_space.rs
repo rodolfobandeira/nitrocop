@@ -34,6 +34,20 @@ use crate::parse::source::SourceFile;
 /// `#!self.collection_items.unrevealed.empty?`). The old code skipped
 /// ALL `#!` comments as shebangs, but RuboCop only allows `#!` on the
 /// very first line of the file. Fixed by checking line number.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// FP=2, FN=1. All file-discovery issues, not cop logic.
+///
+/// FP: 2 FPs from `#~# ORIGINAL`/`#~# EXPECTED` in `.rb.spec` files
+/// (rufo). The `spec` extension was incorrectly in `RUBY_EXTENSIONS`
+/// but is not in RuboCop's `AllCops.Include` list. Removed `spec`
+/// from `RUBY_EXTENSIONS` in `fs.rs`.
+///
+/// FN: 1 FN from `bin/browsercms` starting with `##!/usr/bin/env ruby`
+/// (malformed double-hash shebang). `has_ruby_shebang` in `fs.rs`
+/// only matched `#!` at position 0; fixed to skip leading `#` chars
+/// before the `!` so `##!` lines are also detected as Ruby shebangs.
 pub struct LeadingCommentSpace;
 
 impl Cop for LeadingCommentSpace {
@@ -185,6 +199,15 @@ mod tests {
             "config.ru",
         );
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn flags_double_hash_bang_on_line1() {
+        let diags = crate::testutil::run_cop_full(
+            &LeadingCommentSpace,
+            b"##!/usr/bin/env ruby\nputs 'hello'\n",
+        );
+        assert_eq!(diags.len(), 1, "should flag ##!/usr/bin/env ruby on line 1");
     }
 
     #[test]
