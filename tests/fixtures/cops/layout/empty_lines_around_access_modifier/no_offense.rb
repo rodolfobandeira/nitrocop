@@ -182,25 +182,6 @@ it "builds a Sinatra app" do
   end
 end
 
-# Receiverful top-level eval-style blocks should not be treated as visibility scopes
-DidYouMean::JaroWinkler.module_eval do
-  module_function
-  def distance(str1, str2)
-  end if RUBY_ENGINE != "jruby"
-end
-
-# A receiverful nested block inside a receiverless class-scope DSL block is not a macro scope
-class ExampleGroup
-  example do
-    Builder.new do
-      private
-      def hidden; end
-      public
-      def visible; end
-    end
-  end
-end
-
 # A comment before a top-level access modifier counts as a separator
 # comment
 private

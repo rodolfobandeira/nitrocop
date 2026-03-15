@@ -70,6 +70,20 @@ class Host
   end
 end
 
+# Receiverful nested blocks still count once they are inside a non-root macro scope
+class ExampleGroup
+  example do
+    Builder.new do
+      private
+      ^^^^^^^ Layout/EmptyLinesAroundAccessModifier: Keep a blank line after `private`.
+      def hidden; end
+      public
+      ^^^^^^ Layout/EmptyLinesAroundAccessModifier: Keep a blank line before and after `public`.
+      def visible; end
+    end
+  end
+end
+
 # Top-level access modifier at the beginning of the file needs a blank line after
 public
 ^^^^^^ Layout/EmptyLinesAroundAccessModifier: Keep a blank line after `public`.

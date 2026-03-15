@@ -38,20 +38,30 @@ use crate::parse::source::SourceFile;
 ///    at top level were missed, including `private` followed by a comment line.
 ///    Fix: treat the root as a valid access-modifier scope boundary while still
 ///    requiring explicit block propagation for nested scopes (2026-03-15).
-/// 4. `only_before` style: missing "Remove a blank line after" offense for
-///    `private`/`protected`. Not yet fixed.
 ///
-/// Remaining gaps (2026-03-15):
-/// - Refining block traversal so only the owning call opens macro scope improved
-///   the aggregate rerun (`actual 4635 -> 4630`, excess `17 -> 12`) and fixed
-///   the local class-scoped nested receiverful-block reproducer, but the known
-///   Sinatra FP pair at `test/settings_test.rb:457,459` still verifies. A future
-///   fix should model RuboCop's `in_macro_scope?` parent-chain wrappers
-///   directly instead of relying on call-local heuristics.
-/// - `jruby__jruby__0303464:test/jruby/test_proc_visibility.rb:30,33` and the
-///   JRuby/Natalie `module_function` examples still verify as FNs, but local
-///   reduction currently shows nitrocop also firing somewhere in those files, so
-///   exact-location parity remains unresolved.
+/// 4. Remaining verifier gaps came from wrapper semantics around receiverful
+///    blocks. RuboCop's `bare_access_modifier?` treats receiverful blocks as
+///    valid wrappers once execution is already inside a non-root macro scope
+///    (e.g. `1.times { private }`, `module_eval { module_function }`, and
+///    nested `Builder.new do ... end` inside a class-scoped DSL block), but it
+///    breaks propagation through local-variable assignment and explicit
+///    `begin/rescue` wrappers. Fix: keep receiverful blocks active only when
+///    the current scope is `ClassLike` or `DslBlock`, reset scope for local
+///    variable writes, and treat `BeginNode` with `rescue`/`ensure` as a scope
+///    break (2026-03-15, round 3). Inline brace-block forms like
+///    `1.times { private }` also need to bypass the old whole-line
+///    `is_bare_modifier_line` filter.
+///
+/// Updated status (2026-03-15, round 3):
+/// - `verify-cop-locations.py` now reports all 34 known CI FP/FN fixed locally
+///   for this cop.
+/// - `check-cop.py --verbose --rerun` reports `Missing=0`, with only excess
+///   offense total left inside existing file-drop-noise from parser-crash repos.
+/// - The earlier `Builder.new do` no-offense fixture was wrong and was moved to
+///   offense coverage after direct RuboCop verification. The old top-level
+///   `module_eval do` no-offense fixture was removed rather than re-encoded,
+///   because the exact corpus FP depended on an enclosing `begin/rescue`
+///   wrapper, not on receiverful blocks being universally ignored.
 pub struct EmptyLinesAroundAccessModifier;
 
 const ACCESS_MODIFIERS: &[&[u8]] = &[b"private", b"protected", b"public", b"module_function"];
@@ -160,6 +170,24 @@ fn is_bare_modifier_line(line: &[u8], method_name: &[u8]) -> bool {
     false
 }
 
+/// Allow inline brace-block forms like `1.times { private }` and
+/// `module_eval { module_function }`, which RuboCop still treats as bare
+/// access modifiers even though the line contains surrounding block syntax.
+fn is_inline_brace_block_modifier_line(line: &[u8], column: usize, method_name: &[u8]) -> bool {
+    let end = column.saturating_add(method_name.len());
+    if end > line.len() {
+        return false;
+    }
+
+    if &line[column..end] != method_name {
+        return false;
+    }
+
+    let before = &line[..column];
+    let after = &line[end..];
+    before.contains(&b'{') && after.contains(&b'}')
+}
+
 /// Collected access modifier with context about its enclosing scope.
 struct ModifierInfo {
     /// Byte offset of the access modifier call.
@@ -174,6 +202,7 @@ struct ModifierInfo {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScopeKind {
+    Root,
     ClassLike,
     DslBlock,
     NonClass,
@@ -190,13 +219,14 @@ struct AccessModifierCollector {
 
 impl AccessModifierCollector {
     fn in_access_modifier_scope(&self) -> bool {
-        if self.scope_stack.is_empty() {
-            return true;
-        }
-
         self.scope_stack
             .last()
-            .map(|(kind, _, _)| matches!(kind, ScopeKind::ClassLike | ScopeKind::DslBlock))
+            .map(|(kind, _, _)| {
+                matches!(
+                    kind,
+                    ScopeKind::Root | ScopeKind::ClassLike | ScopeKind::DslBlock
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -205,6 +235,13 @@ impl AccessModifierCollector {
             .last()
             .map(|(_, opening, closing)| (*opening, *closing))
             .unwrap_or((0, 0))
+    }
+
+    fn current_scope_kind(&self) -> ScopeKind {
+        self.scope_stack
+            .last()
+            .map(|(kind, _, _)| *kind)
+            .unwrap_or(ScopeKind::Root)
     }
 
     fn check_call(&mut self, call: &ruby_prism::CallNode<'_>) {
@@ -249,6 +286,16 @@ impl AccessModifierCollector {
     fn pop_scope(&mut self) {
         self.scope_stack.pop();
     }
+}
+
+macro_rules! visit_write_node_as_non_class_scope {
+    ($method:ident, $node_ty:ty, $visit_fn:ident) => {
+        fn $method(&mut self, node: &$node_ty) {
+            self.push_non_class_scope();
+            ruby_prism::$visit_fn(self, node);
+            self.pop_scope();
+        }
+    };
 }
 
 fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
@@ -325,9 +372,32 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
         ruby_prism::visit_block_node(self, node);
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        if node.rescue_clause().is_some() || node.ensure_clause().is_some() {
+            self.push_non_class_scope();
+            ruby_prism::visit_begin_node(self, node);
+            self.pop_scope();
+            return;
+        }
+
+        ruby_prism::visit_begin_node(self, node);
+    }
+
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         self.push_non_class_scope();
         ruby_prism::visit_lambda_node(self, node);
+        self.pop_scope();
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        self.push_non_class_scope();
+        ruby_prism::visit_rescue_node(self, node);
+        self.pop_scope();
+    }
+
+    fn visit_ensure_node(&mut self, node: &ruby_prism::EnsureNode<'pr>) {
+        self.push_non_class_scope();
+        ruby_prism::visit_ensure_node(self, node);
         self.pop_scope();
     }
 
@@ -359,6 +429,18 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
                 return;
             }
 
+            if node.receiver().is_some()
+                && matches!(
+                    self.current_scope_kind(),
+                    ScopeKind::ClassLike | ScopeKind::DslBlock
+                )
+            {
+                self.push_dsl_block_scope(opening, closing);
+                ruby_prism::visit_block_node(self, &block_node);
+                self.pop_scope();
+                return;
+            }
+
             self.push_non_class_scope();
             ruby_prism::visit_block_node(self, &block_node);
             self.pop_scope();
@@ -369,6 +451,27 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
             self.visit_block_argument_node(&block_arg);
         }
     }
+
+    visit_write_node_as_non_class_scope!(
+        visit_local_variable_write_node,
+        ruby_prism::LocalVariableWriteNode<'pr>,
+        visit_local_variable_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_local_variable_and_write_node,
+        ruby_prism::LocalVariableAndWriteNode<'pr>,
+        visit_local_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_local_variable_operator_write_node,
+        ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+        visit_local_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_local_variable_or_write_node,
+        ruby_prism::LocalVariableOrWriteNode<'pr>,
+        visit_local_variable_or_write_node
+    );
 }
 
 impl Cop for EmptyLinesAroundAccessModifier {
@@ -394,7 +497,7 @@ impl Cop for EmptyLinesAroundAccessModifier {
         // Collect access modifier offsets that are in class/module bodies
         let mut collector = AccessModifierCollector {
             modifiers: Vec::new(),
-            scope_stack: Vec::new(),
+            scope_stack: vec![(ScopeKind::Root, 0, 0)],
         };
         use ruby_prism::Visit;
         collector.visit(&parse_result.node());
@@ -418,7 +521,9 @@ impl Cop for EmptyLinesAroundAccessModifier {
             // Ensure the access modifier is the only thing on its line (optionally with comment)
             if line > 0 && line <= lines.len() {
                 let current_line = lines[line - 1];
-                if !is_bare_modifier_line(current_line, method_name) {
+                if !is_bare_modifier_line(current_line, method_name)
+                    && !is_inline_brace_block_modifier_line(current_line, col, method_name)
+                {
                     continue;
                 }
             }
@@ -554,6 +659,7 @@ impl Cop for EmptyLinesAroundAccessModifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
         EmptyLinesAroundAccessModifier,
@@ -563,4 +669,37 @@ mod tests {
         EmptyLinesAroundAccessModifier,
         "cops/layout/empty_lines_around_access_modifier"
     );
+
+    #[test]
+    fn flags_bare_modifier_inside_receiverful_block_in_class_scope() {
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"class TestVis2\n  public\n\n  def foo; end\n\n  1.times { private }\n  def foo; end\n\n  1.times { public }\n  def foo; end\nend\n",
+        );
+
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].location.line, 6);
+        assert_eq!(diags[1].location.line, 9);
+    }
+
+    #[test]
+    fn flags_module_function_inside_module_eval_within_class_constructor() {
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"it do\n  m = Module.new do\n    module_eval { module_function }\n    def test1() end\n    def test2() end\n  end\nend\n",
+        );
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 3);
+    }
+
+    #[test]
+    fn ignores_receiverful_block_inside_rescue_wrapper() {
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"report \"loading program\" do\n  begin\n    require \"jaro_winkler\"\n    DidYouMean::JaroWinkler.module_eval do\n      module_function\n      def distance(str1, str2)\n      end\n    end\n  rescue LoadError\n  end\nend\n",
+        );
+
+        assert!(diags.is_empty());
+    }
 }
