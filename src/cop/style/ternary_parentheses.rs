@@ -21,6 +21,12 @@ use crate::parse::source::SourceFile;
 ///
 /// Reverted. A correct fix needs to distinguish truly safe setter assignments
 /// from the existing ternary mismatches without changing the corpus count.
+///
+/// Additional investigation (2026-03-14): the cached Asciidoctor corpus example
+/// lives under a project config that explicitly sets
+/// `Style/TernaryParentheses: Enabled: false`, so that reported FP is attributable
+/// to config handling or stale oracle data rather than the ternary matcher itself.
+/// Post-fix quick corpus gate: expected=1726, actual=1725, excess=0, missing=1.
 pub struct TernaryParentheses;
 
 /// Check if a parenthesized node contains a safe assignment (=) in ternary context.

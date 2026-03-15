@@ -14,6 +14,15 @@ use crate::parse::source::SourceFile;
 /// markers. RuboCop stops parsing at `__END__`, so block comments in the
 /// data section are not flagged. Fixed by using `is_not_string()` which
 /// covers heredocs, string literals, and `__END__` data sections.
+///
+/// ## Corpus investigation (2026-03-14)
+///
+/// Corpus oracle reported FP=2, FN=0.
+///
+/// FP=2: the remaining `louismullie/treat` examples are large commented-out
+/// fixture bodies at top level. No safe cop-logic fix was identified in this
+/// batch. The nested-config fix validated with `Style/BlockComments` was a
+/// config-layer regression test only; it does not explain these remaining FPs.
 pub struct BlockComments;
 
 impl Cop for BlockComments {

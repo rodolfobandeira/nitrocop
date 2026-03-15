@@ -154,6 +154,7 @@ fn run_corpus_check(
                     config,
                     registry,
                     args,
+                    tier_map,
                     &cop_filters,
                     &base_configs,
                     has_dir_overrides,

@@ -346,6 +346,91 @@ fn config_disables_cop() {
 }
 
 #[test]
+fn nested_config_disables_cop_for_subdir() {
+    let dir = temp_dir("nested_disable_cop");
+    write_file(&dir, ".rubocop.yml", b"# root config\n");
+    write_file(
+        &dir,
+        "spec/ruby/.rubocop.yml",
+        b"Style/BlockComments:\n  Enabled: false\n",
+    );
+    let file = write_file(&dir, "spec/ruby/fixture.rb", b"=begin\ncomment\n=end\n");
+    let config = load_config(None, Some(&dir), None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = default_args();
+
+    let result = run_linter(
+        &discovered(&[file]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|d| d.cop_name != "Style/BlockComments"),
+        "Nested config should disable Style/BlockComments, got: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.cop_name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn nested_disabled_by_default_only_runs_explicitly_enabled_cops() {
+    let dir = temp_dir("nested_disabled_by_default");
+    write_file(&dir, ".rubocop.yml", b"# root config\n");
+    write_file(
+        &dir,
+        "spec/ruby/.rubocop.yml",
+        b"AllCops:\n  DisabledByDefault: true\nStyle/BlockComments:\n  Enabled: true\n",
+    );
+    let file = write_file(
+        &dir,
+        "spec/ruby/fixture.rb",
+        b"module Example\n  extend self\nend\n\n=begin\ncomment\n=end\n",
+    );
+    let config = load_config(None, Some(&dir), None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = default_args();
+
+    let result = run_linter(
+        &discovered(&[file]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+
+    let cop_names: Vec<_> = result
+        .diagnostics
+        .iter()
+        .map(|d| d.cop_name.as_str())
+        .collect();
+    assert!(
+        cop_names.contains(&"Style/BlockComments"),
+        "Explicitly enabled nested cop should still run, got: {:?}",
+        cop_names
+    );
+    assert!(
+        !cop_names.contains(&"Style/ModuleFunction"),
+        "DisabledByDefault sub-config should suppress unmentioned cops, got: {:?}",
+        cop_names
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn config_line_length_max_override() {
     let dir = temp_dir("config_max");
     // Line is 20 chars — under default 120 but over Max:10
@@ -6188,7 +6273,7 @@ fn verifier_vendor_pattern_parse_coverage() {
 
     // Per-department breakdown
     let mut depts: Vec<_> = dept_stats.iter().collect();
-    depts.sort_by_key(|(name, _)| name.clone());
+    depts.sort_by_key(|(name, _)| *name);
     for (dept, (ok, fail)) in &depts {
         let dept_total = ok + fail;
         let dept_rate = if dept_total > 0 {

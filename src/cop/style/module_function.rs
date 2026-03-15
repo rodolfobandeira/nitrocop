@@ -14,8 +14,11 @@ use crate::parse::source::SourceFile;
 /// Acceptance gate before: expected=540, actual=542, excess=2, missing=0.
 /// Acceptance gate after: expected=540, actual=537, excess=0, missing=3.
 /// Reverted because the change introduced 3 real false negatives. The remaining
-/// corpus FPs are not safely attributable to cop logic yet and likely depend on
-/// config or path-handling outside this cop.
+/// corpus FPs were later traced to config handling outside this cop:
+/// `spec/ruby/.rubocop.yml` sets `AllCops.DisabledByDefault: true`, so
+/// `Style/ModuleFunction` should not run on those fixture files unless explicitly
+/// enabled. The 2026-03-14 fix landed in the config layer rather than here.
+/// Post-fix quick corpus gate: expected=508, actual=507, excess=0, missing=1.
 pub struct ModuleFunction;
 
 impl Cop for ModuleFunction {

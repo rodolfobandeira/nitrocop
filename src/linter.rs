@@ -142,6 +142,7 @@ pub fn lint_source(
         config,
         registry,
         args,
+        tier_map,
         &cop_filters,
         &base_configs,
         has_dir_overrides,
@@ -220,6 +221,7 @@ pub fn run_linter(
                 config,
                 registry,
                 args,
+                tier_map,
                 &cop_filters,
                 &base_configs,
                 has_dir_overrides,
@@ -357,6 +359,7 @@ fn lint_file(
     config: &ResolvedConfig,
     registry: &CopRegistry,
     args: &Args,
+    tier_map: &TierMap,
     cop_filters: &CopFilterSet,
     base_configs: &[CopConfig],
     has_dir_overrides: bool,
@@ -427,6 +430,7 @@ fn lint_file(
         config,
         registry,
         args,
+        tier_map,
         cop_filters,
         base_configs,
         has_dir_overrides,
@@ -573,6 +577,7 @@ pub(crate) fn lint_source_inner(
     config: &ResolvedConfig,
     registry: &CopRegistry,
     args: &Args,
+    tier_map: &TierMap,
     cop_filters: &CopFilterSet,
     base_configs: &[CopConfig],
     has_dir_overrides: bool,
@@ -588,6 +593,7 @@ pub(crate) fn lint_source_inner(
             config,
             registry,
             args,
+            tier_map,
             cop_filters,
             base_configs,
             has_dir_overrides,
@@ -613,6 +619,7 @@ pub(crate) fn lint_source_inner(
             config,
             registry,
             args,
+            tier_map,
             cop_filters,
             base_configs,
             has_dir_overrides,
@@ -653,6 +660,7 @@ pub(crate) fn lint_source_inner(
         config,
         registry,
         args,
+        tier_map,
         cop_filters,
         base_configs,
         has_dir_overrides,
@@ -692,6 +700,7 @@ fn lint_source_once(
     config: &ResolvedConfig,
     registry: &CopRegistry,
     args: &Args,
+    tier_map: &TierMap,
     cop_filters: &CopFilterSet,
     base_configs: &[CopConfig],
     has_dir_overrides: bool,
@@ -754,20 +763,28 @@ fn lint_source_once(
     let cop_start = std::time::Instant::now();
     let filter_start = std::time::Instant::now();
 
-    let mut ast_cop_indices: Vec<(usize, Option<usize>)> = Vec::new();
-    let mut override_configs: Vec<CopConfig> = Vec::new();
-
-    let override_dir = if has_dir_overrides {
-        config.find_override_dir_for_file(&source.path)
+    let effective_config = if has_dir_overrides {
+        config.effective_config_for_file(&source.path)
     } else {
         None
     };
+    let owned_filters;
+    let owned_base_configs;
+    let (active_filters, active_base_configs) = if let Some(ref file_config) = effective_config {
+        owned_filters = file_config.build_cop_filters(registry, tier_map, args.preview);
+        owned_base_configs = file_config.precompute_cop_configs(registry);
+        (&owned_filters, owned_base_configs.as_slice())
+    } else {
+        (cop_filters, base_configs)
+    };
+
+    let mut ast_cop_indices: Vec<usize> = Vec::new();
 
     let cops = registry.cops();
     let has_only = !args.only.is_empty();
 
     // Pass 1: Universal cops
-    for &i in cop_filters.universal_cop_indices() {
+    for &i in active_filters.universal_cop_indices() {
         let cop = &cops[i];
         let name = cop.name();
         if name == REDUNDANT_DISABLE_COP {
@@ -780,17 +797,7 @@ fn lint_source_once(
             continue;
         }
 
-        let override_idx = override_dir.and_then(|dir| {
-            ResolvedConfig::apply_override_from_dir(&base_configs[i], name, dir).map(|merged| {
-                let idx = override_configs.len();
-                override_configs.push(merged);
-                idx
-            })
-        });
-        let cop_config = match override_idx {
-            Some(idx) => &override_configs[idx],
-            None => &base_configs[i],
-        };
+        let cop_config = &active_base_configs[i];
 
         let should_correct = autocorrect_mode != crate::cli::AutocorrectMode::Off
             && cop.supports_autocorrect()
@@ -823,12 +830,12 @@ fn lint_source_once(
             }
         }
         if !is_non_utf8 {
-            ast_cop_indices.push((i, override_idx));
+            ast_cop_indices.push(i);
         }
     }
 
     // Pass 2: Pattern cops
-    for &i in cop_filters.pattern_cop_indices() {
+    for &i in active_filters.pattern_cop_indices() {
         let cop = &cops[i];
         let name = cop.name();
         if name == REDUNDANT_DISABLE_COP {
@@ -841,21 +848,11 @@ fn lint_source_once(
             continue;
         }
 
-        if !cop_filters.is_cop_match(i, &source.path) {
+        if !active_filters.is_cop_match(i, &source.path) {
             continue;
         }
 
-        let override_idx = override_dir.and_then(|dir| {
-            ResolvedConfig::apply_override_from_dir(&base_configs[i], name, dir).map(|merged| {
-                let idx = override_configs.len();
-                override_configs.push(merged);
-                idx
-            })
-        });
-        let cop_config = match override_idx {
-            Some(idx) => &override_configs[idx],
-            None => &base_configs[i],
-        };
+        let cop_config = &active_base_configs[i];
 
         let should_correct = autocorrect_mode != crate::cli::AutocorrectMode::Off
             && cop.supports_autocorrect()
@@ -888,7 +885,7 @@ fn lint_source_once(
             }
         }
         if !is_non_utf8 {
-            ast_cop_indices.push((i, override_idx));
+            ast_cop_indices.push(i);
         }
     }
 
@@ -897,19 +894,11 @@ fn lint_source_once(
             .fetch_add(filter_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    // Build ast_cops from indices (override_configs is now stable — no more pushes).
     let ast_start = std::time::Instant::now();
     if !ast_cop_indices.is_empty() {
         let ast_cops: Vec<(&dyn Cop, &CopConfig)> = ast_cop_indices
             .iter()
-            .map(|&(i, override_idx)| {
-                let cop: &dyn Cop = &*registry.cops()[i];
-                let cfg = match override_idx {
-                    Some(idx) => &override_configs[idx],
-                    None => &base_configs[i],
-                };
-                (cop, cfg)
-            })
+            .map(|&i| (&*registry.cops()[i] as &dyn Cop, &active_base_configs[i]))
             .collect();
         let mut walker = BatchedCopWalker::new(ast_cops, source, &parse_result);
         if autocorrect_mode != crate::cli::AutocorrectMode::Off {
@@ -953,12 +942,16 @@ fn lint_source_once(
             .iter()
             .enumerate()
             .find(|(_, c)| c.name() == REDUNDANT_DISABLE_COP)
-            .is_some_and(|(idx, _)| cop_filters.is_cop_match(idx, &source.path));
+            .is_some_and(|(idx, _)| active_filters.is_cop_match(idx, &source.path));
 
         if cop_enabled {
             for directive in disabled.unused_directives() {
-                if !is_directive_redundant(&directive.cop_name, registry, cop_filters, &source.path)
-                {
+                if !is_directive_redundant(
+                    &directive.cop_name,
+                    registry,
+                    active_filters,
+                    &source.path,
+                ) {
                     continue;
                 }
 
