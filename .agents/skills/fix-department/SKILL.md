@@ -66,6 +66,19 @@ Run fix work from a dedicated git worktree by default.
    scorecard that must eventually be refreshed to 100% by the report
    CI corpus-oracle workflow/PR.
 
+5. Bootstrap the environment before reducers/tests/check-cop:
+   ```bash
+   git submodule update --init --recursive
+   ```
+   - If `bench/corpus/vendor/bundle/` is missing for the active Ruby version, install it:
+     ```bash
+     cd bench/corpus && BUNDLE_PATH=vendor/bundle bundle install
+     ```
+   - If working in a separate worktree and the main checkout already has corpus data,
+     symlink `vendor/corpus` into the worktree and keep that wiring untracked/local-only.
+   - This bootstrap is required before running the corpus smoke test. Missing vendor
+     submodules in cloud environments are setup failures, not cop regressions.
+
 ### Phase 1: Plan Batch
 
 Select up to 4 cops for the next batch:
@@ -179,7 +192,12 @@ After all cops in the batch are fixed:
 cargo fmt
 cargo clippy --release -- -D warnings
 cargo test --release
+python3 scripts/corpus_smoke_test.py --binary target/release/nitrocop
 ```
+
+Run the corpus smoke test once per batch, not after every cop. It is the cheap
+systemic guard for file discovery, config/plugin loading, directive handling,
+and other cross-cop regressions that per-cop `check-cop.py` reruns will not catch.
 
 Re-check each fixed cop with the right acceptance gate:
 ```bash
@@ -265,9 +283,10 @@ Do not leave retained progress only in a worktree branch.
   may silently fail. Always verify your working directory with `git rev-parse --show-toplevel`.
   If not in a worktree, continue working on main — do not block on this.
 - New worktree bootstrap (run before reducers/tests/check-cop):
-  - Initialize submodules: `git submodule update --init`
+  - Initialize submodules: `git submodule update --init --recursive`
   - Ensure `vendor/corpus/` exists. If the main checkout already has corpus data, symlink it into the worktree:
     `ln -s /absolute/path/to/nitrocop/vendor/corpus vendor/corpus`
+  - Ensure `bench/corpus/vendor/bundle/` exists for the active Ruby version before any corpus-backed validation or smoke runs.
   - Keep corpus wiring untracked and local-only (do not commit worktree-specific symlinks).
 - Parallel-agent activity is common; expect unrelated local changes in the working tree.
 - Do not revert or include unrelated files in your commit; stage only files for the cop(s) you are fixing.
