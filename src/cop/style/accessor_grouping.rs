@@ -5,6 +5,39 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Enforces grouping of accessor declarations (`attr_reader`, `attr_writer`,
+/// `attr_accessor`, `attr`) in class and module bodies.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// The original nitrocop implementation used a contiguity-based approach: it tracked
+/// consecutive accessor declarations and grouped them by adjacency. This diverged
+/// significantly from RuboCop's algorithm, which uses a sibling-based approach:
+///
+/// **RuboCop's algorithm:**
+/// 1. Iterates ALL `send` nodes in the class/module body that are `attribute_accessor?`
+/// 2. For each accessor, checks `previous_line_comment?` — if the source line immediately
+///    before the accessor is a comment, the accessor is excluded from grouping
+/// 3. Checks `groupable_accessor?` — examines the previous sibling (left sibling in the
+///    statement list). An accessor is NOT groupable if:
+///    - The previous sibling is a non-accessor send that is not an access modifier
+///      (e.g., `sig { ... }`, `annotation_method :foo`) AND there's no blank line gap
+///    - The previous sibling is a block node wrapping a send (Sorbet `sig { ... }`)
+///      AND there's no blank line gap
+/// 4. Finds all same-type, same-visibility siblings that are also groupable and not
+///    preceded by a comment — reports offense if >1 such siblings exist
+///
+/// **Root causes of FPs (294):**
+/// - Accessors preceded by a comment on the previous line were flagged (should be excluded)
+/// - Accessors preceded by annotation method calls (Sorbet sig, etc.) were flagged
+///
+/// **Root causes of FNs (582):**
+/// - Non-contiguous same-type accessors in the same visibility scope were missed because
+///   the old code only checked adjacent sequences. RuboCop considers ALL siblings in the
+///   class body, not just consecutive ones.
+/// - Accessors separated by `def` blocks or other code were not grouped.
+///
+/// Fix: rewrote to match RuboCop's sibling-based `groupable_sibling_accessors` approach.
 pub struct AccessorGrouping;
 
 const ACCESSOR_METHODS: &[&str] = &["attr_reader", "attr_writer", "attr_accessor", "attr"];
@@ -57,118 +90,224 @@ impl Cop for AccessorGrouping {
         };
 
         if enforced_style == "grouped" {
-            diagnostics.extend(check_grouped(self, source, &stmts));
+            check_grouped(self, source, &stmts, diagnostics);
         }
     }
+}
+
+/// Info about each statement in the class/module body.
+struct StmtInfo {
+    /// Index in the statement list
+    idx: usize,
+    /// Whether this statement is an accessor call (attr_reader, etc.)
+    is_accessor: bool,
+    /// The accessor method name (e.g., "attr_reader"), empty if not accessor
+    accessor_name: String,
+    /// Visibility scope of this statement (public/protected/private)
+    visibility: &'static str,
+    /// Whether this accessor is "groupable" per RuboCop's logic
+    groupable: bool,
+    /// Whether the line before this accessor is a comment
+    has_previous_line_comment: bool,
 }
 
 fn check_grouped(
     cop: &AccessorGrouping,
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
-) -> Vec<Diagnostic> {
-    use std::collections::HashMap;
-
-    let mut diagnostics = Vec::new();
-    // Track accessor method counts per type within current "group"
-    // A group is a contiguous sequence of accessor declarations.
-    // Any non-accessor statement (def, non-visibility method call, etc.) breaks the group.
-    let mut accessor_counts: HashMap<String, Vec<usize>> = HashMap::new();
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let stmt_list: Vec<_> = stmts.body().iter().collect();
+    if stmt_list.is_empty() {
+        return;
+    }
 
-    // We need to detect consecutive accessor declarations.
-    // Accessors separated by comments, other method calls, or def nodes form separate groups.
-    let mut last_was_accessor = false;
+    // Build info for each statement
+    let mut infos: Vec<StmtInfo> = Vec::with_capacity(stmt_list.len());
+    let mut current_visibility: &'static str = "public";
 
     for (idx, stmt) in stmt_list.iter().enumerate() {
+        let mut info = StmtInfo {
+            idx,
+            is_accessor: false,
+            accessor_name: String::new(),
+            visibility: current_visibility,
+            groupable: true,
+            has_previous_line_comment: false,
+        };
+
         if let Some(call) = stmt.as_call_node() {
             let name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
 
-            // Bare access modifier resets the group
+            // Track bare visibility modifiers
             if matches!(name, "private" | "protected" | "public")
                 && call.arguments().is_none()
                 && call.block().is_none()
             {
-                report_grouped_offenses(
-                    cop,
-                    source,
-                    &accessor_counts,
-                    &stmt_list,
-                    &mut diagnostics,
-                );
-                accessor_counts.clear();
-                last_was_accessor = false;
+                current_visibility = match name {
+                    "private" => "private",
+                    "protected" => "protected",
+                    _ => "public",
+                };
+                info.visibility = current_visibility;
+                infos.push(info);
                 continue;
             }
 
             if ACCESSOR_METHODS.contains(&name) && call.receiver().is_none() {
-                // Check if there's a gap (non-accessor statement or comment)
-                // since the last accessor
-                let has_gap = if !last_was_accessor {
-                    true
-                } else if idx > 0 {
-                    // Check if there's a comment between the previous statement
-                    // and this one by looking at the source text between them
-                    let prev_end = stmt_list[idx - 1].location().end_offset();
-                    let curr_start = stmt.location().start_offset();
-                    let between = &source.as_bytes()[prev_end..curr_start];
-                    let between_str = std::str::from_utf8(between).unwrap_or("");
-                    between_str.lines().any(|l| l.trim().starts_with('#'))
-                } else {
-                    false
-                };
+                info.is_accessor = true;
+                info.accessor_name = name.to_string();
 
-                if has_gap && !accessor_counts.is_empty() {
-                    report_grouped_offenses(
-                        cop,
-                        source,
-                        &accessor_counts,
-                        &stmt_list,
-                        &mut diagnostics,
-                    );
-                    accessor_counts.clear();
-                }
-                accessor_counts
-                    .entry(name.to_string())
-                    .or_default()
-                    .push(idx);
-                last_was_accessor = true;
-                continue;
+                // Check previous_line_comment: is the source line before this accessor a comment?
+                info.has_previous_line_comment =
+                    previous_line_is_comment(source, stmt.location().start_offset());
+
+                // Check groupable_accessor: examine the previous sibling
+                info.groupable = is_groupable_accessor(source, &stmt_list, idx);
             }
         }
-        // Non-accessor statement
-        last_was_accessor = false;
+
+        infos.push(info);
     }
 
-    // Report any remaining group
-    report_grouped_offenses(cop, source, &accessor_counts, &stmt_list, &mut diagnostics);
+    // For each accessor, find groupable sibling accessors (same type, same visibility,
+    // both groupable and not preceded by a comment)
+    // Use a set to avoid reporting the same accessor twice
+    let mut reported = vec![false; stmt_list.len()];
 
-    diagnostics
-}
+    for i in 0..infos.len() {
+        if !infos[i].is_accessor {
+            continue;
+        }
+        if reported[i] {
+            continue;
+        }
+        // Skip accessors that have a previous line comment or are not groupable
+        if infos[i].has_previous_line_comment || !infos[i].groupable {
+            continue;
+        }
 
-fn report_grouped_offenses(
-    cop: &AccessorGrouping,
-    source: &SourceFile,
-    accessor_counts: &std::collections::HashMap<String, Vec<usize>>,
-    stmt_list: &[ruby_prism::Node<'_>],
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for (accessor_type, indices) in accessor_counts {
-        if indices.len() > 1 {
-            for &idx in indices {
-                if let Some(stmt) = stmt_list.get(idx) {
+        // Find all groupable siblings with the same accessor type and visibility
+        let mut group: Vec<usize> = Vec::new();
+        for j in 0..infos.len() {
+            if !infos[j].is_accessor {
+                continue;
+            }
+            if infos[j].accessor_name != infos[i].accessor_name {
+                continue;
+            }
+            if infos[j].visibility != infos[i].visibility {
+                continue;
+            }
+            if !infos[j].groupable || infos[j].has_previous_line_comment {
+                continue;
+            }
+            group.push(j);
+        }
+
+        if group.len() > 1 {
+            for &g in &group {
+                if !reported[g] {
+                    reported[g] = true;
+                    let stmt = &stmt_list[infos[g].idx];
                     let loc = stmt.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
                     diagnostics.push(cop.diagnostic(
                         source,
                         line,
                         column,
-                        format!("Group together all `{}` attributes.", accessor_type),
+                        format!(
+                            "Group together all `{}` attributes.",
+                            infos[g].accessor_name
+                        ),
                     ));
                 }
             }
         }
     }
+}
+
+/// Check if the source line immediately before the given offset is a comment line.
+/// Matches RuboCop's `previous_line_comment?` which checks `processed_source[node.first_line - 2]`.
+fn previous_line_is_comment(source: &SourceFile, start_offset: usize) -> bool {
+    let (line, _) = source.offset_to_line_col(start_offset);
+    if line <= 1 {
+        return false;
+    }
+    // Get the previous line (line is 1-based, so line-2 is the 0-based index of previous line)
+    let prev_line_idx = line - 2;
+    for (i, source_line) in source.lines().enumerate() {
+        if i == prev_line_idx {
+            let trimmed = source_line
+                .iter()
+                .copied()
+                .skip_while(|&b| b == b' ' || b == b'\t')
+                .collect::<Vec<_>>();
+            return trimmed.first() == Some(&b'#');
+        }
+    }
+    false
+}
+
+/// Check if an accessor at index `idx` in `stmt_list` is "groupable" per RuboCop's logic.
+///
+/// RuboCop's `groupable_accessor?` examines the previous sibling (left sibling):
+/// 1. No previous sibling -> groupable
+/// 2. Previous is a block type (e.g., `sig { ... }`) -> unwrap to send child; if unwrapped
+///    is not a send, groupable. Otherwise treat as send case below.
+/// 3. Previous is NOT a send type (def, class, constant, etc.) -> groupable
+/// 4. Previous IS a send: groupable only if it's an accessor, access modifier, OR there's
+///    a blank line gap (> 1 line between them)
+fn is_groupable_accessor(
+    source: &SourceFile,
+    stmt_list: &[ruby_prism::Node<'_>],
+    idx: usize,
+) -> bool {
+    if idx == 0 {
+        return true;
+    }
+
+    let prev = &stmt_list[idx - 1];
+    let curr = &stmt_list[idx];
+
+    // Check if previous is a call node (send type in RuboCop terms).
+    // In Prism, a call with a block (like `sig { ... }`) is still a CallNode.
+    if let Some(prev_call) = prev.as_call_node() {
+        let prev_name = std::str::from_utf8(prev_call.name().as_slice()).unwrap_or("");
+
+        // If previous is a block call (e.g., `sig { returns(Integer) }`),
+        // RuboCop unwraps the block to find the inner send. The inner send is
+        // still a send_type?, so we treat it like a non-accessor send: not groupable
+        // unless there's a blank line gap.
+        if prev_call.block().is_some() {
+            let prev_end_line = source.offset_to_line_col(prev.location().end_offset()).0;
+            let curr_start_line = source.offset_to_line_col(curr.location().start_offset()).0;
+            return curr_start_line - prev_end_line > 1;
+        }
+
+        // Previous is an accessor — groupable
+        if ACCESSOR_METHODS.contains(&prev_name) && prev_call.receiver().is_none() {
+            return true;
+        }
+
+        // Previous is a bare access modifier — groupable
+        if matches!(prev_name, "private" | "protected" | "public")
+            && prev_call.arguments().is_none()
+            && prev_call.block().is_none()
+        {
+            return true;
+        }
+
+        // Previous is some other send (annotation, macro, etc.) — NOT groupable
+        // unless there's a blank line gap (> 1 line between them)
+        let prev_end_line = source.offset_to_line_col(prev.location().end_offset()).0;
+        let curr_start_line = source.offset_to_line_col(curr.location().start_offset()).0;
+        return curr_start_line - prev_end_line > 1;
+    }
+
+    // Previous is not a send type (def, class, constant assignment, begin, etc.)
+    // Per RuboCop: `return true unless previous_expression.send_type?` -> groupable
+    true
 }
 
 #[cfg(test)]
