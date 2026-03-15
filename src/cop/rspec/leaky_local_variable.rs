@@ -1950,4 +1950,33 @@ fn is_includes_method(name: &[u8]) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(LeakyLocalVariable, "cops/rspec/leaky_local_variable");
+
+    #[test]
+    fn test_fp_file_level_var_reassigned_at_group_scope() {
+        // FP: File-level `records = fetch_records()` should NOT fire when the variable
+        // is unconditionally reassigned at the group scope before any example reference.
+        // The reference in the `it` block belongs to the group-level assignment, not the file-level one.
+        let source = br#"records = fetch_records()
+
+describe SomeClass do
+  records = limited_records()
+
+  it 'works' do
+    expect(records).to be_empty
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        // Should get exactly 1 offense (the group-level `records = limited_records()`)
+        // NOT 2 offenses (file-level + group-level)
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense (group-level only), got {}: {:?}",
+            diags.len(),
+            diags.iter().map(|d| format!("{}:{}", d.location.line, d.location.column)).collect::<Vec<_>>()
+        );
+        // The offense should be at line 4 (group-level assignment), not line 1 (file-level)
+        assert_eq!(diags[0].location.line, 4, "Offense should be on group-level assignment (line 4)");
+    }
 }
