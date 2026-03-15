@@ -34,6 +34,19 @@ use ruby_prism::Visit;
 /// Fix: Replaced manual recursion with a `Visit`-based subtree walker (`I18nSearcher`)
 /// that uses `ruby_prism::visit_call_node` for automatic complete traversal, matching
 /// RuboCop's `def_node_search :i18n_method?` behavior.
+///
+/// ## Investigation (2026-03-14): FP=2, FN=1
+///
+/// **FP root cause** (`raw(*cmd, &block)` flagged incorrectly):
+/// Prism puts `&block` (block-pass argument) in `call.block()` as `BlockArgumentNode`,
+/// NOT in `call.arguments()`. So `arg_list.len() == 1` passes the single-arg check.
+/// RuboCop's Parser gem includes block-pass in `arguments`, so `arguments.one?` returns
+/// false → not flagged. Fix: skip `raw` calls where `call.block()` is a `BlockArgumentNode`.
+///
+/// **FN root cause** (`Formtastic::I18n.t(...)` suppressed offense incorrectly):
+/// `is_i18n_call` matched `ConstantPathNode` where `cp.name() == b"I18n"` without checking
+/// `cp.parent().is_none()`. RuboCop's pattern `(const {nil? cbase} :I18n)` only matches bare
+/// `I18n` or `::I18n`, not `Formtastic::I18n`. Fix: added `cp.parent().is_none()` check.
 pub struct OutputSafety;
 
 const I18N_METHODS: &[&[u8]] = &[b"t", b"translate", b"l", b"localize"];
@@ -71,10 +84,12 @@ fn is_i18n_call(call: &ruby_prism::CallNode<'_>) -> bool {
         {
             return true;
         }
-        if recv
-            .as_constant_path_node()
-            .is_some_and(|cp| cp.name().is_some_and(|n| n.as_slice() == b"I18n"))
-        {
+        // Only match `::I18n` (parent is None) — not `Formtastic::I18n` or similar
+        // RuboCop pattern: (const {nil? cbase} :I18n) — nil? means no parent (bare I18n),
+        // cbase means ConstantBaseNode (::I18n). Neither matches Foo::I18n.
+        if recv.as_constant_path_node().is_some_and(|cp| {
+            cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"I18n")
+        }) {
             return true;
         }
     }
@@ -170,6 +185,15 @@ impl Cop for OutputSafety {
         } else if name == b"raw" {
             // raw() must be called without a receiver (command style)
             if call.receiver().is_some() {
+                return;
+            }
+            // Skip if there's a block-pass argument (&block) — Prism puts these in call.block()
+            // as BlockArgumentNode, NOT in call.arguments(). RuboCop's Parser gem includes
+            // block-pass in arguments, making arguments.one? return false → not flagged.
+            if call
+                .block()
+                .is_some_and(|b| b.as_block_argument_node().is_some())
+            {
                 return;
             }
             // Must have exactly one argument

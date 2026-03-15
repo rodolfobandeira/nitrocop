@@ -37,3 +37,8 @@ buffer.safe_concat(I18n.translate('msg'))
 # (RuboCop's def_node_search :i18n_method? searches ALL descendants including hash values)
 raw(cell("component", context: { placeholder: t("key") }))
 some_helper(options: { label: I18n.t("label") }).html_safe
+
+# raw with block argument (&block) — Prism puts block-pass in call.block(), not arguments
+# RuboCop's Parser gem includes block-pass in arguments, making arguments.one? false → not flagged
+raw(*cmd, &block)
+raw(*command, &block)
