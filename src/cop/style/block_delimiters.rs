@@ -27,6 +27,23 @@ use std::collections::HashSet;
 /// Fix: track "suppressed ranges" (byte offset ranges). When a block is ignored
 /// (non-parenthesized arg) or flagged (offense registered), add its full byte range.
 /// Before checking any block, verify it is not contained within a suppressed range.
+///
+/// ## Investigation findings (2026-03-15)
+///
+/// Root cause of 188 FPs: chained method calls like `a.select { }.reject { }.each { }`
+/// In Parser AST, the outermost block (`.each`) wraps the entire chain, so RuboCop's
+/// `ignore_node` + `part_of_ignored_node?` naturally suppresses inner blocks.
+/// In Prism, BlockNode ranges only cover `{...}`, not the receiver chain. Fix: use
+/// the CallNode's range (which covers the full chain) for suppression instead of the
+/// BlockNode's range.
+///
+/// Root cause of some FNs: operator methods (`+`, `*`, etc.) with a single block-bearing
+/// argument were incorrectly having their argument blocks ignored. RuboCop's
+/// `single_argument_operator_method?` check skips the ignore logic for these cases.
+/// Fix: added `is_operator_method` check to skip `collect_ignored_blocks` for operators.
+///
+/// Remaining FN gap: `super(...)` with blocks uses `SuperNode` in Prism, not `CallNode`.
+/// Our visitor only handles `visit_call_node`, so `super` blocks are missed entirely.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {

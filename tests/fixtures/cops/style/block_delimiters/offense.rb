@@ -15,3 +15,13 @@ items.map {
     true
   }
 }
+
+# Chained blocks: only the outermost (last in chain) is flagged
+items.select {
+  x.valid?
+}.reject {
+  x.empty?
+}.each {
+       ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for multi-line blocks.
+  puts x
+}

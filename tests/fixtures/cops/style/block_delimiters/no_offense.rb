@@ -60,3 +60,6 @@ foo browser {
     }
   }
 }
+
+# Chained multi-line brace blocks — inner blocks suppressed by outermost offense
+# (see inline tests for chain behavior: offense_only_outermost_in_chain)
