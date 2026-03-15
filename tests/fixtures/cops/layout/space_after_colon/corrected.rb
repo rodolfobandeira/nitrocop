@@ -6,3 +6,5 @@ def locationManager(manager, didUpdateLocations: locations)
 end
 def render(item, partial: template, locals: options)
 end
+{"return_to": "/", "remember_me": "0"}
+emit("test.event", now, {"message": "ok"})

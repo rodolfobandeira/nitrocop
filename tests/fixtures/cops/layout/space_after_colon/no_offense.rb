@@ -15,3 +15,6 @@ def f(a:, b: 2); end
 def g(name: "default", size: 10); end
 # Required keyword arguments (no value, no check needed)
 def h(a:, b:); end
+# Quoted symbol keys with proper spacing
+{"return_to": "/", "remember_me": "0"}
+emit("test.event", now, {"message": "ok"})

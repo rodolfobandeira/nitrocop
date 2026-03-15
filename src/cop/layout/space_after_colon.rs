@@ -20,6 +20,15 @@ use crate::parse::source::SourceFile;
 /// the trailing colon, e.g. `"b:"`). The previous attempt (2026-03-10) was
 /// reverted due to FPs, but that was caused by incorrect offset calculation,
 /// not by the approach itself.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=0, FN=4. All 4 FNs from quoted-symbol hash keys
+/// (`"return_to":"/"`, `"message":"ok"`). Prism parses these as `SymbolNode`
+/// with `closing_loc` of `":` (quote + colon, 2 bytes) rather than just `:`
+/// (1 byte) as with bare symbol keys. The original check `loc.as_slice() == b":"`
+/// missed the quoted form. Fixed by using `ends_with(b":")` and computing the
+/// colon offset as `end_offset() - 1` for accurate diagnostic column reporting.
 pub struct SpaceAfterColon;
 
 impl Cop for SpaceAfterColon {
@@ -95,23 +104,38 @@ impl Cop for SpaceAfterColon {
         }
 
         let key = assoc.key();
-        let sym = match key.as_symbol_node() {
-            Some(s) => s,
-            None => return,
-        };
 
-        let colon_loc = match sym.closing_loc() {
-            Some(loc) if loc.as_slice() == b":" => loc,
-            _ => return,
+        // Determine the colon location. Two cases:
+        // 1. Symbol shorthand key (`foo: value`): colon is the symbol's closing_loc
+        // 2. String key with colon syntax (`"foo": value`): colon is the assoc's operator_loc
+        let colon_loc = if let Some(sym) = key.as_symbol_node() {
+            match sym.closing_loc() {
+                // Plain symbol key: closing_loc is ":" for `foo: value`.
+                // Quoted symbol key: closing_loc is "\":" for `"return_to": value`.
+                // In both cases the colon is the last byte of closing_loc.
+                Some(loc) if loc.as_slice().ends_with(b":") => loc,
+                _ => return,
+            }
+        } else if let Some(op_loc) = assoc.operator_loc() {
+            if op_loc.as_slice() == b":" {
+                op_loc
+            } else {
+                return;
+            }
+        } else {
+            return;
         };
 
         let bytes = source.as_bytes();
         let after_colon = colon_loc.end_offset();
+        // The colon is always the last byte of colon_loc. For quoted keys like
+        // `"foo":`, the loc is `"\":` so the colon is at end_offset - 1.
+        let colon_byte_offset = colon_loc.end_offset() - 1;
         // RuboCop accepts any whitespace after colon (space, newline, tab)
         match bytes.get(after_colon) {
             Some(b) if b.is_ascii_whitespace() => {}
             _ => {
-                let (line, column) = source.offset_to_line_col(colon_loc.start_offset());
+                let (line, column) = source.offset_to_line_col(colon_byte_offset);
                 let mut diag = self.diagnostic(
                     source,
                     line,

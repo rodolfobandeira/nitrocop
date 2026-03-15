@@ -14,3 +14,8 @@ def render(item, partial:template, locals:options)
                         ^ Layout/SpaceAfterColon: Space missing after colon.
                                          ^ Layout/SpaceAfterColon: Space missing after colon.
 end
+{"return_to":"/", "remember_me":"0"}
+            ^ Layout/SpaceAfterColon: Space missing after colon.
+                               ^ Layout/SpaceAfterColon: Space missing after colon.
+emit("test.event", now, {"message":"ok"})
+                                  ^ Layout/SpaceAfterColon: Space missing after colon.
