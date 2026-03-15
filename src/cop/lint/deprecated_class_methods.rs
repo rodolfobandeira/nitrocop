@@ -14,14 +14,43 @@
 /// Original implementation only handled File.exists? and Dir.exists?.
 /// Added all remaining patterns from RuboCop's RESTRICT_ON_SEND list.
 /// FN=60 was caused by missing ENV, iterator?, attr, and Socket patterns.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=5, FN=0.
+///
+/// FP fixes:
+/// - `constant_name()` matched only the final segment, so `Custom::File.exists?`
+///   was incorrectly treated as `File.exists?`. Restrict bare constant receivers
+///   to `File`, `Dir`, `ENV`, and `Socket`, with optional leading `::`.
+/// - `ENV.clone` / `ENV.dup` / `ENV.freeze` were flagged even when arguments
+///   were present. RuboCop only matches the zero-argument forms.
+///
+/// FN=0: no missing detections were reported in the corpus run.
 // Handles both as_constant_read_node and as_constant_path_node (qualified constants like ::File)
 use crate::cop::node_type::CALL_NODE;
-use crate::cop::util::constant_name;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 pub struct DeprecatedClassMethods;
+
+fn bare_or_cbase_constant(node: &ruby_prism::Node<'_>, expected: &[u8]) -> bool {
+    if let Some(read) = node.as_constant_read_node() {
+        return read.name().as_slice() == expected;
+    }
+
+    if let Some(path) = node.as_constant_path_node() {
+        return path.parent().is_none()
+            && path.name().is_some_and(|name| name.as_slice() == expected);
+    }
+
+    false
+}
+
+fn argument_count(call: &ruby_prism::CallNode<'_>) -> usize {
+    call.arguments().map_or(0, |args| args.arguments().len())
+}
 
 impl Cop for DeprecatedClassMethods {
     fn name(&self) -> &'static str {
@@ -106,19 +135,17 @@ impl Cop for DeprecatedClassMethods {
         }
 
         let receiver = call.receiver().unwrap();
-        let class_name = match constant_name(&receiver) {
-            Some(n) => n,
-            None => return,
-        };
-
-        // Get the receiver source text (e.g., "File", "::File", "ENV", "Socket")
         let receiver_loc = receiver.location();
         let receiver_source =
             source.byte_slice(receiver_loc.start_offset(), receiver_loc.end_offset(), "");
 
-        match (class_name, method_name) {
+        match method_name {
             // File.exists? / Dir.exists?
-            (b"File" | b"Dir", b"exists?") => {
+            b"exists?"
+                if argument_count(&call) == 1
+                    && (bare_or_cbase_constant(&receiver, b"File")
+                        || bare_or_cbase_constant(&receiver, b"Dir")) =>
+            {
                 let current = format!("{}.exists?", receiver_source);
                 let prefer = format!("{}.exist?", receiver_source);
                 let message = format!("`{}` is deprecated in favor of `{}`.", current, prefer);
@@ -129,7 +156,9 @@ impl Cop for DeprecatedClassMethods {
             }
 
             // ENV.clone / ENV.dup
-            (b"ENV", b"clone" | b"dup") => {
+            b"clone" | b"dup"
+                if argument_count(&call) == 0 && bare_or_cbase_constant(&receiver, b"ENV") =>
+            {
                 let method_str = if method_name == b"clone" {
                     "clone"
                 } else {
@@ -144,7 +173,9 @@ impl Cop for DeprecatedClassMethods {
             }
 
             // ENV.freeze
-            (b"ENV", b"freeze") => {
+            b"freeze"
+                if argument_count(&call) == 0 && bare_or_cbase_constant(&receiver, b"ENV") =>
+            {
                 let current = format!("{}.freeze", receiver_source);
                 let prefer = "ENV";
                 let message = format!("`{}` is deprecated in favor of `{}`.", current, prefer);
@@ -154,7 +185,7 @@ impl Cop for DeprecatedClassMethods {
             }
 
             // Socket.gethostbyaddr / Socket.gethostbyname
-            (b"Socket", b"gethostbyaddr") => {
+            b"gethostbyaddr" if bare_or_cbase_constant(&receiver, b"Socket") => {
                 let current = format!("{}.gethostbyaddr", receiver_source);
                 let message = format!(
                     "`{}` is deprecated in favor of `Addrinfo#getnameinfo`.",
@@ -165,7 +196,7 @@ impl Cop for DeprecatedClassMethods {
                 diagnostics.push(self.diagnostic(source, line, column, message));
             }
 
-            (b"Socket", b"gethostbyname") => {
+            b"gethostbyname" if bare_or_cbase_constant(&receiver, b"Socket") => {
                 let current = format!("{}.gethostbyname", receiver_source);
                 let message = format!(
                     "`{}` is deprecated in favor of `Addrinfo.getaddrinfo`.",
