@@ -8,3 +8,5 @@ data.to_json.to_s
              ^^^^ Lint/RedundantTypeConversion: Redundant `to_s` detected.
 foo.to_json(arg).to_s
                  ^^^^ Lint/RedundantTypeConversion: Redundant `to_s` detected.
+("#{left}:#{right}").to_s
+                     ^^^^ Lint/RedundantTypeConversion: Redundant `to_s` detected.

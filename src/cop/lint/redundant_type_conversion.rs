@@ -22,7 +22,39 @@ use crate::parse::source::SourceFile;
 /// FN fix: Missing `to_json` as a typed method that always returns a String.
 /// RuboCop's `TYPED_METHODS` maps `to_s` to `[:inspect, :to_json]`, but we
 /// only checked `inspect`. Added `to_json` to the chained typed method check.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=0, FN=1.
+///
+/// FN fix:
+/// - Prism wraps receivers like `("#{left}:#{right}")` in a `ParenthesesNode`.
+///   Unwrap single-expression parentheses before checking whether the receiver
+///   is already string/symbol/array/hash-like, so `(...).to_s` is treated the
+///   same as the underlying expression.
 pub struct RedundantTypeConversion;
+
+fn unwrap_parentheses<'a>(mut node: ruby_prism::Node<'a>) -> ruby_prism::Node<'a> {
+    loop {
+        let Some(paren) = node.as_parentheses_node() else {
+            return node;
+        };
+        let Some(body) = paren.body() else {
+            return node;
+        };
+        let Some(stmts) = body.as_statements_node() else {
+            return node;
+        };
+        let mut body_nodes = stmts.body().iter();
+        let Some(single_node) = body_nodes.next() else {
+            return node;
+        };
+        if body_nodes.next().is_some() {
+            return node;
+        }
+        node = single_node;
+    }
+}
 
 impl Cop for RedundantTypeConversion {
     fn name(&self) -> &'static str {
@@ -81,6 +113,7 @@ impl Cop for RedundantTypeConversion {
             Some(r) => r,
             None => return,
         };
+        let receiver = unwrap_parentheses(receiver);
 
         let is_redundant = match method_name {
             b"to_s" => {
