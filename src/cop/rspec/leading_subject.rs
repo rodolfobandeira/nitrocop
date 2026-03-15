@@ -37,6 +37,17 @@ use crate::parse::source::SourceFile;
 ///    the `first_relevant_name` update). RuboCop's `spec_group?` includes
 ///    `RSpec.describe`, so it IS offending. Fixed by setting `first_relevant_name`
 ///    for `RSpec.describe` calls.
+///
+/// ## Investigation (2026-03-15)
+///
+/// **Root cause of 84 FNs:** RuboCop's `on_block` fires on ALL blocks, not just
+/// example groups and include-family blocks. The `parent(node)` method gets the
+/// immediate block ancestor, so subjects inside arbitrary blocks (custom DSL
+/// methods like `with_feature_flag do...end`, `around do...end` etc.) are
+/// checked independently for ordering within that block. The nitrocop code only
+/// recursed into example group and include-family blocks, missing subjects
+/// inside arbitrary blocks. Fixed by recursing into ALL call nodes with blocks
+/// that are children of an example group body.
 pub struct LeadingSubject;
 
 impl Cop for LeadingSubject {
@@ -75,7 +86,7 @@ impl Cop for LeadingSubject {
         // matching RuboCop's InsideExampleGroup behavior.
         for stmt in program.statements().body().iter() {
             if is_spec_group_call(&stmt) {
-                self.check_example_group_recursive(source, &stmt, diagnostics);
+                self.check_block_body(source, &stmt, diagnostics);
             }
             // Skip modules, classes, requires, and anything else at the top level.
         }
@@ -83,9 +94,12 @@ impl Cop for LeadingSubject {
 }
 
 impl LeadingSubject {
-    /// Recursively check an example group and all nested example groups
-    /// for subject ordering violations.
-    fn check_example_group_recursive(
+    /// Check subject ordering within a block body and recurse into child blocks.
+    /// This is the unified handler for example groups, include-family blocks,
+    /// and arbitrary blocks — matching RuboCop's `on_block` behavior which fires
+    /// on ALL blocks and uses `parent(node)` to check ordering within the
+    /// immediate parent block.
+    fn check_block_body(
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
@@ -114,7 +128,7 @@ impl LeadingSubject {
             None => return,
         };
 
-        // Check subject ordering within this example group
+        // Check subject ordering within this block
         let mut first_relevant_name: Option<&[u8]> = None;
 
         for stmt in stmts.body().iter() {
@@ -128,7 +142,7 @@ impl LeadingSubject {
                         && name == b"describe";
                     if is_rspec_describe {
                         // Recurse into RSpec.describe nested calls
-                        self.check_example_group_recursive(source, &stmt, diagnostics);
+                        self.check_block_body(source, &stmt, diagnostics);
                         // Also treat as offending (spec_group in RuboCop)
                         if first_relevant_name.is_none() {
                             first_relevant_name = Some(name);
@@ -152,91 +166,46 @@ impl LeadingSubject {
                     }
                 } else if is_rspec_example_group(name) {
                     // Recurse into nested context/describe/shared_examples blocks
-                    self.check_example_group_recursive(source, &stmt, diagnostics);
+                    self.check_block_body(source, &stmt, diagnostics);
                     if first_relevant_name.is_none() {
                         first_relevant_name = Some(name);
                     }
                 } else if is_example_include(name) {
-                    // Recurse into include-family blocks (it_behaves_like,
-                    // include_context, etc.) — subjects inside these blocks
-                    // are independently checked for ordering, matching RuboCop's
-                    // on_block + parent(node) behavior.
-                    self.recurse_into_block(source, &stmt, diagnostics);
+                    // Recurse into include-family blocks; also treat as offending
+                    self.check_block_body(source, &stmt, diagnostics);
                     if first_relevant_name.is_none() {
                         first_relevant_name = Some(name);
                     }
-                } else if (is_rspec_let(name) || is_rspec_hook(name) || is_rspec_example(name))
-                    && first_relevant_name.is_none()
-                {
-                    first_relevant_name = Some(name);
-                }
-            }
-        }
-    }
-
-    /// Recurse into a block-bearing call (e.g. it_behaves_like, include_context)
-    /// to check subject ordering within its block body. This matches RuboCop's
-    /// on_block + parent(node) behavior where subjects inside any block within
-    /// a spec group are checked independently.
-    fn recurse_into_block(
-        &self,
-        source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let block = match call.block() {
-            Some(b) => match b.as_block_node() {
-                Some(bn) => bn,
-                None => return,
-            },
-            None => return,
-        };
-
-        let body = match block.body() {
-            Some(b) => b,
-            None => return,
-        };
-
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Check subject ordering within this block, same as example group
-        let mut first_relevant_name: Option<&[u8]> = None;
-
-        for stmt in stmts.body().iter() {
-            if let Some(c) = stmt.as_call_node() {
-                let name = c.name().as_slice();
-                if c.receiver().is_some() {
-                    continue;
-                }
-
-                if is_rspec_subject(name) {
-                    if let Some(prev_name) = first_relevant_name {
-                        let prev_str = std::str::from_utf8(prev_name).unwrap_or("let");
-                        let loc = stmt.location();
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            format!("Declare `subject` above any other `{prev_str}` declarations."),
-                        ));
+                } else if is_rspec_let(name) {
+                    // RuboCop's let? requires a block or block_pass:
+                    //   (block (send nil? #Helpers.all ...) ...)
+                    //   (send nil? #Helpers.all _ block_pass)
+                    let has_block = c.block().is_some();
+                    let has_block_pass = c.arguments().is_some_and(|args| {
+                        args.arguments()
+                            .iter()
+                            .any(|a| a.as_block_argument_node().is_some())
+                    });
+                    if has_block {
+                        self.check_block_body(source, &stmt, diagnostics);
                     }
-                } else if (is_rspec_let(name)
-                    || is_rspec_hook(name)
-                    || is_rspec_example(name)
-                    || is_rspec_example_group(name)
-                    || is_example_include(name))
-                    && first_relevant_name.is_none()
-                {
-                    first_relevant_name = Some(name);
+                    if (has_block || has_block_pass) && first_relevant_name.is_none() {
+                        first_relevant_name = Some(name);
+                    }
+                } else if is_rspec_hook(name) || is_rspec_example(name) {
+                    // RuboCop's hook? and example? require a block
+                    if c.block().is_some() {
+                        self.check_block_body(source, &stmt, diagnostics);
+                        if first_relevant_name.is_none() {
+                            first_relevant_name = Some(name);
+                        }
+                    }
+                } else if c.block().is_some() {
+                    // Arbitrary block-bearing calls (custom DSL methods, etc.)
+                    // are NOT offending but we must recurse into their blocks
+                    // to check subject ordering within, matching RuboCop's
+                    // on_block behavior that fires on ALL blocks.
+                    self.check_block_body(source, &stmt, diagnostics);
                 }
             }
         }

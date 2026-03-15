@@ -75,3 +75,28 @@ RSpec.describe User do
     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `before` declarations.
   end
 end
+
+RSpec.describe User do
+  with_feature_flag(:new_ui) do
+    let(:params) { foo }
+
+    subject { described_class.new }
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+  end
+end
+
+RSpec.describe User do
+  custom_setup do
+    before { setup }
+
+    subject { described_class.new }
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `before` declarations.
+  end
+end
+
+RSpec.describe User do
+  let(:user, &args[:build_user])
+
+  subject { described_class.new }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+end

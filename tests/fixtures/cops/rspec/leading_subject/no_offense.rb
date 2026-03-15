@@ -70,3 +70,10 @@ RSpec.describe User do
     subject { bar }
   end
 end
+
+RSpec.describe User do
+  with_feature_flag(:new_ui) do
+    subject { described_class.new }
+    let(:params) { foo }
+  end
+end
