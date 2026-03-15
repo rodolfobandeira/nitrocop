@@ -5,6 +5,16 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// Checks for useless `rescue` blocks that only re-raise the exception.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// Corpus oracle reported FP=0, FN=1.
+///
+/// FN fix:
+/// - Prism represents inline `... rescue ...` as `RescueModifierNode`, not a
+///   regular `RescueNode`. The remaining corpus miss was
+///   `raise "TEST_ME" rescue raise rescue nil`, where the inner modifier
+///   rescue only re-raises and should be flagged.
 pub struct UselessRescue;
 
 impl Cop for UselessRescue {
@@ -78,6 +88,22 @@ impl<'pr> Visit<'pr> for RescueVisitor<'_, '_> {
 
         // Continue visiting children
         ruby_prism::visit_rescue_node(self, node);
+    }
+
+    fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
+        if modifier_only_reraising(node, self.source) {
+            let rescue_offset = rescue_modifier_keyword_offset(node, self.source)
+                .unwrap_or_else(|| node.location().start_offset());
+            let (line, column) = self.source.offset_to_line_col(rescue_offset);
+            self.diagnostics.push(self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                "Useless `rescue` detected.".to_string(),
+            ));
+        }
+
+        ruby_prism::visit_rescue_modifier_node(self, node);
     }
 }
 
@@ -181,6 +207,68 @@ fn only_reraising(rescue_node: &ruby_prism::RescueNode<'_>, source: &SourceFile)
     }
 
     false
+}
+
+fn modifier_only_reraising(
+    rescue_mod: &ruby_prism::RescueModifierNode<'_>,
+    source: &SourceFile,
+) -> bool {
+    is_reraise_expression(&rescue_mod.rescue_expression(), source, None)
+}
+
+fn is_reraise_expression(
+    node: &ruby_prism::Node<'_>,
+    source: &SourceFile,
+    rescue_var_name: Option<&[u8]>,
+) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if call.name().as_slice() != b"raise" || call.receiver().is_some() {
+        return false;
+    }
+
+    let args = match call.arguments() {
+        Some(a) => a,
+        None => return true,
+    };
+
+    let arg_list: Vec<_> = args.arguments().iter().collect();
+    if arg_list.len() != 1 {
+        return false;
+    }
+
+    let first_arg = &arg_list[0];
+    let arg_src = source.byte_slice(
+        first_arg.location().start_offset(),
+        first_arg.location().end_offset(),
+        "",
+    );
+
+    if arg_src == "$!" || arg_src == "$ERROR_INFO" {
+        return true;
+    }
+
+    if let Some(var_name) = rescue_var_name {
+        if !var_name.is_empty() && arg_src.as_bytes() == var_name {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn rescue_modifier_keyword_offset(
+    rescue_mod: &ruby_prism::RescueModifierNode<'_>,
+    source: &SourceFile,
+) -> Option<usize> {
+    let expr_end = rescue_mod.expression().location().end_offset();
+    let mod_end = rescue_mod.location().end_offset();
+    let slice = source.try_byte_slice(expr_end, mod_end)?;
+    let rel = slice.as_bytes().windows(6).position(|w| w == b"rescue")?;
+    Some(expr_end + rel)
 }
 
 #[cfg(test)]
