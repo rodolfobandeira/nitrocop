@@ -89,3 +89,27 @@ in Integer if true
 in String unless false
   x = 2
 end
+
+# RuboCop 1.84.2 crashes and reports no offense when an explicit else branch is empty
+if true
+else
+end
+
+if false
+  123
+else
+end
+
+if false
+else
+end
+
+unless 1
+  2
+else
+end
+
+if condition
+elsif false
+else
+end

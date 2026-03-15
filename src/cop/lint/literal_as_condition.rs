@@ -92,6 +92,23 @@ use crate::parse::source::SourceFile;
 /// Corpus oracle reported FP=10, FN=0. All remaining FPs are config/exclude
 /// differences — files excluded by target project .rubocop.yml but not by
 /// nitrocop's config resolution. No cop logic bugs remain.
+///
+/// ## Corpus investigation (2026-03-15)
+///
+/// The remaining FP=10 were not config noise. The corpus oracle runs against
+/// `bench/corpus/baseline_rubocop.yml`, so repo-local excludes are ignored.
+///
+/// Root cause:
+/// - RuboCop 1.84.2 crashes and emits no offense when `if`/`unless` has a
+///   literal condition plus an explicit `else` branch whose body is empty, e.g.
+///   `if false; 123; else; end`, `if true; else; end`, `unless 1; 2; else; end`.
+/// - The same crash shape appears on `elsif` because Prism models it as a
+///   nested `IfNode` with an empty explicit `else`.
+///
+/// Fix:
+/// - Skip literal-condition offenses for `IfNode`/`UnlessNode` when the explicit
+///   `else` branch exists and its statements are empty. This matches the corpus
+///   oracle's RuboCop behavior.
 pub struct LiteralAsCondition;
 
 /// Check if a node is a literal value (matches RuboCop's `literal?`).
@@ -218,6 +235,31 @@ fn node_source_text<'a>(node: &ruby_prism::Node<'a>) -> &'a str {
     std::str::from_utf8(loc.as_slice()).unwrap_or("literal")
 }
 
+fn statements_are_empty(statements: Option<ruby_prism::StatementsNode<'_>>) -> bool {
+    match statements {
+        Some(stmts) => stmts.body().iter().next().is_none(),
+        None => true,
+    }
+}
+
+fn if_has_empty_else_branch(if_node: &ruby_prism::IfNode<'_>) -> bool {
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_node) = subsequent.as_else_node() {
+            return statements_are_empty(else_node.statements());
+        }
+    }
+
+    false
+}
+
+fn unless_has_empty_else_branch(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
+    if let Some(else_node) = unless_node.else_clause() {
+        return statements_are_empty(else_node.statements());
+    }
+
+    false
+}
+
 fn add_literal_offense(
     cop: &LiteralAsCondition,
     source: &SourceFile,
@@ -308,6 +350,9 @@ impl Cop for LiteralAsCondition {
             if is_pattern_matching_guard(source, node) {
                 return;
             }
+            if if_has_empty_else_branch(&if_node) {
+                return;
+            }
             let predicate = if_node.predicate();
 
             if is_falsey_literal(&predicate) || is_truthy_literal(&predicate) {
@@ -320,6 +365,9 @@ impl Cop for LiteralAsCondition {
         if let Some(unless_node) = node.as_unless_node() {
             // Skip pattern matching guards (e.g., `in 4 unless false`)
             if is_pattern_matching_guard(source, node) {
+                return;
+            }
+            if unless_has_empty_else_branch(&unless_node) {
                 return;
             }
             let predicate = unless_node.predicate();
