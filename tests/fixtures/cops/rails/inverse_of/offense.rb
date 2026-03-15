@@ -6,3 +6,32 @@ class User < ApplicationRecord
   has_one :avatar, foreign_key: :owner_id
   ^^^^^^^ Rails/InverseOf: Specify an `:inverse_of` option.
 end
+
+# Associations inside included blocks (concerns)
+module Edition::ActiveEditors
+  extend ActiveSupport::Concern
+
+  included do
+    has_many :recent_edition_openings, foreign_key: :edition_id, dependent: :destroy
+    ^^^^^^^^ Rails/InverseOf: Specify an `:inverse_of` option.
+  end
+end
+
+# Associations with lambda {} scope (not -> {})
+class Person < ApplicationRecord
+  has_many :role_appointments,
+  ^^^^^^^^ Rails/InverseOf: Specify an `:inverse_of` option.
+           lambda {
+             order(:ordering)
+           }
+end
+
+# Associations with scope and as: option inside included block
+module Concern
+  extend ActiveSupport::Concern
+
+  included do
+    has_many :versions, -> { order(created_at: :asc) }, as: :item
+    ^^^^^^^^ Rails/InverseOf: Specify an `:inverse_of` option.
+  end
+end

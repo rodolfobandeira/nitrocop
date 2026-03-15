@@ -7,3 +7,21 @@ class User < ApplicationRecord
   belongs_to :imageable, polymorphic: true
   has_many :active_accounts, -> { merge(Account.active) }, through: :memberships, source: :account
 end
+
+# Associations inside included blocks with inverse_of set
+module Concern
+  extend ActiveSupport::Concern
+
+  included do
+    has_many :editions, foreign_key: :edition_id, inverse_of: :document
+    has_many :versions, -> { order(:created_at) }, inverse_of: :versionable
+    has_many :items, through: :memberships
+  end
+end
+
+# lambda scope with inverse_of set
+class Person < ApplicationRecord
+  has_many :role_appointments,
+           lambda { order(:ordering) },
+           inverse_of: :person
+end
