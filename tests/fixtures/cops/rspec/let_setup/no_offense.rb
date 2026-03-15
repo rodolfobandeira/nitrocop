@@ -103,3 +103,17 @@ RSpec.describe Widget do
     expect(item).to be_valid
   end
 end
+
+# Multi-line let! with local variable shadowing — still referenced externally
+describe Widget do
+  let!(:order) do
+    order = create(:order, user: user)
+    order.items << items
+    order.save!
+    order
+  end
+
+  it 'uses order' do
+    expect(order).to be_valid
+  end
+end

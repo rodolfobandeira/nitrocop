@@ -17,6 +17,15 @@ use std::collections::HashSet;
 ///   RuboCop's `example_or_shared_group_or_including?` matches `Includes.all` which includes
 ///   `include_examples`, `include_context`, `it_behaves_like`, `it_should_behave_like`.
 ///   nitrocop was missing `include_examples` and `include_context`, causing 103 FNs.
+/// - FN fix: Removed `LocalVariableReadNode` from `IdentifierCollector`. RuboCop's
+///   `method_called?` uses `(send nil? %)` which only matches method sends, not local
+///   variable reads. Multi-line `let!` bodies that assign to a local variable with the
+///   same name as the `let!` (e.g., `let!(:order) do order = create(...); order end`)
+///   had the local variable read falsely marking the name as "used".
+/// - FN fix: `let!` declaration search now recurses through non-scope-change blocks
+///   (e.g., `[].each do ... end`) to find `let!` calls, matching RuboCop's
+///   `ExampleGroup#find_all_in_scope` behavior which stops only at scope changes
+///   (other example groups) and examples.
 pub struct LetSetup;
 
 impl Cop for LetSetup {
@@ -70,23 +79,20 @@ impl<'pr> LetSetupVisitor<'_> {
             None => return,
         };
 
-        // Collect let! names and all identifiers used in the same scope
+        // Collect let! names (recursing through non-scope-change blocks)
+        // and all method-call identifiers used in the same scope.
         let mut let_bang_decls: Vec<(Vec<u8>, usize, usize)> = Vec::new();
         let mut used_names: HashSet<Vec<u8>> = HashSet::new();
         let mut this_scope_let_bang_names: HashSet<Vec<u8>> = HashSet::new();
 
         for stmt in stmts.body().iter() {
-            if let Some(c) = stmt.as_call_node() {
-                let m = c.name().as_slice();
-                if m == b"let!" && c.receiver().is_none() {
-                    if let Some(let_name) = extract_let_name(&c) {
-                        let loc = c.location();
-                        let (line, col) = self.source.offset_to_line_col(loc.start_offset());
-                        this_scope_let_bang_names.insert(let_name.clone());
-                        let_bang_decls.push((let_name, line, col));
-                    }
-                }
-            }
+            // Recursively find let! declarations through non-scope-change blocks,
+            // matching RuboCop's ExampleGroup#find_all_in_scope behavior.
+            self.collect_let_bangs_in_scope(
+                &stmt,
+                &mut let_bang_decls,
+                &mut this_scope_let_bang_names,
+            );
             // Walk ALL siblings (including let! bodies) for identifier
             // collection. This matches RuboCop behavior where method_called?
             // searches the entire example group block, so a let! name used
@@ -118,6 +124,49 @@ impl<'pr> LetSetupVisitor<'_> {
             self.visit(&stmt);
         }
         self.ancestor_let_bang_names.pop();
+    }
+
+    /// Recursively search for `let!` calls within the current scope, stopping at
+    /// scope changes (example groups, includes) and examples. This mirrors RuboCop's
+    /// `ExampleGroup#find_all_in_scope` which recurses through non-scope-change blocks
+    /// like iterators (`[].each do ... end`).
+    fn collect_let_bangs_in_scope(
+        &self,
+        node: &ruby_prism::Node<'pr>,
+        decls: &mut Vec<(Vec<u8>, usize, usize)>,
+        scope_names: &mut HashSet<Vec<u8>>,
+    ) {
+        if let Some(c) = node.as_call_node() {
+            let m = c.name().as_slice();
+            // If it's a let! call, record it
+            if m == b"let!" && c.receiver().is_none() {
+                if let Some(let_name) = extract_let_name(&c) {
+                    let loc = c.location();
+                    let (line, col) = self.source.offset_to_line_col(loc.start_offset());
+                    scope_names.insert(let_name.clone());
+                    decls.push((let_name, line, col));
+                }
+                return;
+            }
+            // If it's a scope change (example group or include) or an example,
+            // stop recursing — let! declarations inside belong to that inner scope
+            if is_example_group_or_include(m) || is_example(m) {
+                return;
+            }
+            // For other calls with blocks (e.g., `[].each do ... end`),
+            // recurse into the block body
+            if let Some(block) = c.block() {
+                if let Some(block_node) = block.as_block_node() {
+                    if let Some(body) = block_node.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            for stmt in stmts.body().iter() {
+                                self.collect_let_bangs_in_scope(&stmt, decls, scope_names);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn overrides_outer_let_bang(&self, name: &[u8]) -> bool {
@@ -163,9 +212,9 @@ fn extract_let_name(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
     None
 }
 
-/// Walks the entire AST subtree, collecting all receiverless call names and
-/// local variable reads. This ensures `let!` references are found in any
-/// nested structure (conditionals, blocks, string interpolations, etc.).
+/// Walks the entire AST subtree, collecting all receiverless call names.
+/// This matches RuboCop's `method_called?` which uses `(send nil? %)` —
+/// only method sends without a receiver, NOT local variable reads.
 struct IdentifierCollector<'a> {
     names: &'a mut HashSet<Vec<u8>>,
 }
@@ -177,11 +226,27 @@ impl<'pr> Visit<'pr> for IdentifierCollector<'_> {
         }
         ruby_prism::visit_call_node(self, node);
     }
+}
 
-    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
-        self.names.insert(node.name().as_slice().to_vec());
-        ruby_prism::visit_local_variable_read_node(self, node);
-    }
+/// Returns true for RSpec example methods (it, specify, example, etc.)
+/// which define a new scope where let! declarations inside belong to
+/// the enclosing example group, not nested further.
+fn is_example(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"it"
+            | b"specify"
+            | b"example"
+            | b"its"
+            | b"xit"
+            | b"xspecify"
+            | b"xexample"
+            | b"fit"
+            | b"fspecify"
+            | b"fexample"
+            | b"skip"
+            | b"pending"
+    )
 }
 
 fn is_example_group_or_include(name: &[u8]) -> bool {
