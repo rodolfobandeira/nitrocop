@@ -64,6 +64,34 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: Added `starts_with(b"private ")` match that validates the remainder is
 /// only whitespace (to avoid matching `private :method_name` or `private def foo`).
+///
+/// ## Investigation (2026-03-15): FP=1, FN=102
+///
+/// **FN root cause 1 (~majority)**: Endless methods (`def foo = bar.foo`) were incorrectly
+/// skipped. The previous investigation assumed RuboCop's `(def ...)` NodePattern didn't
+/// match endless defs, but corpus data proves RuboCop DOES flag them. In Prism, endless
+/// methods have the body as a direct child (not wrapped in StatementsNode).
+///
+/// Fix: Removed the `equal_loc().is_some()` early return. Added fallback path that
+/// handles the body as a direct CallNode when it's not a StatementsNode.
+///
+/// **FN root cause 2**: Prefixed delegation via `self.class` receiver
+/// (e.g., `def class_name; self.class.name; end`) was not detected. `get_receiver_name`
+/// only returned names for receiverless calls, but `self.class` has a receiver (`self`).
+/// RuboCop's `determine_prefixed_method_receiver_name` returns `receiver.method_name`
+/// for send nodes, which would be `"class"` for `self.class`.
+///
+/// Fix: Added handling in `get_receiver_name` for call nodes with a `self` receiver,
+/// returning the method name (e.g., `"class"` for `self.class`).
+///
+/// **FP (1, antiwork/gumroad)**: `def to_stripejs_customer_id; to_stripejs_customer.id; end`
+/// flagged by nitrocop but not RuboCop. Likely a private/module_function scope issue
+/// in the full file that our line-based scanning doesn't detect. Cannot verify without
+/// corpus file access.
+///
+/// **Remaining FNs**: 102 FNs in corpus, mostly in files not locally available.
+/// Many are likely the endless method and self.class patterns now fixed. Others may
+/// involve scope/visibility patterns not yet detected by line-based scanning.
 pub struct Delegate;
 
 impl Cop for Delegate {
@@ -135,30 +163,29 @@ impl Cop for Delegate {
             Vec::new()
         };
 
-        // Skip endless methods (def foo() = expr) — RuboCop's NodePattern doesn't match them
-        if def_node.equal_loc().is_some() {
-            return;
-        }
-
-        // Body must be a single call expression
+        // Body must be a single call expression.
+        // For regular defs: body is StatementsNode with one statement.
+        // For endless methods (def foo = expr): body is the call node directly.
         let body = match def_node.body() {
             Some(b) => b,
             None => return,
         };
 
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
-            None => return,
-        };
-
-        let body_nodes: Vec<_> = stmts.body().iter().collect();
-        if body_nodes.len() != 1 {
-            return;
-        }
-
-        let call = match body_nodes[0].as_call_node() {
-            Some(c) => c,
-            None => return,
+        let call = if let Some(stmts) = body.as_statements_node() {
+            let body_nodes: Vec<_> = stmts.body().iter().collect();
+            if body_nodes.len() != 1 {
+                return;
+            }
+            match body_nodes[0].as_call_node() {
+                Some(c) => c,
+                None => return,
+            }
+        } else {
+            // Endless method: body is the call node directly
+            match body.as_call_node() {
+                Some(c) => c,
+                None => return,
+            }
         };
 
         // Check method name matching:
@@ -322,6 +349,14 @@ impl Cop for Delegate {
 fn get_receiver_name(receiver: &ruby_prism::Node<'_>) -> Option<Vec<u8>> {
     if let Some(recv_call) = receiver.as_call_node() {
         if recv_call.receiver().is_none() {
+            return Some(recv_call.name().as_slice().to_vec());
+        }
+        // self.class → prefix is "class"
+        if recv_call
+            .receiver()
+            .is_some_and(|r| r.as_self_node().is_some())
+            && recv_call.arguments().is_none()
+        {
             return Some(recv_call.name().as_slice().to_vec());
         }
     }

@@ -136,9 +136,14 @@ module Open4
   end
 end
 
-# Endless method (def foo() = expr) — not flagged by RuboCop
+# Endless method with chained call — not a simple delegation
 class Foo
-  def clear() = value.clear
+  def formatted_name = value.name.upcase
+end
+
+# Endless method with argument mismatch — not a delegation
+class Bar
+  def lookup(key) = data.find
 end
 
 # Private with trailing space — `private ` (with trailing space) on its own line

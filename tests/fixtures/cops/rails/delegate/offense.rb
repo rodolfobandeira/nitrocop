@@ -53,3 +53,28 @@ def config_value(key)
 ^^^ Rails/Delegate: Use `delegate` to define delegations.
   config.value(key)
 end
+
+# Endless method delegations (def foo = bar.foo)
+def first = value.first
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+
+def last = value.last
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+
+def empty? = value.empty?
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+
+def size = value.size
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+
+def stop = @listener.stop
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+
+def root = Engine.root
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+
+# Prefixed delegation via self.class receiver: def class_name; self.class.name; end
+def class_name
+^^^ Rails/Delegate: Use `delegate` to define delegations.
+  self.class.name
+end
