@@ -15,6 +15,15 @@ use crate::parse::source::SourceFile;
 ///
 /// Supports all four association methods: `has_many`, `has_one`, `belongs_to`,
 /// `has_and_belongs_to_many`. Accepts both symbol and string first arguments.
+///
+/// ## Implementation notes
+///
+/// RuboCop's `register_offense` flags ALL members of a duplicate group, including the first
+/// occurrence. The implementation groups calls by name and then flags all members of groups
+/// with >1 member (both passes: name duplicates and class_name duplicates).
+///
+/// Message format for name duplicates: "Association `x` is defined multiple times. Don't
+/// repeat associations." (matching RuboCop exactly).
 pub struct DuplicateAssociation;
 
 /// Association method names we track.
@@ -71,9 +80,12 @@ impl Cop for DuplicateAssociation {
         let calls = class_body_calls(&class);
 
         // --- Pass 1: Duplicate association names ---
-        let mut seen: HashMap<Vec<u8>, usize> = HashMap::new();
+        // Group calls by name, then flag ALL occurrences in groups with >1 member.
+        // RuboCop's `register_offense` flags every member of a duplicate group,
+        // including the first occurrence — not just subsequent ones.
+        let mut name_groups: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
 
-        for call in &calls {
+        for (idx, call) in calls.iter().enumerate() {
             if !is_association_call(call) {
                 continue;
             }
@@ -83,21 +95,26 @@ impl Cop for DuplicateAssociation {
                 None => continue,
             };
 
-            match seen.entry(name) {
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    let loc = call.message_loc().unwrap_or(call.location());
-                    let (line, column) = source.offset_to_line_col(loc.start_offset());
-                    let name_str = String::from_utf8_lossy(e.key());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        format!("Duplicate association `{name_str}` detected."),
-                    ));
-                }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(0);
-                }
+            name_groups.entry(name).or_default().push(idx);
+        }
+
+        for (name, indices) in &name_groups {
+            if indices.len() <= 1 {
+                continue;
+            }
+            let name_str = String::from_utf8_lossy(name);
+            for &idx in indices {
+                let call = &calls[idx];
+                let loc = call.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Association `{name_str}` is defined multiple times. Don't repeat associations."
+                    ),
+                ));
             }
         }
 

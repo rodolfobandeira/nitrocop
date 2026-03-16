@@ -1,33 +1,38 @@
 class User < ApplicationRecord
   has_many :posts
+  ^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `posts` is defined multiple times. Don't repeat associations.
   has_many :posts, dependent: :destroy
-  ^^^^^^^^ Rails/DuplicateAssociation: Duplicate association `posts` detected.
+  ^^^^^^^^ Rails/DuplicateAssociation: Association `posts` is defined multiple times. Don't repeat associations.
 end
 
 class Post < ApplicationRecord
   belongs_to :author
+  ^^^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `author` is defined multiple times. Don't repeat associations.
   belongs_to :author, optional: true
-  ^^^^^^^^^^ Rails/DuplicateAssociation: Duplicate association `author` detected.
+  ^^^^^^^^^^ Rails/DuplicateAssociation: Association `author` is defined multiple times. Don't repeat associations.
 end
 
 class Company < ApplicationRecord
   has_one :address
+  ^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `address` is defined multiple times. Don't repeat associations.
   has_one :address, dependent: :destroy
-  ^^^^^^^ Rails/DuplicateAssociation: Duplicate association `address` detected.
+  ^^^^^^^ Rails/DuplicateAssociation: Association `address` is defined multiple times. Don't repeat associations.
 end
 
 # has_and_belongs_to_many duplicates
 class Tag < ApplicationRecord
   has_and_belongs_to_many :articles
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `articles` is defined multiple times. Don't repeat associations.
   has_and_belongs_to_many :articles
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Duplicate association `articles` detected.
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `articles` is defined multiple times. Don't repeat associations.
 end
 
 # String argument instead of symbol
 class Invoice < ApplicationRecord
   has_many 'items'
+  ^^^^^^^^^^^^^^^^ Rails/DuplicateAssociation: Association `items` is defined multiple times. Don't repeat associations.
   has_many 'items', dependent: :destroy
-  ^^^^^^^^ Rails/DuplicateAssociation: Duplicate association `items` detected.
+  ^^^^^^^^ Rails/DuplicateAssociation: Association `items` is defined multiple times. Don't repeat associations.
 end
 
 # class_name duplicate detection (has_many, not belongs_to)
