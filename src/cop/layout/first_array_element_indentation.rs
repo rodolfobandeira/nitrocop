@@ -1,8 +1,16 @@
 use crate::cop::node_type::ARRAY_NODE;
-use crate::cop::util::indentation_of;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+
+/// Byte offset of the first non-whitespace character on a line.
+/// Equivalent to RuboCop's `source_line =~ /\S/`. Handles both spaces and tabs.
+/// Returns the byte count of leading whitespace (tabs count as 1 byte each).
+fn first_non_whitespace_column(line: &[u8]) -> usize {
+    line.iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
+}
 
 /// Layout/FirstArrayElementIndentation cop.
 ///
@@ -21,13 +29,24 @@ use crate::parse::source::SourceFile;
 /// `is_direct_argument` now also scans past `}` after `]` to detect hash chaining
 /// (`{ key: [...] }.to_json`), correctly falling back to line-relative in that case.
 ///
-/// **Remaining FNs (~134):** Three categories:
-/// 1. WhatWeb plugins (~41) use tab indentation; `indentation_of()` only counts
-///    spaces, producing incorrect `open_line_indent`. Needs TabWidth support.
-/// 2. Whitehall/similar (~85) have `method({ key: [` where `[` is on the same
-///    line as `(` — these should now be fixed by the `find_left_paren_on_line`
-///    change allowing scanning past `{`. Verification requires corpus re-run.
-/// 3. "parent hash key" relative messages (~5) — RuboCop feature not implemented.
+/// **FP root cause #3 (2026-03-16, 138 FPs):** Two sub-causes:
+/// a) Tab indentation: `indentation_of()` only counted spaces, returning 0 for
+///    tab-indented lines. But `offset_to_line_col` counted tabs as 1 character.
+///    So closing bracket `\t]` had close_col=1 but indent_base=0. Fix: use
+///    `first_non_whitespace_column()` (byte offset of first non-whitespace char,
+///    matching RuboCop's `source_line =~ /\S/`) for both sides of the comparison.
+///    This fixed WhatWeb (~54 FPs) and phlex (~23 FPs).
+/// b) Array inside hash that is chained: `method({ key: [...], k2: v }.to_json)`
+///    — `is_direct_argument` checked after `]`, saw `,` (hash entry separator),
+///    and returned true. But the enclosing hash is chained (`.to_json`), so
+///    RuboCop uses line-relative indent. Fix: `find_left_paren_on_line` now
+///    tracks unmatched `{` between `(` and `[`; when present, `is_direct_argument`
+///    scans forward past hash entries to find `}`, then checks after `}`.
+///    This fixed restforce (~24 FPs) and similar patterns.
+///
+/// **Remaining FNs (~54):** Likely include:
+/// 1. "parent hash key" relative messages (~5) — RuboCop feature not implemented.
+/// 2. Other edge cases in config resolution / tab width handling.
 pub struct FirstArrayElementIndentation;
 
 /// Describes what the expected indentation is relative to.
@@ -41,24 +60,38 @@ enum IndentBaseType {
     StartOfLine,
 }
 
+/// Result of scanning backwards from `[` to find an enclosing `(`.
+struct ParenScanResult {
+    /// Column of the unmatched `(`, if found.
+    paren_col: Option<usize>,
+    /// Whether there is an unmatched `{` between the `(` and `[`,
+    /// indicating the array is nested inside a hash literal.
+    has_unmatched_brace: bool,
+}
+
 /// Scan backwards from `bracket_col` on `line_bytes` to find an unmatched `(`
-/// that contains this array. Returns `Some(column)` if found, `None` otherwise.
+/// that contains this array. Also tracks whether there's an unmatched `{`
+/// between `(` and `[`, indicating hash nesting.
 ///
 /// This tracks balanced parens, brackets, and braces. Unmatched `{` or `[`
 /// are allowed — the array may be nested inside a hash literal or another
 /// array that is itself inside method call parens (e.g.,
 /// `method({ key: [...] })`). Only an unmatched `(` is returned.
-fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> Option<usize> {
+fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> ParenScanResult {
     let end = bracket_col.min(line_bytes.len());
     let mut paren_depth: i32 = 0;
     let mut bracket_depth: i32 = 0;
     let mut brace_depth: i32 = 0;
+    let mut has_unmatched_brace = false;
     for i in (0..end).rev() {
         match line_bytes[i] {
             b')' => paren_depth += 1,
             b'(' => {
                 if paren_depth == 0 {
-                    return Some(i);
+                    return ParenScanResult {
+                        paren_col: Some(i),
+                        has_unmatched_brace,
+                    };
                 }
                 paren_depth -= 1;
             }
@@ -72,12 +105,17 @@ fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> Option<usiz
             b'{' => {
                 if brace_depth > 0 {
                     brace_depth -= 1;
+                } else {
+                    has_unmatched_brace = true;
                 }
             }
             _ => {}
         }
     }
-    None
+    ParenScanResult {
+        paren_col: None,
+        has_unmatched_brace,
+    }
 }
 
 /// Check if the `[` is immediately preceded by a `%` operator (string formatting).
@@ -105,12 +143,65 @@ fn is_preceded_by_percent_operator(line_bytes: &[u8], bracket_col: usize) -> boo
 /// Returns `false` if `]` is followed by `.`, `+`, `-`, `*`, etc. indicating
 /// the array is part of a larger expression.
 ///
-/// When the array is inside a hash literal, this also skips past the closing
-/// `}` and any trailing `)` to check if the hash itself is chained (e.g.,
-/// `{ key: [...] }.to_json`).
-fn is_direct_argument(source_bytes: &[u8], closing_end_offset: usize) -> bool {
+/// When `inside_hash` is true (the array is inside a hash literal within
+/// method parens), this scans forward from `]` to find the matching `}`
+/// of the enclosing hash, then checks what follows that `}`.
+fn is_direct_argument(source_bytes: &[u8], closing_end_offset: usize, inside_hash: bool) -> bool {
     let mut i = closing_end_offset;
     let len = source_bytes.len();
+
+    if inside_hash {
+        // The array is inside a hash literal. We need to find the enclosing
+        // hash's closing `}` and check what follows it. Scan forward from
+        // after `]`, tracking brace/bracket/paren depth to find the matching `}`.
+        let mut brace_depth: i32 = 1; // we're inside one unmatched `{`
+        let mut bracket_depth: i32 = 0;
+        let mut paren_depth: i32 = 0;
+        while i < len && brace_depth > 0 {
+            match source_bytes[i] {
+                b'{' => brace_depth += 1,
+                b'}' => brace_depth -= 1,
+                b'[' => bracket_depth += 1,
+                b']' => bracket_depth -= 1,
+                b'(' => paren_depth += 1,
+                b')' => paren_depth -= 1,
+                b'#' => {
+                    // Skip to end of line (comment)
+                    while i < len && source_bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'\'' | b'"' => {
+                    // Skip past string literals (simple — no interpolation tracking)
+                    let quote = source_bytes[i];
+                    i += 1;
+                    while i < len && source_bytes[i] != quote {
+                        if source_bytes[i] == b'\\' {
+                            i += 1; // skip escaped char
+                        }
+                        i += 1;
+                    }
+                    // i now points at closing quote
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let _ = (bracket_depth, paren_depth); // suppress unused warnings
+        // i is now past the `}`. Check what follows.
+        while i < len && (source_bytes[i] == b' ' || source_bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i >= len {
+            return true;
+        }
+        return !matches!(
+            source_bytes[i],
+            b'.' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^'
+        );
+    }
+
     // Skip whitespace (but not newlines)
     while i < len && (source_bytes[i] == b' ' || source_bytes[i] == b'\t') {
         i += 1;
@@ -192,7 +283,7 @@ impl Cop for FirstArrayElementIndentation {
 
         // Get the indentation of the line where `[` appears
         let open_line_bytes = source.lines().nth(open_line - 1).unwrap_or(b"");
-        let open_line_indent = indentation_of(open_line_bytes);
+        let open_line_indent = first_non_whitespace_column(open_line_bytes);
         let (_, open_col) = source.offset_to_line_col(opening_loc.start_offset());
 
         // Compute the indent base column (before adding width) and its type.
@@ -208,7 +299,8 @@ impl Cop for FirstArrayElementIndentation {
                     .map(|loc| loc.end_offset())
                     .unwrap_or(0);
 
-                if let Some(paren_col) = find_left_paren_on_line(open_line_bytes, open_col) {
+                let paren_scan = find_left_paren_on_line(open_line_bytes, open_col);
+                if let Some(paren_col) = paren_scan.paren_col {
                     // If the `[` is on the same line as a method call's `(`,
                     // indent relative to the position after `(`, unless:
                     // - The `[` is preceded by a `%` operator (e.g.,
@@ -218,7 +310,11 @@ impl Cop for FirstArrayElementIndentation {
                     //   expression (e.g., `[...].join()`, `{ key: [...] }.to_json`)
                     let use_paren_relative =
                         !is_preceded_by_percent_operator(open_line_bytes, open_col)
-                            && is_direct_argument(source.as_bytes(), closing_end);
+                            && is_direct_argument(
+                                source.as_bytes(),
+                                closing_end,
+                                paren_scan.has_unmatched_brace,
+                            );
                     if use_paren_relative {
                         (
                             paren_col + 1,
@@ -267,7 +363,15 @@ impl Cop for FirstArrayElementIndentation {
                 .iter()
                 .all(|&b| b == b' ' || b == b'\t');
 
-            if only_whitespace_before && close_col != indent_base {
+            // For StartOfLine, compare using first_non_whitespace_column instead
+            // of character column — this matches RuboCop's `source_line =~ /\S/`
+            // and handles tab-indented files correctly (tabs count as 1 byte).
+            let effective_close_col = match base_type {
+                IndentBaseType::StartOfLine => first_non_whitespace_column(close_line_bytes),
+                _ => close_col,
+            };
+
+            if only_whitespace_before && effective_close_col != indent_base {
                 let msg = match base_type {
                     IndentBaseType::LeftBracket => {
                         "Indent the right bracket the same as the left bracket.".to_string()
@@ -532,6 +636,53 @@ mod tests {
         assert!(
             diags.is_empty(),
             "array in hash chained with .to_json should use line-relative: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tab_indented_closing_bracket_not_flagged() {
+        // Tab-indented file: closing bracket at same tab level as opening line.
+        // The element check may still fire (tabs don't match IndentationWidth),
+        // but the closing bracket at the same tab level should NOT be flagged.
+        let src = b"\tauthors [\n\t\t\"name\",\n\t]\n";
+        let diags = run_cop_full(&FirstArrayElementIndentation, src);
+        let bracket_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("right bracket"))
+            .collect();
+        assert!(
+            bracket_diags.is_empty(),
+            "tab-indented closing bracket at same level should not be flagged: {:?}",
+            bracket_diags
+        );
+    }
+
+    #[test]
+    fn tab_indented_nested_closing_bracket_not_flagged() {
+        // Deeply tab-indented: 2 tabs for opening, 3 tabs for element, 2 tabs for bracket.
+        // Same as above — element check may fire, but bracket check should not.
+        let src = b"\t\tmatches [\n\t\t\t{ :text => \"test\" },\n\t\t]\n";
+        let diags = run_cop_full(&FirstArrayElementIndentation, src);
+        let bracket_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("right bracket"))
+            .collect();
+        assert!(
+            bracket_diags.is_empty(),
+            "nested tab-indented closing bracket should not be flagged: {:?}",
+            bracket_diags
+        );
+    }
+
+    #[test]
+    fn array_inside_chained_hash_in_method_call() {
+        // { requests: [...], flag: true }.to_json -- the hash is chained with .to_json
+        let src = b"  client.\n    with(endpoint, { requests: [\n      { method: 'POST' }\n    ], flag: true }.to_json).\n    and_return(response)\n";
+        let diags = run_cop_full(&FirstArrayElementIndentation, src);
+        assert!(
+            diags.is_empty(),
+            "array inside chained hash should use line-relative indent: {:?}",
             diags
         );
     }

@@ -57,3 +57,16 @@ gc.draw('text %d,%d %s' % [
   image.draw('rectangle %d,%d %d,%d' % [
     0, 0, width, height
   ])
+
+# Array inside hash arg that is chained with .to_json (line-relative)
+  client.should_receive(:api_post).
+    with(endpoint, { requests: [
+      { method: 'POST', url: 'v1.0/objects/Foo' }
+    ], flag: true }.to_json).
+    and_return(response)
+
+# Another chained hash pattern
+foo(status: 200, body: { responses: [
+  { code: 200 },
+  { code: 201 }
+], total: 2 }.to_json)
