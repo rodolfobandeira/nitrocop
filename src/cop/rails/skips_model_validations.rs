@@ -41,6 +41,19 @@ use crate::parse::source::SourceFile;
 /// (double-colon separator) were not being honored — nitrocop only recognized `Rails/SkipsModelValidations`
 /// (slash separator). Fixed in `src/parse/directives.rs` by normalizing `::` to `/` when
 /// parsing disable directives. This is a general fix affecting all cops.
+///
+/// ## Investigation (2026-03-16)
+///
+/// **FN root cause (2 FN):** `good_insert?` exemption logic was too broad for hash literals
+/// with non-symbol keys. RuboCop's `good_insert?` NodePattern uses `(pair (sym !{:returning :unique_by}) _)`,
+/// which requires the hash key to be a SYMBOL. Our `hash_has_non_ar_key` incorrectly treated
+/// non-symbol keys (e.g. string keys `"foo" => val`) as "good" (non-AR) inserts, returning
+/// `true` from the `else` branch. Fixed by removing that `else` branch — non-symbol keys
+/// simply don't match the pattern, so they don't make the insert exempt.
+///
+/// Examples that were incorrectly exempted:
+/// - `array.insert(1, { "zero" => "zero2" })` — hash with string key
+/// - `obj.insert(6, 'search' => {...}, 'visible' => false)` — hash-rocket string-keyed args
 pub struct SkipsModelValidations;
 
 const SKIP_METHODS: &[&[u8]] = &[
@@ -218,7 +231,11 @@ impl Cop for SkipsModelValidations {
     }
 }
 
-/// Check if a hash has at least one key that is NOT :returning or :unique_by.
+/// Check if a hash has at least one key that is a symbol NOT equal to :returning or :unique_by.
+///
+/// RuboCop's `good_insert?` pattern uses `(pair (sym !{:returning :unique_by}) _)`, which
+/// requires the key to be a SYMBOL. Non-symbol keys (e.g. string keys `"foo" => val`) do NOT
+/// match, so they don't make the insert "good" — RuboCop still flags the call.
 fn hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a>>) -> bool {
     for elem in elements {
         if let Some(assoc) = elem.as_assoc_node() {
@@ -227,16 +244,18 @@ fn hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a>>)
                 if name != b"returning" && name != b"unique_by" {
                     return true;
                 }
-            } else {
-                // Non-symbol key — not an AR-specific key
-                return true;
             }
+            // Non-symbol key — does NOT count as a non-AR key per RuboCop's pattern
         }
     }
     false
 }
 
-/// Check if a keyword hash has at least one key that is NOT :returning or :unique_by.
+/// Check if a keyword hash has at least one key that is a symbol NOT equal to :returning or :unique_by.
+///
+/// RuboCop's `good_insert?` pattern uses `(pair (sym !{:returning :unique_by}) _)`, which
+/// requires the key to be a SYMBOL. Non-symbol keys (e.g. string keys `'foo' => val` written
+/// as hash-rocket args) do NOT match, so they don't exempt the insert from being flagged.
 fn kw_hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a>>) -> bool {
     for elem in elements {
         if let Some(assoc) = elem.as_assoc_node() {
@@ -245,10 +264,8 @@ fn kw_hash_has_non_ar_key<'a>(elements: impl Iterator<Item = ruby_prism::Node<'a
                 if name != b"returning" && name != b"unique_by" {
                     return true;
                 }
-            } else {
-                // Non-symbol key — not an AR-specific key
-                return true;
             }
+            // Non-symbol key — does NOT count as a non-AR key per RuboCop's pattern
         }
     }
     false

@@ -32,3 +32,9 @@ User.touch_all
 # Safe navigation calls are also flagged
 user&.update_attribute(:website, 'example.com')
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/SkipsModelValidations: Avoid using `update_attribute` because it skips validations.
+# insert with hash literal with string keys is NOT exempted (good_insert? requires symbol keys)
+array.insert(1, { "zero" => "zero2" })
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/SkipsModelValidations: Avoid using `insert` because it skips validations.
+# insert with hash-rocket string-keyed args as second arg is also flagged
+obj.insert(6, 'search' => { 'regex' => false }, 'visible' => false)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/SkipsModelValidations: Avoid using `insert` because it skips validations.
