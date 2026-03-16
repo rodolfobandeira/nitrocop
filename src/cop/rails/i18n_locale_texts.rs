@@ -5,24 +5,21 @@ use crate::parse::source::SourceFile;
 
 /// Rails/I18nLocaleTexts: Enforces use of I18n and locale files instead of locale-specific strings.
 ///
-/// ## Investigation (2026-03-15)
+/// ## Investigation (2026-03-15, updated 2026-03-16)
 ///
-/// **FP root cause (3 FPs):** All from `flash[:error] = "string"` in the Autolab repo where
-/// `flash` is a local variable (assigned earlier in the method). RuboCop's pattern only matches
-/// `(send nil? :flash)` (method call), NOT `(lvar :flash)` (local variable read). Nitrocop was
-/// incorrectly matching local variable reads of `flash` in `is_flash_receiver`.
-/// **Fix:** Remove local variable `flash` handling from `is_flash_receiver`.
+/// **FP root cause (3 FPs, fixed 2026-03-15):** All from `flash[:error] = "string"` in the
+/// Autolab repo where `flash` is a local variable. RuboCop's pattern only matches
+/// `(send nil? :flash)` (method call), NOT `(lvar :flash)`. Fixed by removing local variable
+/// `flash` handling from `is_flash_receiver`.
 ///
-/// **FN root cause (8 FNs):** RuboCop uses `def_node_search` which recursively searches the
-/// entire AST subtree of call arguments for matching pairs. Nitrocop only searched at specific
-/// nesting depths. Missed patterns:
-/// - `validates :title, message: "text"` (top-level `:message` keyword, not nested in hash)
-/// - `redirect_to url(notice: "text")` (`:notice`/`:alert` nested inside URL helper call args)
-/// - `redirect_to path, flash: { notice: "text" }` (`:notice`/`:alert` inside `flash:` hash)
-/// - `mail({ subject: "text" }.merge!(hash))` (`:subject` in hash literal arg, not keyword arg)
+/// **FN root cause (8 FNs, fixed 2026-03-15):** Recursive AST search was missing several
+/// nesting patterns. Fixed by implementing `find_pairs_recursive`.
 ///
-/// **Fix:** Implement recursive AST search for `(pair (sym :key) str)` patterns,
-/// matching RuboCop's `def_node_search` behavior.
+/// **FN root cause (1 FN, fixed 2026-03-16):** `redirect_to` with `**` splatted ternary:
+/// `redirect_to path, **(cond ? { alert: "..." } : { warning: "..." })`. The `**` creates
+/// `AssocSplatNode` -> `ParenthesesNode` -> `StatementsNode` -> `IfNode` -> `ElseNode` ->
+/// `HashNode`. Extended `find_pairs_recursive` to handle `AssocSplatNode`, `IfNode`,
+/// `ElseNode`, `ParenthesesNode`, and `StatementsNode`.
 pub struct I18nLocaleTexts;
 
 const MSG: &str = "Move locale texts to the locale files in the `config/locales` directory.";
@@ -85,6 +82,53 @@ fn find_pairs_recursive<'a>(
     if let Some(args) = node.as_arguments_node() {
         for arg in args.arguments().iter() {
             find_pairs_recursive(&arg, key, results);
+        }
+        return;
+    }
+
+    // AssocSplatNode (**expr): recurse into the splatted expression
+    if let Some(splat) = node.as_assoc_splat_node() {
+        if let Some(value) = splat.value() {
+            find_pairs_recursive(&value, key, results);
+        }
+        return;
+    }
+
+    // IfNode (ternary `cond ? then : else`): recurse into both branches
+    if let Some(if_node) = node.as_if_node() {
+        if let Some(stmts) = if_node.statements() {
+            for stmt in stmts.body().iter() {
+                find_pairs_recursive(&stmt, key, results);
+            }
+        }
+        if let Some(subsequent) = if_node.subsequent() {
+            find_pairs_recursive(&subsequent, key, results);
+        }
+        return;
+    }
+
+    // ElseNode: recurse into statements
+    if let Some(else_node) = node.as_else_node() {
+        if let Some(stmts) = else_node.statements() {
+            for stmt in stmts.body().iter() {
+                find_pairs_recursive(&stmt, key, results);
+            }
+        }
+        return;
+    }
+
+    // ParenthesesNode: recurse into body
+    if let Some(parens) = node.as_parentheses_node() {
+        if let Some(body) = parens.body() {
+            find_pairs_recursive(&body, key, results);
+        }
+        return;
+    }
+
+    // StatementsNode: recurse into each statement
+    if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            find_pairs_recursive(&stmt, key, results);
         }
     }
 }

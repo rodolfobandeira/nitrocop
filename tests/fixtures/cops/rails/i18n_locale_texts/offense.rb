@@ -32,3 +32,7 @@ mail({ subject: "The first email on new API!" }.merge!(hash))
 # FN fix: redirect_to with explicit hash containing flash alert
 redirect_to [:admin, @edition], { flash: { alert: "This is historic content" } }
                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/I18nLocaleTexts: Move locale texts to the locale files in the `config/locales` directory.
+
+# FN fix: redirect_to with splatted ternary containing alert
+redirect_to root_path, **(condition ? { warning: "Text" } : { alert: "Other" })
+                                                                     ^^^^^^^ Rails/I18nLocaleTexts: Move locale texts to the locale files in the `config/locales` directory.
