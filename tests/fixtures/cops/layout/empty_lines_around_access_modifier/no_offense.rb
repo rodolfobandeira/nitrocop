@@ -216,3 +216,15 @@ end
 it "returns true for own private methods" do
   Decorator.class_eval{private; def hello_world; end}
 end
+
+# `private` inside a class_eval block wrapped in `and` — RuboCop's
+# `in_macro_scope?` does not recognize `and`/`or` as valid wrappers,
+# so `bare_access_modifier?` returns false and the cop does not fire.
+defined?(PTY) and defined?(IO.console) and TestIO_Console.class_eval do
+  def test_something
+  end
+
+  private
+  def helper
+  end
+end

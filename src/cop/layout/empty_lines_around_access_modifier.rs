@@ -68,6 +68,14 @@ use crate::parse::source::SourceFile;
 ///   fixed locally for this cop.
 /// - `check-cop.py --verbose --rerun` reports `Missing=0`, with excess
 ///   offense total within existing file-drop-noise from parser-crash repos.
+///
+/// 7. FP from jruby: `defined?(PTY) and ... and TestIO_Console.class_eval do`
+///    wraps the block in an `AndNode`. RuboCop's `in_macro_scope?` only
+///    recognizes `kwbegin`, `begin`, `any_block`, and `if` as valid wrapper
+///    nodes — `and`/`or` break the macro-scope chain, so
+///    `bare_access_modifier?` returns false and the cop doesn't fire.
+///    Fix: push `NonClass` scope for `AndNode`/`OrNode` so blocks nested
+///    inside boolean combinators are not treated as macro scopes (2026-03-16).
 pub struct EmptyLinesAroundAccessModifier;
 
 const ACCESS_MODIFIERS: &[&[u8]] = &[b"private", b"protected", b"public", b"module_function"];
@@ -481,6 +489,18 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
         if let Some(block_arg) = node.block().and_then(|b| b.as_block_argument_node()) {
             self.visit_block_argument_node(&block_arg);
         }
+    }
+
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+        self.push_non_class_scope();
+        ruby_prism::visit_and_node(self, node);
+        self.pop_scope();
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        self.push_non_class_scope();
+        ruby_prism::visit_or_node(self, node);
+        self.pop_scope();
     }
 
     visit_write_node_as_non_class_scope!(
