@@ -4,7 +4,36 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/MatchRoute - suggests using specific HTTP method instead of `match`.
+///
+/// Investigation findings:
+/// - FN root cause: single-element arrays like `via: [:get]` were treated as
+///   multi-method arrays and skipped. The cop only handled bare symbol values
+///   (`via: :get`) but not single-element array values (`via: [:get]`).
+/// - Hashrocket syntax (`:via => [:get]`) works correctly via `keyword_arg_value`
+///   which already handles SymbolNode keys in both KeywordHashNode and HashNode.
+/// - Fixed by extracting the symbol from single-element arrays and matching
+///   it against known HTTP methods, same as the bare symbol case.
 pub struct MatchRoute;
+
+/// Check if a symbol's unescaped bytes match a known HTTP method.
+/// Returns the method name as a static str, or None.
+fn http_method_from_symbol(sym: &ruby_prism::SymbolNode<'_>) -> Option<&'static str> {
+    let unescaped = sym.unescaped();
+    if unescaped == b"get" {
+        Some("get")
+    } else if unescaped == b"post" {
+        Some("post")
+    } else if unescaped == b"put" {
+        Some("put")
+    } else if unescaped == b"patch" {
+        Some("patch")
+    } else if unescaped == b"delete" {
+        Some("delete")
+    } else {
+        None
+    }
+}
 
 impl Cop for MatchRoute {
     fn name(&self) -> &'static str {
@@ -42,7 +71,7 @@ impl Cop for MatchRoute {
             return;
         }
 
-        // Check for `via:` option
+        // Check for `via:` option (handles both `via: :get` and `:via => :get` syntax)
         let via_value = keyword_arg_value(&call, b"via");
 
         let http_method = match via_value {
@@ -51,27 +80,31 @@ impl Cop for MatchRoute {
                 "get"
             }
             Some(ref val) => {
-                // via: :get (single symbol)
+                // via: :get (single symbol) or :via => :get (hashrocket)
                 if let Some(sym) = val.as_symbol_node() {
-                    let unescaped = sym.unescaped();
-                    if unescaped == b"get" {
-                        "get"
-                    } else if unescaped == b"post" {
-                        "post"
-                    } else if unescaped == b"put" {
-                        "put"
-                    } else if unescaped == b"patch" {
-                        "patch"
-                    } else if unescaped == b"delete" {
-                        "delete"
-                    } else if unescaped == b"all" {
+                    if sym.unescaped() == b"all" {
                         return; // via: :all is fine
+                    }
+                    match http_method_from_symbol(&sym) {
+                        Some(m) => m,
+                        None => return,
+                    }
+                } else if let Some(arr) = val.as_array_node() {
+                    // via: [:get] - single-element array, extract the method
+                    // via: [:get, :post] - multiple methods is fine
+                    let elements: Vec<_> = arr.elements().iter().collect();
+                    if elements.len() == 1 {
+                        if let Some(sym) = elements[0].as_symbol_node() {
+                            match http_method_from_symbol(&sym) {
+                                Some(m) => m,
+                                None => return,
+                            }
+                        } else {
+                            return;
+                        }
                     } else {
                         return;
                     }
-                } else if val.as_array_node().is_some() {
-                    // via: [:get, :post] - multiple methods is fine
-                    return;
                 } else {
                     return;
                 }
