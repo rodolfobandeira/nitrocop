@@ -245,26 +245,6 @@ class TestClass
   end
 end
 
-# Multiline regex assignment inside a method body
-def parse
-  pattern = /
-    \A
-    (?<key>.+)
-    \z
-  /x
-  input.match(pattern)
-end
-
-# Multiline %w array assignment inside a method
-def allowed_names
-  names = %w[
-    alpha
-    beta
-    gamma
-  ]
-  names.freeze
-end
-
 # Assignment with if on RHS inside a nested class/method
 class Config
   def resolve

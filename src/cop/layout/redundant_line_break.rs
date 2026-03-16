@@ -48,9 +48,6 @@ use crate::parse::source::SourceFile;
 ///   these nodes, so multiline strings/regexps/arrays nested inside methods or
 ///   conditionals were never collected as unsafe ranges. This caused ~thousands of FPs
 ///   in repos like slim-template (315 FPs from multiline %q{} strings inside def bodies).
-/// - Added `RegularExpressionNode` and `InterpolatedRegularExpressionNode` to unsafe ranges
-///   (multiline `/x` regexps should not be collapsed).
-/// - Added multiline `%w`/`%W`/`%i`/`%I` array literals to unsafe ranges.
 /// - Added all missing operator/or/and write node visitors for instance variables,
 ///   class variables, global variables, constants, and constant paths (e.g.,
 ///   `@count += items.size`, `@@total += n`, `$var ||= compute`).
@@ -144,6 +141,16 @@ impl Cop for RedundantLineBreak {
 }
 
 /// Collects byte ranges of unsafe-to-split constructs.
+///
+/// Matches RuboCop's `safe_to_split?` from `CheckSingleLineSuitability`:
+///   node.each_descendant(:if, :case, :kwbegin, :any_def).none? &&
+///     node.each_descendant(:dstr, :str).none? { |n| n.heredoc? || n.value.include?("\n") } &&
+///     node.each_descendant(:begin, :sym).none? { |b| !b.single_line? }
+///
+/// Notably, RuboCop does NOT check for `:regexp` or array literals (`%w`, `%i`)
+/// in `safe_to_split?`. Even though collapsing a multiline `/x` regex or `%w`
+/// array changes semantics, RuboCop still flags them. We match that behavior
+/// for corpus conformance.
 struct UnsafeRangeCollector {
     /// (start_offset, end_offset) of nodes that make their parent unsafe to merge.
     ranges: Vec<(usize, usize)>,
@@ -238,48 +245,6 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
             let loc = node.location();
             self.ranges.push((loc.start_offset(), loc.end_offset()));
         }
-    }
-
-    /// Multiline regular expressions — RuboCop doesn't list `:regexp` in
-    /// `safe_to_split?` but collapsing a multiline `/x` regex changes semantics.
-    /// Prism uses `RegularExpressionNode` for non-interpolated and
-    /// `InterpolatedRegularExpressionNode` for interpolated regexps.
-    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
-        let content = node.location().as_slice();
-        if content.contains(&b'\n') {
-            let loc = node.location();
-            self.ranges.push((loc.start_offset(), loc.end_offset()));
-        }
-    }
-
-    fn visit_interpolated_regular_expression_node(
-        &mut self,
-        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
-    ) {
-        let content = node.location().as_slice();
-        if content.contains(&b'\n') {
-            let loc = node.location();
-            self.ranges.push((loc.start_offset(), loc.end_offset()));
-        }
-        ruby_prism::visit_interpolated_regular_expression_node(self, node);
-    }
-
-    /// Multiline `%w[]`, `%i[]`, and other array literals.
-    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
-        // Only mark as unsafe if it's a `%w`/`%W`/`%i`/`%I` literal (which has
-        // an opening delimiter) and is multiline. Regular `[...]` arrays are
-        // fine to split.
-        if let Some(open) = node.opening_loc() {
-            let open_slice = open.as_slice();
-            if open_slice.starts_with(b"%") {
-                let content = node.location().as_slice();
-                if content.contains(&b'\n') {
-                    let loc = node.location();
-                    self.ranges.push((loc.start_offset(), loc.end_offset()));
-                }
-            }
-        }
-        ruby_prism::visit_array_node(self, node);
     }
 
     /// Multiline parenthesized groups `(...)` — maps to `:begin` in Parser AST.
