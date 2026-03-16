@@ -16,17 +16,37 @@
 /// `hash[key] = val` via `CallNode`), and compound setter/index assignments
 /// (`obj.x ||= val`, `hash[key] += val` via `Call*WriteNode`/`Index*WriteNode`). All added.
 ///
-/// ## Investigation findings (2026-03-16)
+/// ## Investigation findings (2026-03-16, round 2)
+///
+/// **FP root cause (7 FPs):** The previous chained-assignment fix used line indentation
+/// (first non-whitespace column) as the base for all chained assignments. RuboCop's
+/// `leftmost_multiple_assignment` goes only ONE level up — it uses the IMMEDIATE PARENT
+/// assignment's column, not the outermost. For deeply aligned chains like
+/// `@a = @b = @c = \n                @d = nil` (where `@d` is at `@b`'s column + 2),
+/// using line indentation produced expected=2 instead of the correct `@b`'s column + 2.
+/// Fixed by making `find_chained_assignment_base` return the column of the variable
+/// immediately preceding the last `=` sign before the current name, rather than line indent.
+///
+/// **FN root cause (4 FNs):** Same root cause reversed. For chains at shallow indent like
+/// `@a = @b = @c = \n  @d = nil`, the line-indent approach gave expected=2 which matched,
+/// but `@b`'s column + 2 is much larger → should be an offense.
+///
+/// **i18n-tasks FP fix:** Added paren/bracket depth tracking between the preceding `=` and
+/// the current name_offset. `keys = ((@cache ||= {})[key] ||= scanner(...))` has unbalanced
+/// `(` between `keys =` and the inner `||=`, so it's not a direct chain — returns None.
+///
+/// **||= / &&= exclusion:** The preceding `=` scanner now rejects `||=` and `&&=` operators
+/// (previous char is `|` or `&`), since compound operators are not chained assignments.
+///
+/// ## Investigation findings (2026-03-16, round 1)
 ///
 /// **FP root cause (25 FPs):** Chained assignments like `a = b = \n value` caused the inner
 /// write node to use its own LHS column (`b`'s position) as the indentation base, producing
 /// false positives when the value was correctly indented relative to the outermost assignment.
 /// RuboCop uses `leftmost_multiple_assignment` to walk up the parent chain to the outermost
 /// assignment on the same line. Without parent pointers in Prism, we detect this by scanning
-/// the source line before the LHS for a preceding `=` operator. When found, we use the line's
-/// indentation (first non-whitespace column) as the base instead of the inner LHS column.
-/// This covers chained simple writes (`a = b =`), chained setter calls (`x = obj[key] =`),
-/// and chained compound assignments (`result = cache[key] ||=`).
+/// the source line before the LHS for a preceding `=` operator. Initial fix used line
+/// indentation as base (see round 2 for refinement).
 ///
 /// ## Investigation findings (2026-03-15)
 ///
@@ -60,8 +80,11 @@ pub struct AssignmentIndentation;
 impl AssignmentIndentation {
     /// Check if there is an assignment operator (`=`) on the same line before `name_offset`,
     /// indicating this write is the RHS of a chained assignment (e.g., `a = b = \n val`).
-    /// Returns `Some(col)` with the column of the first non-whitespace character on the line
-    /// (i.e., the outermost assignment's indentation) if a preceding `=` is found.
+    /// Returns `Some(col)` with the column of the variable name immediately preceding that `=`,
+    /// matching RuboCop's `leftmost_multiple_assignment` which goes one level up.
+    ///
+    /// If there are unbalanced opening parens/brackets between the `=` and `name_offset`,
+    /// we are inside a nested expression (not a direct chain), so returns `None`.
     fn find_chained_assignment_base(source: &SourceFile, name_offset: usize) -> Option<usize> {
         let bytes = source.as_bytes();
         // Find the start of the line containing name_offset
@@ -76,9 +99,10 @@ impl AssignmentIndentation {
             return None;
         }
 
-        // Scan prefix for `=` that is part of an assignment (not ==, !=, ===, <=>, >=, <=)
+        // Scan prefix for the LAST `=` that is part of an assignment (not ==, !=, ===, <=>, >=, <=)
+        // We want the `=` closest to (immediately before) name_offset.
+        let mut last_eq_pos: Option<usize> = None;
         let mut i = 0;
-        let mut found_eq = false;
         while i < prefix.len() {
             let b = prefix[i];
             if b == b'=' {
@@ -99,8 +123,14 @@ impl AssignmentIndentation {
                     i += 1;
                     continue;
                 }
-                found_eq = true;
-                break;
+                // Check it's not ||= or &&= (compound operator, not simple chain)
+                if prev == Some(b'|') || prev == Some(b'&') {
+                    i += 1;
+                    continue;
+                }
+                last_eq_pos = Some(i);
+                i += 1;
+                continue;
             }
             // Skip string literals (single and double quoted)
             if b == b'"' || b == b'\'' {
@@ -118,16 +148,81 @@ impl AssignmentIndentation {
             i += 1;
         }
 
-        if !found_eq {
+        let eq_pos = last_eq_pos?;
+
+        // Check for unbalanced opening parens/brackets between the `=` and name_offset.
+        // If there are more `(` / `[` than `)` / `]`, we're inside a nested expression.
+        let after_eq = &prefix[eq_pos + 1..];
+        let mut depth: i32 = 0;
+        for &b in after_eq {
+            match b {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth > 0 {
             return None;
         }
 
-        // Return the column of the first non-whitespace character on the line
-        let indent = prefix
-            .iter()
-            .take_while(|&&b| b == b' ' || b == b'\t')
-            .count();
-        Some(indent)
+        // Find the variable name that precedes the `=` sign.
+        // Scan backwards from eq_pos to find the start of the token (variable name).
+        let mut end = eq_pos;
+        // Skip whitespace before `=`
+        while end > 0 && (prefix[end - 1] == b' ' || prefix[end - 1] == b'\t') {
+            end -= 1;
+        }
+        if end == 0 {
+            return None;
+        }
+        // Now end points just past the last char of the variable name.
+        // Scan backwards to find the start of the token.
+        let token_end = end;
+        // Handle closing brackets: `)` or `]` means the preceding expression
+        // ends with a method call or indexing — scan back to find the matching opener,
+        // then continue to find the start of the receiver.
+        let mut pos = token_end;
+        if pos > 0 && (prefix[pos - 1] == b')' || prefix[pos - 1] == b']') {
+            let close = prefix[pos - 1];
+            let open = if close == b')' { b'(' } else { b'[' };
+            let mut bracket_depth = 1;
+            pos -= 1;
+            while pos > 0 && bracket_depth > 0 {
+                pos -= 1;
+                if prefix[pos] == close {
+                    bracket_depth += 1;
+                } else if prefix[pos] == open {
+                    bracket_depth -= 1;
+                }
+            }
+            // pos now points to the opening bracket; continue scanning left
+            // to find the start of the receiver expression.
+        }
+        // Scan backwards over identifier characters, dots, colons, @, $
+        while pos > 0 {
+            let c = prefix[pos - 1];
+            if c.is_ascii_alphanumeric()
+                || c == b'_'
+                || c == b'.'
+                || c == b':'
+                || c == b'@'
+                || c == b'$'
+                || c == b'['
+                || c == b']'
+                || c == b'('
+                || c == b')'
+            {
+                pos -= 1;
+            } else {
+                break;
+            }
+        }
+        if pos >= token_end {
+            return None;
+        }
+        // pos is the start of the preceding variable/expression in the prefix.
+        // Its column = pos (since prefix starts at line_start, column = pos).
+        Some(pos)
     }
 
     fn check_write(

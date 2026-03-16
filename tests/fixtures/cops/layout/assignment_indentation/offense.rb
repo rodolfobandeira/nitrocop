@@ -46,3 +46,12 @@ obj.attr ||=
 items[index] +=
     extra_count
     ^ Layout/AssignmentIndentation: Indent the first line of the right-hand-side of a multi-line assignment.
+@options = @handler = @algorithms = @connection = @host_key =
+  @packet_data = @shared_secret = nil
+  ^ Layout/AssignmentIndentation: Indent the first line of the right-hand-side of a multi-line assignment.
+committed = init = max = used = peak_committed = peak_init = peak_max =
+  peak_used = last_committed = last_init = last_max = last_used = 0.0
+  ^ Layout/AssignmentIndentation: Indent the first line of the right-hand-side of a multi-line assignment.
+foo = bar =
+baz = ''
+^^^^^^^^ Layout/AssignmentIndentation: Indent the first line of the right-hand-side of a multi-line assignment.

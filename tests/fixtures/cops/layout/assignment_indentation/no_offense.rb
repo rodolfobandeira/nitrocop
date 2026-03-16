@@ -98,3 +98,17 @@ rules = LOAD_RULES_CACHE[self.class.rules_cache_key] ||=
   self.class.files.each_with_object({}) do |filename, hash|
     hash[filename] = true
   end
+
+# Chained assignments with deep alignment (aligned to preceding var + width)
+@cipher = @algorithms = @connection = @host_key =
+                          @packet_data = @shared_secret = nil
+
+@options = @handler = @algorithms = @connection = @host_key =
+                                      @packet_data = @shared_secret = nil
+
+address.first_name = address.last_name = address.phone =
+                       address.company = 'unused'
+
+# Nested index-or-write inside parens — not a chained assignment
+keys = ((@cached_keys ||= {})[strict?(strict)] ||=
+          scanner(strict: strict).keys.freeze)
