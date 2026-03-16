@@ -5,3 +5,5 @@ foo.select { |x| x > 1 }
   puts x
 end
 x = {a: 1}
+config.filter_sensitive_data('<SECRET>') 							{ ENV['SECRET'] }
+items.each	{ |x| puts x }

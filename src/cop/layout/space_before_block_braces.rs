@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Layout/SpaceBeforeBlockBraces
+///
+/// ## Investigation findings
+/// - **Tab whitespace FPs (17 FPs):** The "space" style check only looked for `b' '`
+///   before `{`, causing false positives when tab characters were used for visual
+///   alignment (e.g., `method_call\t\t\t{ block }`). RuboCop treats any whitespace
+///   as satisfying the "space" requirement. Fixed by also accepting `b'\t'`.
 pub struct SpaceBeforeBlockBraces;
 
 impl Cop for SpaceBeforeBlockBraces {
@@ -76,7 +83,9 @@ impl Cop for SpaceBeforeBlockBraces {
             }
             _ => {
                 // "space" (default)
-                if before > 0 && bytes[before - 1] != b' ' {
+                // Accept any whitespace (space or tab) before the brace.
+                // Tab characters are used for visual alignment in some codebases.
+                if before > 0 && bytes[before - 1] != b' ' && bytes[before - 1] != b'\t' {
                     let (line, column) = source.offset_to_line_col(before);
                     let mut diag = self.diagnostic(
                         source,
