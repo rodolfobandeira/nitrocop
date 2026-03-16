@@ -37,6 +37,17 @@ use ruby_prism::Visit;
 /// The block of `foo` restored `was` (which was true), so `puts` inside the block
 /// incorrectly had `parent_is_call = true` and was skipped. Fixed by always
 /// resetting `parent_is_call = false` when entering block bodies.
+///
+/// ## Corpus investigation (2026-03-16)
+///
+/// FP=0, FN=16. Root cause: `parent_is_call` flag leaked through non-CallNode
+/// argument children into their nested code. When a CallNode's argument was a
+/// LambdaNode, RescueModifierNode, or DefNode, the default visitor recursed into
+/// their bodies without resetting the flag. E.g. `config.x = ->(w) { puts w }`
+/// had `parent_is_call = true` when visiting `puts` inside the lambda body.
+/// Fixed by adding `visit_lambda_node`, `visit_def_node`, and
+/// `visit_rescue_modifier_node` overrides that reset `parent_is_call = false`
+/// before recursing, matching the pattern already used in `rspec/output.rs`.
 pub struct Output;
 
 const MSG: &str = "Do not write to stdout. Use Rails's logger if you want to log.";
@@ -180,6 +191,36 @@ impl<'pr> Visit<'pr> for OutputVisitor<'_> {
             self.visit(&block);
             self.parent_is_call = was_for_block;
         }
+    }
+
+    // Lambda bodies are new statement scopes — reset parent_is_call so that
+    // output calls inside `config.x = ->(w) { puts w }` are not suppressed by the
+    // outer assignment call treating the lambda as its argument.
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_lambda_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    // Method definition bodies are new scopes — reset parent_is_call so that
+    // output calls inside `def foo; puts "x"; end` are detected even when the
+    // def node is nested inside a call's receiver/arguments.
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_def_node(self, node);
+        self.parent_is_call = was;
+    }
+
+    // Rescue modifier expressions are new contexts — reset parent_is_call so
+    // that `expr rescue (puts "msg")` detects the puts even when the rescue
+    // expression is an argument of a call.
+    fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
+        let was = self.parent_is_call;
+        self.parent_is_call = false;
+        ruby_prism::visit_rescue_modifier_node(self, node);
+        self.parent_is_call = was;
     }
 }
 

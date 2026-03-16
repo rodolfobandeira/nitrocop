@@ -44,3 +44,14 @@ formatter = proc do |msg|
   msg.tap { |m| puts m }
                 ^^^^ Rails/Output: Do not write to stdout. Use Rails's logger if you want to log.
 end
+# output call inside a lambda that is an argument of a call
+config.pre_term = ->(worker) { puts "Worker being killed" }
+                               ^^^^ Rails/Output: Do not write to stdout. Use Rails's logger if you want to log.
+# output call inside a lambda do...end block
+task = ->(item) do
+  print item.to_s
+  ^^^^^ Rails/Output: Do not write to stdout. Use Rails's logger if you want to log.
+end
+# output call inside a rescue modifier expression
+value = do_something rescue (puts "fallback")
+                             ^^^^ Rails/Output: Do not write to stdout. Use Rails's logger if you want to log.
