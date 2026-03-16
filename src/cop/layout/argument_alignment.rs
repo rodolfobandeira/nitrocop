@@ -41,6 +41,17 @@ use crate::parse::source::SourceFile;
 /// keyword hash elements in multi-arg calls was only correct for
 /// `with_fixed_indentation` style. For `with_first_argument` (default), expansion
 /// was causing massive FPs. The fix keeps expansion only for fixed indentation.
+///
+/// ## Investigation findings (2026-03-16, second pass)
+///
+/// **FP root cause — block pass promoting single-arg call to multi-arg:**
+/// When a call has a sole keyword hash argument plus a block pass
+/// (e.g., `add_listener(:before => :x, &method(:y))`), the block pass
+/// (`BlockArgumentNode`) was appended to `effective_args` BEFORE the
+/// `len() < 2` gate. This made the cop treat it as a 2-arg call and check
+/// alignment, but RuboCop's `multiple_arguments?` uses `node.arguments`
+/// which excludes block pass nodes. Fix: move the block-arg append AFTER
+/// the minimum-count check, so block pass can't promote a single-arg call.
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -139,16 +150,23 @@ impl Cop for ArgumentAlignment {
             }
         }
 
+        // RuboCop's multiple_arguments? check uses node.arguments (which excludes
+        // block pass). We must check the count BEFORE adding block arguments,
+        // because a block pass should not promote a single-arg call into a
+        // multi-arg call for alignment purposes.
+        if effective_args.len() < 2 {
+            return;
+        }
+
         // Include block argument (&block, &handler, etc.) from call_node.block().
         // In Prism, BlockArgumentNode is on call_node.block(), not in arguments().
+        // Added AFTER the multiple_arguments? gate so that a sole keyword hash arg
+        // with a block pass (e.g., `add_listener(:before => :x, &method(:y))`)
+        // doesn't trigger alignment checking when there's only one real argument.
         if let Some(block) = call_node.block() {
             if block.as_block_argument_node().is_some() {
                 effective_args.push(block);
             }
-        }
-
-        if effective_args.len() < 2 {
-            return;
         }
 
         let first_arg = &effective_args[0];

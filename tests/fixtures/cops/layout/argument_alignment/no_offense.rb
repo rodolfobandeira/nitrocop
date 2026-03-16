@@ -65,3 +65,8 @@ redirect_to root_path, notice: "Success",
 # Multi-arg with trailing keyword hash starting on same line
 create :user, :admin, name: "Admin",
                       role: "superuser"
+
+# Sole keyword hash arg with block pass on continuation — RuboCop expands to pairs only,
+# block pass is not checked for alignment (only 1 pair, nothing to compare)
+h1 = @model.document.add_listener(:before => :new_mirror,
+      &method(:update_grammar))
