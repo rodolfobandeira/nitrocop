@@ -48,3 +48,22 @@ render json: data,
 
 # No-parens command call with single keyword arg (no expansion needed)
 render status: :ok
+
+# Block pass with all args on one line (no multiline span)
+def foo(&)
+  bar(a, b, &)
+end
+
+# Block pass with keyword args each on separate line
+def baz(&)
+  tag.div(
+    id: "area",
+    class: "widget",
+    &
+  )
+end
+
+# Block pass with no-parens keyword args on one line (no multiline span)
+def qux(&)
+  render json: data, status: :ok, &
+end

@@ -39,6 +39,20 @@ use crate::parse::source::SourceFile;
 /// config-layer parity for repo-local exclude handling under explicit `--config`
 /// before re-enabling no-parens coverage here.
 ///
+/// ## Corpus investigation (2026-03-16)
+///
+/// 30 FPs from block pass `&` (forwarded block) on the same line as multiline
+/// keyword arguments. Root cause: In Prism, `call.block()` returns the block
+/// argument separately from `call.arguments()`, but in RuboCop's Parser gem,
+/// `block_pass` is included in `node.arguments`. This caused two issues:
+/// (F1) The trailing KeywordHashNode was incorrectly expanded into individual
+///      elements even when a block arg followed (making it not the effective
+///      last argument), causing FPs on keyword args sharing a line.
+/// (F2) The block argument was not included in the offsets list, so the cop
+///      couldn't fire on `&` when it shared a line with the previous arg's end.
+/// Fix: Check `call.block()` for `BlockArgumentNode`, skip KeywordHashNode
+/// expansion when block arg is present, and append block arg to offsets.
+///
 /// ## Corpus investigation (2026-03-09)
 ///
 /// Re-enabled no-parens command call support. RuboCop's `on_send` does not check
@@ -83,18 +97,35 @@ impl Cop for MultilineMethodArgumentLineBreaks {
             return;
         }
 
+        // Issue F: Check for block argument (e.g., `&` or `&block`). In RuboCop's
+        // Parser gem, block_pass is included in `node.arguments`, but in Prism it's
+        // on `call.block()` as a separate BlockArgumentNode. We must include it in
+        // our offsets to match RuboCop's behavior, and NOT expand a trailing
+        // KeywordHashNode when a block arg follows (since the hash is no longer the
+        // effective last argument).
+        let block_arg = call
+            .block()
+            .and_then(|b| b.as_block_argument_node().map(|_| b));
+
         let args = match call.arguments() {
             Some(a) => a,
-            None => return,
+            None => {
+                // No regular arguments; if there's only a block arg, nothing to check
+                return;
+            }
         };
 
         // Issue A: Expand trailing keyword hash into individual key-value pairs.
         // RuboCop treats braceless keyword hash elements as separate arguments.
         // Collect (start_offset, end_offset) pairs for each effective argument.
         let raw_args: Vec<ruby_prism::Node<'_>> = args.arguments().iter().collect();
+        let has_block_arg = block_arg.is_some();
         let mut offsets: Vec<(usize, usize)> = Vec::new();
         for (i, arg) in raw_args.iter().enumerate() {
-            if i == raw_args.len() - 1 {
+            // Only expand trailing KeywordHashNode when it is the effective last
+            // argument. When a block arg follows, the hash is NOT last in RuboCop's
+            // view, so we must not expand it.
+            if i == raw_args.len() - 1 && !has_block_arg {
                 if let Some(kw_hash) = arg.as_keyword_hash_node() {
                     // Expand braceless keyword hash into individual elements
                     for elem in kw_hash.elements().iter() {
@@ -105,6 +136,12 @@ impl Cop for MultilineMethodArgumentLineBreaks {
                 }
             }
             offsets.push((arg.location().start_offset(), arg.location().end_offset()));
+        }
+
+        // Append block argument to offsets (matches RuboCop including block_pass
+        // in node.arguments)
+        if let Some(blk) = &block_arg {
+            offsets.push((blk.location().start_offset(), blk.location().end_offset()));
         }
 
         if offsets.len() < 2 {

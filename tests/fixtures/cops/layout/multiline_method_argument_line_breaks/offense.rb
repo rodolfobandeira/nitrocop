@@ -56,3 +56,11 @@ render json: data, status: :ok,
 process records, format: :csv,
                  ^^^^^^^^^^^^ Layout/MultilineMethodArgumentLineBreaks: Each argument in a multi-line method call must start on a separate line.
   output: path
+
+# Block pass on same line as end of multiline hash arg
+def message_area_tag(room, &)
+  tag.div id: "message-area", class: "area", data: {
+    controller: "messages",
+  }, &
+     ^ Layout/MultilineMethodArgumentLineBreaks: Each argument in a multi-line method call must start on a separate line.
+end
