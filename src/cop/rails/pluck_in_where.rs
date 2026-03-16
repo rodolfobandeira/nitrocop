@@ -19,6 +19,20 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: changed to report at the `pluck`/`ids` call's message_loc instead of
 /// the surrounding `where` call's start.
+///
+/// ## Investigation (2026-03-16): FN=8
+///
+/// The cop only checked for `where` as the enclosing method, but RuboCop's `in_where?`
+/// helper also recognizes:
+/// 1. `rewhere` — treated as equivalent to `where`
+/// 2. `where.not` chains — when the parent call is `not` and its receiver is `where`/`rewhere`
+///
+/// Also the message format was wrong: nitrocop used "Use a subquery instead of `pluck` inside
+/// `where`." but RuboCop uses "Use `select` instead of `pluck` within `where` query method."
+/// and "Use `select(:id)` instead of `ids` within `where` query method." (pluck vs ids differ).
+///
+/// Fix: added `rewhere` to `WHERE_METHODS`, handle `where.not` chains by checking when
+/// the parent call is `not` and its receiver is `where`/`rewhere`. Also corrected messages.
 pub struct PluckInWhere;
 
 impl Cop for PluckInWhere {
@@ -57,7 +71,22 @@ impl Cop for PluckInWhere {
             None => return,
         };
 
-        if call.name().as_slice() != b"where" {
+        let name = call.name().as_slice();
+
+        // RuboCop's WHERE_METHODS = %i[where rewhere]
+        // Also handle where.not chains: method is `not` and receiver is where/rewhere
+        let is_where_method = name == b"where" || name == b"rewhere";
+        let is_where_not = name == b"not" && {
+            call.receiver()
+                .and_then(|recv| recv.as_call_node())
+                .map(|recv_call| {
+                    let rname = recv_call.name().as_slice();
+                    rname == b"where" || rname == b"rewhere"
+                })
+                .unwrap_or(false)
+        };
+
+        if !is_where_method && !is_where_not {
             return;
         }
 
@@ -70,14 +99,14 @@ impl Cop for PluckInWhere {
         // RuboCop uses RESTRICT_ON_SEND = %i[pluck ids] and reports at node.loc.selector
         // (the pluck method name), NOT at the start of the surrounding where call.
         for arg in args.arguments().iter() {
-            if let Some(pluck_loc) = self.find_pluck_call(&arg, style) {
+            if let Some((pluck_loc, pluck_name)) = self.find_pluck_call(&arg, style) {
                 let (line, column) = source.offset_to_line_col(pluck_loc);
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use a subquery instead of `pluck` inside `where`.".to_string(),
-                ));
+                let msg = if pluck_name == b"ids" {
+                    "Use `select(:id)` instead of `ids` within `where` query method.".to_string()
+                } else {
+                    "Use `select` instead of `pluck` within `where` query method.".to_string()
+                };
+                diagnostics.push(self.diagnostic(source, line, column, msg));
             }
         }
     }
@@ -105,15 +134,18 @@ impl PluckInWhere {
         false
     }
 
-    /// Returns the byte offset of the `pluck`/`ids` keyword if found inside `node`,
+    /// Returns `(byte_offset, method_name)` of the `pluck`/`ids` keyword if found inside `node`,
     /// or None if no offense. Reports at the keyword location to match RuboCop.
-    fn find_pluck_call(&self, node: &ruby_prism::Node<'_>, style: &str) -> Option<usize> {
+    fn find_pluck_call<'a>(
+        &self,
+        node: &ruby_prism::Node<'a>,
+        style: &str,
+    ) -> Option<(usize, &'static [u8])> {
         if let Some(call) = node.as_call_node() {
             let name = call.name().as_slice();
             if name == b"pluck" || name == b"ids" {
                 let is_offense = if style == "conservative" {
-                    name == b"pluck" && self.is_const_rooted(node)
-                        || name == b"ids" && self.is_const_rooted(node)
+                    self.is_const_rooted(node)
                 } else {
                     true
                 };
@@ -122,7 +154,8 @@ impl PluckInWhere {
                         .message_loc()
                         .map(|l| l.start_offset())
                         .unwrap_or_else(|| call.location().start_offset());
-                    return Some(loc);
+                    let static_name: &'static [u8] = if name == b"ids" { b"ids" } else { b"pluck" };
+                    return Some((loc, static_name));
                 }
             }
         }
@@ -131,8 +164,8 @@ impl PluckInWhere {
             for elem in kw.elements().iter() {
                 if let Some(assoc) = elem.as_assoc_node() {
                     let val = assoc.value();
-                    if let Some(loc) = self.find_pluck_call(&val, style) {
-                        return Some(loc);
+                    if let Some(result) = self.find_pluck_call(&val, style) {
+                        return Some(result);
                     }
                 }
             }
@@ -142,8 +175,8 @@ impl PluckInWhere {
             for elem in hash.elements().iter() {
                 if let Some(assoc) = elem.as_assoc_node() {
                     let val = assoc.value();
-                    if let Some(loc) = self.find_pluck_call(&val, style) {
-                        return Some(loc);
+                    if let Some(result) = self.find_pluck_call(&val, style) {
+                        return Some(result);
                     }
                 }
             }
