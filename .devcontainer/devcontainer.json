@@ -18,5 +18,8 @@
   "dockerComposeFile": ["docker-compose.yml", "docker-compose.kap.yml"],
   "service": "app",
   "workspaceFolder": "/workspace",
+  "remoteEnv": {
+    "PATH": "/opt/kap/bin:${containerEnv:PATH}"
+  },
   "initializeCommand": "kap sidecar-init",
 }
