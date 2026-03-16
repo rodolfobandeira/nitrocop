@@ -88,6 +88,17 @@ use ruby_prism::Visit;
 ///   Only `ConstantReadNode` was matched. Fixed by adding `as_constant_path_node()`
 ///   check in `visit_singleton_class_node`.
 ///
+/// ### Round 6 (FP=3, FN=26)
+/// Root causes of FP:
+/// - `class << Multiton::ClassMethods` with nested `class InstanceMutex` was resolving
+///   to the same scope as `module Multiton > module ClassMethods > class << self >
+///   class InstanceMutex`. Both produced key `Multiton::ClassMethods::InstanceMutex#method`.
+///   In RuboCop, `parent_module_name` returns nil for defs inside non-self sclass, and
+///   `found_sclass_method` only handles send-type receivers (not const/const_path).
+///   This means ALL methods inside `class << SomeConst` are invisible to RuboCop's
+///   duplicate detection. Fixed by treating non-self sclass bodies as plain blocks
+///   (incrementing `plain_block_depth`), matching RuboCop's behavior.
+///
 /// Remaining FN not addressed (edge cases, ~7 total):
 /// - `def VCR.version` at top level in Rake tasks (inside DSL blocks)
 /// - `def FakeModel.method` inside test describe blocks (plain_block_depth > 0)
