@@ -48,7 +48,7 @@ use crate::parse::source::SourceFile;
 /// **Remaining gap (pre-fix-5):** 3 FNs — 2 from camping (minified Ruby, mid-line attr calls) and 1 from
 /// CocoaPods (`attr_accessor name` followed by `alias_method ... if boolean` where the `if`
 /// modifier makes RuboCop treat it as non-allowed, but nitrocop's line-based check sees
-/// `alias_method` and allows it).
+/// `alias_method` and allows it). Fixed in fix 6 below (except camping).
 ///
 /// **Fix 5 (2026-03-15):** 18 FNs across 12 repos caused by comment lookahead incorrectly
 /// suppressing offense when a blank line appeared after comments. The pattern:
@@ -61,6 +61,19 @@ use crate::parse::source::SourceFile;
 /// code line and checks whether it's an allowed successor (attr, alias, allowed method,
 /// block boundary). Added EOF guard: if no code line is found after comments, no offense
 /// (matches RuboCop's nil right_sibling for last-in-body attrs).
+///
+/// **Fix 6 (2026-03-16):** 3 of 5 remaining FNs:
+/// (a) Trailing semicolons after attr calls (`attr_accessor :foo;`) were treated as
+///     trailing code, causing the cop to skip the call. Added `;` to the allowed
+///     trailing characters alongside whitespace, newline, and `#`. (2 FNs: jruby, rack)
+/// (b) `alias_method` with `if`/`unless` modifier (`alias_method :x, :y if cond`) was
+///     incorrectly treated as an allowed successor method. RuboCop's AST sees this as
+///     an IfNode wrapping the send, not a plain SendNode. Added `has_modifier_conditional()`
+///     check to detect ` if ` / ` unless ` in the line and skip the allowed-method
+///     exemption. (1 FN: CocoaPods)
+/// (c) Camping FNs (2) are unfixable — minified Ruby with mid-line attr calls separated
+///     by semicolons. Prism parses these as CallNodes but they fail the standalone-statement
+///     check (not at first non-whitespace position of the line).
 pub struct EmptyLinesAroundAttributeAccessor;
 
 const ATTRIBUTE_METHODS: &[&[u8]] = &[b"attr_reader", b"attr_writer", b"attr_accessor", b"attr"];
@@ -146,7 +159,7 @@ impl Cop for EmptyLinesAroundAttributeAccessor {
             let has_trailing_code = after_call
                 .iter()
                 .find(|&&b| b != b' ' && b != b'\t')
-                .is_some_and(|&b| b != b'\n' && b != b'\r' && b != b'#');
+                .is_some_and(|&b| b != b'\n' && b != b'\r' && b != b'#' && b != b';');
             if has_trailing_code {
                 return;
             }
@@ -230,8 +243,9 @@ impl Cop for EmptyLinesAroundAttributeAccessor {
                     let mb = am.as_bytes();
                     if line_trimmed.starts_with(mb) {
                         let after = line_trimmed.get(mb.len());
-                        if after.is_none()
-                            || matches!(after, Some(b' ') | Some(b'(') | Some(b'\n') | Some(b'\r'))
+                        if (after.is_none()
+                            || matches!(after, Some(b' ') | Some(b'(') | Some(b'\n') | Some(b'\r')))
+                            && !has_modifier_conditional(&line_trimmed)
                         {
                             return;
                         }
@@ -259,8 +273,11 @@ impl Cop for EmptyLinesAroundAttributeAccessor {
             let method_bytes = allowed_method.as_bytes();
             if next_trimmed.starts_with(method_bytes) {
                 let after = next_trimmed.get(method_bytes.len());
-                if after.is_none()
-                    || matches!(after, Some(b' ') | Some(b'(') | Some(b'\n') | Some(b'\r'))
+                // If the allowed method has a modifier `if`/`unless`, RuboCop's AST
+                // sees an IfNode wrapping the send, not a plain allowed method call.
+                if (after.is_none()
+                    || matches!(after, Some(b' ') | Some(b'(') | Some(b'\n') | Some(b'\r')))
+                    && !has_modifier_conditional(&next_trimmed)
                 {
                     return;
                 }
@@ -324,6 +341,25 @@ fn is_block_boundary_keyword(trimmed: &[u8]) -> bool {
     // Also handle `}` or `}.method` — closing brace of a block
     if trimmed.first() == Some(&b'}') {
         return true;
+    }
+    false
+}
+
+/// Returns true if the trimmed line contains a modifier `if` or `unless` keyword,
+/// indicating the method call is conditional (e.g., `alias_method :foo, :bar if cond`).
+/// RuboCop's AST sees this as an IfNode wrapping the send, not a plain allowed method.
+fn has_modifier_conditional(trimmed: &[u8]) -> bool {
+    // Search for ` if ` or ` unless ` as word boundaries in the line.
+    // We skip content inside strings/parens for simplicity — this is a heuristic.
+    for window in trimmed.windows(4) {
+        if window == b" if " {
+            return true;
+        }
+    }
+    for window in trimmed.windows(8) {
+        if window == b" unless " {
+            return true;
+        }
     }
     false
 }

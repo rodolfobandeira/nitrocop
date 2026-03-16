@@ -62,3 +62,24 @@ class MultiCommentThenCode
   def transform
   end
 end
+
+# attr_accessor with trailing semicolon — semicolon is just a statement terminator
+class SemicolonAttr
+  attr_accessor :foo;
+
+  def bar; end
+end
+
+# attr_reader with trailing semicolon
+class SemicolonReader
+  attr_reader :closed;
+
+  def each; yield('foo'); yield('bar'); end;
+end
+
+# attr_accessor followed by alias_method with if modifier — not an allowed successor
+class DynamicAttr
+  attr_accessor :name
+
+  alias_method :other, :name if condition
+end
