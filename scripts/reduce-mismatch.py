@@ -26,23 +26,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rubocop_cache import cached_rubocop_run
 
-# Run in own process group so we can kill all children on exit
-try:
-    os.setpgrp()
-except OSError:
-    pass  # May fail if already a process group leader
-
-
-def _cleanup_children():
-    """Kill all processes in our process group on exit."""
-    try:
-        os.killpg(os.getpgrp(), signal.SIGTERM)
-    except (OSError, ProcessLookupError):
-        pass
-
-
-atexit.register(_cleanup_children)
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_DIR = PROJECT_ROOT / "vendor" / "corpus"
 NITROCOP_BIN = PROJECT_ROOT / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / "nitrocop"
@@ -342,7 +325,29 @@ def reduce_lines(
     return lines
 
 
+def _setup_process_group():
+    """Create own process group and register cleanup for child processes.
+
+    Only called from main() — never at import time, since that would kill
+    the test runner when the module is imported by pytest.
+    """
+    try:
+        os.setpgrp()
+    except OSError:
+        pass  # May fail if already a process group leader
+
+    def _cleanup_children():
+        try:
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+
+    atexit.register(_cleanup_children)
+
+
 def main():
+    _setup_process_group()
+
     parser = argparse.ArgumentParser(
         description="Delta reducer for corpus mismatches — shrinks files to minimal reproductions")
     parser.add_argument("cop", help="Cop name (e.g., Style/SymbolProc)")

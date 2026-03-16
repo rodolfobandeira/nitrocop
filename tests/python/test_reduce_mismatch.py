@@ -21,14 +21,12 @@ def setup_function(_function=None):
     reduce_mismatch._predicate_cache.clear()
 
 
-def test_rubocop_runner_uses_server_when_available():
-    """Probe once, then pass --server on real RuboCop runs."""
+def test_rubocop_runner_uses_no_server():
+    """RubocopRunner should use --no-server to avoid contention."""
     calls = []
 
     def fake_run(cmd, **_kwargs):
         calls.append(cmd)
-        if "--start-server" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
         payload = {
             "files": [{
                 "offenses": [
@@ -44,28 +42,32 @@ def test_rubocop_runner_uses_server_when_available():
         lines = runner.run("Style/Test", "/tmp/example.rb")
 
     assert lines == {7}
-    assert calls[0] == ["bundle", "exec", "rubocop", "--start-server"]
-    assert calls[1][:4] == ["bundle", "exec", "rubocop", "--server"]
+    # Should use --no-server, never --start-server or --server
+    assert len(calls) == 1
+    assert "--no-server" in calls[0]
+    assert "--server" not in calls[0] or calls[0].index("--no-server") < len(calls[0])
+    assert "--start-server" not in calls[0]
 
 
-def test_rubocop_runner_falls_back_without_server():
-    """If the probe fails, keep using the plain RuboCop CLI."""
-    calls = []
-
+def test_rubocop_runner_filters_by_cop():
+    """Only offense lines matching the requested cop should be returned."""
     def fake_run(cmd, **_kwargs):
-        calls.append(cmd)
-        if "--start-server" in cmd:
-            return subprocess.CompletedProcess(cmd, 2, "", "unsupported")
-        payload = {"files": []}
-        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+        payload = {
+            "files": [{
+                "offenses": [
+                    {"cop_name": "Style/Test", "location": {"line": 3}},
+                    {"cop_name": "Style/Other", "location": {"line": 5}},
+                    {"cop_name": "Style/Test", "location": {"line": 10}},
+                ]
+            }]
+        }
+        return subprocess.CompletedProcess(cmd, 1, json.dumps(payload), "")
 
     with patch.object(reduce_mismatch.subprocess, "run", side_effect=fake_run):
         runner = reduce_mismatch.RubocopRunner()
         lines = runner.run("Style/Test", "/tmp/example.rb")
 
-    assert lines == set()
-    assert calls[1][:3] == ["bundle", "exec", "rubocop"]
-    assert "--server" not in calls[1]
+    assert lines == {3, 10}
 
 
 def test_is_interesting_caches_repeated_candidates():
