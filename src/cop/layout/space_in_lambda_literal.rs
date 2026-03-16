@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-16):
+/// - 17 FPs fixed: all were `-> () {` (lambda with empty parenthesized params).
+///   RuboCop's `arrow_lambda_with_args?` checks `node.parent.arguments?` which returns
+///   false for empty param lists. Fix: check that BlockParametersNode contains actual
+///   parameters (requireds/optionals/rest/keywords/block), not just empty parens.
+/// - 627 FNs remain: lower priority, likely cases where nitrocop fails to detect violations.
 pub struct SpaceInLambdaLiteral;
 
 impl Cop for SpaceInLambdaLiteral {
@@ -30,8 +36,31 @@ impl Cop for SpaceInLambdaLiteral {
             None => return,
         };
 
-        // Must have parameters
-        if lambda.parameters().is_none() {
+        // Must have parameters with actual arguments (not empty parens `-> () {}`)
+        let has_real_params = match lambda.parameters() {
+            Some(params_node) => {
+                // params_node is a Node wrapping BlockParametersNode
+                if let Some(block_params) = params_node.as_block_parameters_node() {
+                    // Check if the inner ParametersNode exists and has any requireds/optionals/etc.
+                    match block_params.parameters() {
+                        Some(p) => {
+                            !p.requireds().is_empty()
+                                || !p.optionals().is_empty()
+                                || p.rest().is_some()
+                                || !p.posts().is_empty()
+                                || !p.keywords().is_empty()
+                                || p.keyword_rest().is_some()
+                                || p.block().is_some()
+                        }
+                        None => false,
+                    }
+                } else {
+                    params_node.as_numbered_parameters_node().is_some()
+                }
+            }
+            None => false,
+        };
+        if !has_real_params {
             return;
         }
 

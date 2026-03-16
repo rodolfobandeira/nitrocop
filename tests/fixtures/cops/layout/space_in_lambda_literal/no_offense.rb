@@ -6,3 +6,8 @@ e = lambda { |x| x + 1 }
 f = ->(x) do
   x * 2
 end
+# Empty parameter lists should not be flagged (RuboCop skips them)
+g = -> () { puts "hello" }
+h = -> () do
+  puts "world"
+end
