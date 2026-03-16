@@ -1,5 +1,22 @@
-use crate::cop::node_type::{CONSTANT_PATH_NODE, CONSTANT_READ_NODE};
-use crate::cop::util;
+/// Rails/UniqBeforePluck — flag `pluck(...).uniq` and suggest `distinct.pluck(...)`.
+///
+/// ## Root cause (2026-03)
+/// Original implementation used `CONSTANT_PATH_NODE` / `CONSTANT_READ_NODE` as interested
+/// node types and tried to walk *up* from the model constant to find a `.pluck(...).uniq`
+/// chain via `as_method_chain`. This never worked because `as_method_chain` expects a
+/// `CallNode` as input — a constant read node is not a call node, so it always returned
+/// `None` and produced zero offenses.
+///
+/// ## Fix
+/// Switched to `CALL_NODE` as the interested type.  On every `CallNode`, check whether the
+/// method name is `uniq` or `uniq!` (no block arguments), and whether the receiver is also a
+/// `CallNode` whose method name is `pluck`.  In conservative mode (default), additionally
+/// require that the root receiver of the `pluck` call is a constant (model class), not an
+/// instance variable or a chained scope/association.
+///
+/// Offense is reported at the `uniq` selector location (matching RuboCop's
+/// `node.loc.selector`), i.e., `message_loc()` of the `uniq` call node.
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -16,7 +33,7 @@ impl Cop for UniqBeforePluck {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CONSTANT_PATH_NODE, CONSTANT_READ_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -28,33 +45,54 @@ impl Cop for UniqBeforePluck {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let chain = match util::as_method_chain(node) {
+        let uniq_call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
 
-        // outer is `uniq`, inner is `pluck`
-        if chain.outer_method != b"uniq" || chain.inner_method != b"pluck" {
+        // Only interested in `uniq` or `uniq!` method calls
+        let method_name = uniq_call.name().as_slice();
+        if method_name != b"uniq" && method_name != b"uniq!" {
+            return;
+        }
+
+        // uniq/uniq! must not have a block argument
+        if uniq_call.block().is_some() {
+            return;
+        }
+
+        // The receiver of `uniq` must be a `pluck(...)` call
+        let receiver = match uniq_call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+        let pluck_call = match receiver.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+        if pluck_call.name().as_slice() != b"pluck" {
             return;
         }
 
         let style = config.get_str("EnforcedStyle", "conservative");
 
-        // In conservative mode, only flag if pluck's receiver is a constant (model class)
+        // In conservative mode, only flag if the root receiver of pluck is a constant (model class)
         if style == "conservative" {
-            let pluck_receiver = chain.inner_call.receiver();
-            let is_const = match pluck_receiver {
-                Some(ref r) => {
-                    r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some()
-                }
-                None => false,
+            let pluck_receiver = match pluck_call.receiver() {
+                Some(r) => r,
+                None => return, // no receiver (bare `pluck(...).uniq`) — skip in conservative
             };
+            let is_const = pluck_receiver.as_constant_read_node().is_some()
+                || pluck_receiver.as_constant_path_node().is_some();
             if !is_const {
                 return;
             }
         }
 
-        let loc = node.location();
+        // Report at the `uniq` selector (message_loc), matching RuboCop's node.loc.selector
+        let loc = uniq_call
+            .message_loc()
+            .unwrap_or_else(|| uniq_call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(
             source,
