@@ -17,3 +17,12 @@ end
 
 Post.pluck(:id).where(id: 1..10)
      ^^^^^^^^^^ Rails/PluckId: Use `ids` instead of `pluck(:id)`.
+
+current_user.events.pluck(:id)
+                    ^^^^^^^^^^ Rails/PluckId: Use `ids` instead of `pluck(:id)`.
+
+e.users.pluck(:id)
+        ^^^^^^^^^^ Rails/PluckId: Use `ids` instead of `pluck(:id)`.
+
+record.items.where(active: true).pluck(:id)
+                                 ^^^^^^^^^^ Rails/PluckId: Use `ids` instead of `pluck(:id)`.

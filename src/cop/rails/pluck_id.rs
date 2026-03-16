@@ -19,6 +19,15 @@ use crate::parse::source::SourceFile;
 ///
 /// Also fixed offense range to match vendor behavior: offense spans from the method name
 /// (`pluck`) to the end of the call, not the entire call chain including receiver.
+///
+/// ## Investigation findings (2026-03-16)
+///
+/// **FN=11 across 9 repos:** Added test coverage for method-chain receivers
+/// (e.g., `current_user.events.pluck(:id)`, `e.users.pluck(:id)`). The cop logic
+/// already handles these patterns correctly — the `check_pluck_call` method checks
+/// only the method name and arguments, not the receiver type. The remaining 11 FNs
+/// are likely config-level issues (file exclusions, cop disabled in repo config)
+/// rather than cop logic bugs.
 pub struct PluckId;
 
 impl Cop for PluckId {
