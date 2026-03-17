@@ -4,3 +4,12 @@
               ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in interpolation.
 "output: #{baz.to_s}"
                ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in interpolation.
+puts first.to_s, second.to_s
+           ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in `puts`.
+                        ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in `puts`.
+print first.to_s, second.to_s
+            ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in `print`.
+                         ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in `print`.
+warn first.to_s, second.to_s
+           ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in `warn`.
+                        ^^^^ Lint/RedundantStringCoercion: Redundant use of `Object#to_s` in `warn`.
