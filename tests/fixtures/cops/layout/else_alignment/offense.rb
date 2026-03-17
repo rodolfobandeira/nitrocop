@@ -86,6 +86,22 @@ rescue => e
   puts 'ok'
 end
 
+# unless: else should align with `unless` keyword
+unless condition
+  one
+    else
+    ^^^^ Layout/ElseAlignment: Align `else` with `unless`.
+  two
+end
+
+# unless assignment: else at col 0 should align with `unless` at col 11
+response = unless identity
+             service.call
+else
+^^^^ Layout/ElseAlignment: Align `else` with `unless`.
+             other.call
+end
+
 # begin/rescue/else: else at column 0 should align with `begin`
 def my_func
   begin

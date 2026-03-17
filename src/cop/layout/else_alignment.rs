@@ -1,4 +1,6 @@
-use crate::cop::node_type::{BEGIN_NODE, CASE_MATCH_NODE, CASE_NODE, DEF_NODE, ELSE_NODE, IF_NODE};
+use crate::cop::node_type::{
+    BEGIN_NODE, CASE_MATCH_NODE, CASE_NODE, DEF_NODE, ELSE_NODE, IF_NODE, UNLESS_NODE,
+};
 use crate::cop::util::assignment_context_base_col;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -21,6 +23,17 @@ use crate::parse::source::SourceFile;
 /// - begin/rescue/else: else aligns with `begin` keyword
 /// - def/rescue/else: else aligns with `def` keyword
 ///   1 FP from minified Ruby single-line modifier if/else (unfixable).
+///
+/// **Investigation (2026-03-17, FP=8, FN=6):**
+/// FP=7: `else` on the same line as `when`/`in` keyword in case expressions
+/// (e.g., `when 1 then 2 else 3`). The single-line skip only checked
+/// `else_line == case_line`, not `else_line == last_when_line`. Fixed by
+/// also checking if else is on the same line as the last when/in keyword.
+/// FP=1: camping minified Ruby (unfixable).
+/// FN=6: Prism has a separate `UnlessNode` that wasn't handled — only
+/// `IfNode` was checked. `unless` keywords go through `UnlessNode`, not
+/// `IfNode`. Fixed by adding `UNLESS_NODE` to interested types and
+/// handling `as_unless_node()` with the same alignment logic.
 pub struct ElseAlignment;
 
 impl ElseAlignment {
@@ -65,6 +78,7 @@ impl Cop for ElseAlignment {
         &[
             ELSE_NODE,
             IF_NODE,
+            UNLESS_NODE,
             CASE_NODE,
             CASE_MATCH_NODE,
             BEGIN_NODE,
@@ -88,23 +102,25 @@ impl Cop for ElseAlignment {
                 None => return,
             };
             // Align else with the last `when` keyword
-            let last_when_col = case_node
+            let last_when = case_node
                 .conditions()
                 .iter()
                 .last()
-                .and_then(|c| c.as_when_node())
-                .map(|w| source.offset_to_line_col(w.keyword_loc().start_offset()).1);
-            let expected_col = match last_when_col {
-                Some(col) => col,
+                .and_then(|c| c.as_when_node());
+            let (last_when_line, expected_col) = match last_when {
+                Some(w) => {
+                    let (line, col) = source.offset_to_line_col(w.keyword_loc().start_offset());
+                    (line, col)
+                }
                 None => return,
             };
             let else_kw_loc = else_clause.else_keyword_loc();
             let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
-            // Skip single-line
+            // Skip single-line: else on same line as case OR same line as last when
             let case_line = source
                 .offset_to_line_col(case_node.case_keyword_loc().start_offset())
                 .0;
-            if else_line == case_line {
+            if else_line == case_line || else_line == last_when_line {
                 return;
             }
             if else_col != expected_col {
@@ -125,23 +141,25 @@ impl Cop for ElseAlignment {
                 None => return,
             };
             // Align else with the last `in` keyword
-            let last_in_col = case_match_node
+            let last_in = case_match_node
                 .conditions()
                 .iter()
                 .last()
-                .and_then(|c| c.as_in_node())
-                .map(|i| source.offset_to_line_col(i.in_loc().start_offset()).1);
-            let expected_col = match last_in_col {
-                Some(col) => col,
+                .and_then(|c| c.as_in_node());
+            let (last_in_line, expected_col) = match last_in {
+                Some(i) => {
+                    let (line, col) = source.offset_to_line_col(i.in_loc().start_offset());
+                    (line, col)
+                }
                 None => return,
             };
             let else_kw_loc = else_clause.else_keyword_loc();
             let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
-            // Skip single-line
+            // Skip single-line: else on same line as case OR same line as last in
             let case_line = source
                 .offset_to_line_col(case_match_node.case_keyword_loc().start_offset())
                 .0;
-            if else_line == case_line {
+            if else_line == case_line || else_line == last_in_line {
                 return;
             }
             if else_col != expected_col {
@@ -218,7 +236,51 @@ impl Cop for ElseAlignment {
             return;
         }
 
-        // --- if/unless ---
+        // --- unless ---
+        // Prism uses a separate UnlessNode (not IfNode) for `unless` keywords.
+        if let Some(unless_node) = node.as_unless_node() {
+            let else_clause = match unless_node.else_clause() {
+                Some(ec) => ec,
+                None => return,
+            };
+            let unless_kw_loc = unless_node.keyword_loc();
+            // Skip modifier unless (no end keyword)
+            if unless_node.end_keyword_loc().is_none() {
+                return;
+            }
+            let (unless_line, unless_col) = source.offset_to_line_col(unless_kw_loc.start_offset());
+
+            let end_style = config.get_str("EndAlignmentStyle", "keyword");
+            let expected_col = if end_style == "variable" {
+                if let Some(var_col) =
+                    assignment_context_base_col(source, unless_kw_loc.start_offset())
+                {
+                    var_col
+                } else {
+                    unless_col
+                }
+            } else {
+                unless_col
+            };
+
+            let else_kw_loc = else_clause.else_keyword_loc();
+            let (else_line, else_col) = source.offset_to_line_col(else_kw_loc.start_offset());
+            // Single-line unless/else — skip
+            if else_line == unless_line {
+                return;
+            }
+            if else_col != expected_col {
+                diagnostics.push(self.diagnostic(
+                    source,
+                    else_line,
+                    else_col,
+                    "Align `else` with `unless`.".to_string(),
+                ));
+            }
+            return;
+        }
+
+        // --- if/unless (via IfNode — handles `if` keyword only) ---
         let if_node = match node.as_if_node() {
             Some(n) => n,
             None => return,
@@ -232,7 +294,8 @@ impl Cop for ElseAlignment {
 
         // Only check top-level `if`, not `elsif` (which is also an IfNode)
         // An elsif has its keyword as "elsif", not "if"
-        if if_kw_loc.as_slice() != b"if" && if_kw_loc.as_slice() != b"unless" {
+        // Note: `unless` is handled by UnlessNode above, not here.
+        if if_kw_loc.as_slice() != b"if" {
             return;
         }
 
@@ -265,16 +328,11 @@ impl Cop for ElseAlignment {
                     continue;
                 }
                 if else_col != expected_col {
-                    let kw = if if_kw_loc.as_slice() == b"unless" {
-                        "unless"
-                    } else {
-                        "if"
-                    };
                     diagnostics.push(self.diagnostic(
                         source,
                         else_line,
                         else_col,
-                        format!("Align `else` with `{kw}`."),
+                        "Align `else` with `if`.".to_string(),
                     ));
                 }
                 current = None;
@@ -425,6 +483,56 @@ mod tests {
         assert!(
             diags.is_empty(),
             "variable style << context should not flag else aligned with receiver: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unless_assignment_else_misaligned() {
+        // FN: `else` at col 10 should be flagged when `unless` is at col 22
+        // (keyword style — else should align with `unless`)
+        let source = b"          response = unless identity\n            service.call\n          else\n            other.call\n          end\n";
+        let diags = run_cop_full(&ElseAlignment, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "else at col 10 should be flagged when unless is at col 22: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unless_else_correctly_aligned() {
+        // No offense: `else` at same column as `unless`
+        let source = b"unless condition\n  one\nelse\n  two\nend\n";
+        let diags = run_cop_full(&ElseAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "correctly aligned unless/else: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn single_line_when_else_no_offense() {
+        // FP: `else` on the same line as `when` — no alignment check needed
+        let source = b"case\n when 1 then 2 else 3\n end\n";
+        let diags = run_cop_full(&ElseAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "single-line when/else should not be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn single_line_in_else_no_offense() {
+        // FP: `else` on the same line as `in` — no alignment check needed
+        let source = b"case 1\n in a then a + 2 else ;\n 3\n end\n";
+        let diags = run_cop_full(&ElseAlignment, source);
+        assert!(
+            diags.is_empty(),
+            "single-line in/else should not be flagged: {:?}",
             diags
         );
     }

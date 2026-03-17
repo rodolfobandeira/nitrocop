@@ -100,3 +100,39 @@ when /\A(foo)(?:\s|\Z)/
 when "self"
   namespace
 end
+
+# unless/else correctly aligned
+unless condition
+  one
+else
+  two
+end
+
+# unless assignment: else aligned with `unless`
+result = unless active
+           compute
+         else
+           fallback
+         end
+
+# Single-line when/else — no alignment check needed
+case
+ when 1 then 2 else 3
+ end
+
+# Single-line when/else with trailing content
+case
+ when 1 then 2 else
+ 3
+ end
+
+# Single-line in/else — no alignment check needed
+case 1
+ in a then a + 2 else ;
+ 3
+ end
+
+# Single-line in/else with array pattern
+case [0]
+ in [*a] then a else 3
+ end
