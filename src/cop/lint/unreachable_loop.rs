@@ -14,7 +14,26 @@ use ruby_prism::Visit;
 /// `break_statement?` type. Fixed by returning false for begin nodes with rescue
 /// clauses, matching RuboCop's behavior.
 ///
-/// FN=81: Not investigated in this batch — likely missing detection patterns.
+/// ## Corpus investigation (2026-03-17)
+///
+/// Remaining FP=2, FN=81.
+///
+/// FP=2: Two root causes:
+/// 1. `return cached_files[path] || next` — the `|| next` provides a conditional
+///    loop continuation, making the loop reachable for subsequent iterations.
+///    Fixed by adding `conditional_continue_keyword` check matching RuboCop's
+///    `conditional_continue_keyword?` method.
+/// 2. `exactly(4).times { raise(...) }` — RSpec mock block matched by the default
+///    AllowedPatterns config `(exactly|at_least|at_most)\(\d+\)\.times`.
+///    Fixed by implementing AllowedPatterns regex matching against call source.
+///
+/// FN=81: Missing iterator method detection. The `is_loop_method_name` list was
+/// incomplete — only had ~20 methods vs RuboCop's full `enumerable_method?` (60+
+/// Enumerable instance methods) and `enumerator_method?` (20+ methods plus any
+/// method starting with `each_`). Key missing methods: `grep`, `cycle`, `reject!`,
+/// `select!`, `filter`, `filter_map`, `sort_by`, `find_all`, `each_entry`, etc.
+/// Fixed by expanding to match RuboCop's full method sets. Also added `for` loop
+/// detection (RuboCop's `on_for` handler).
 pub struct UnreachableLoop;
 
 impl Cop for UnreachableLoop {
@@ -35,10 +54,33 @@ impl Cop for UnreachableLoop {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _allowed_patterns = config.get_string_array("AllowedPatterns");
+        let allowed_patterns = config.get_string_array("AllowedPatterns");
+        let compiled_patterns: Vec<regex::Regex> = allowed_patterns
+            .as_ref()
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .filter_map(|p| {
+                        // Handle Ruby regexp format: /pattern/ -> pattern
+                        let pattern = p.trim();
+                        let pattern = if pattern.starts_with('/')
+                            && pattern.len() > 1
+                            && pattern[1..].contains('/')
+                        {
+                            let end = pattern[1..].rfind('/').unwrap() + 1;
+                            &pattern[1..end]
+                        } else {
+                            pattern
+                        };
+                        regex::Regex::new(pattern).ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut visitor = UnreachableLoopVisitor {
             cop: self,
             source,
+            allowed_patterns: &compiled_patterns,
             diagnostics: Vec::new(),
         };
         visitor.visit(&parse_result.node());
@@ -49,6 +91,7 @@ impl Cop for UnreachableLoop {
 struct UnreachableLoopVisitor<'a, 'src> {
     cop: &'a UnreachableLoop,
     source: &'src SourceFile,
+    allowed_patterns: &'a [regex::Regex],
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -84,40 +127,115 @@ fn is_kernel_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
-fn is_loop_method_name(name: &[u8]) -> bool {
+fn is_enumerator_method(name: &[u8]) -> bool {
+    // rubocop-ast ENUMERATOR_METHODS + any method starting with "each_"
+    if name.starts_with(b"each_") {
+        return true;
+    }
     matches!(
         name,
-        b"each"
-            | b"map"
-            | b"select"
-            | b"reject"
-            | b"collect"
+        b"collect"
+            | b"collect_concat"
             | b"detect"
+            | b"downto"
+            | b"each"
             | b"find"
+            | b"find_all"
+            | b"find_index"
+            | b"inject"
+            | b"loop"
+            | b"map!"
+            | b"map"
+            | b"reduce"
+            | b"reject"
+            | b"reject!"
+            | b"reverse_each"
+            | b"select"
+            | b"select!"
             | b"times"
             | b"upto"
-            | b"downto"
-            | b"loop"
-            | b"each_with_index"
-            | b"each_with_object"
-            | b"each_key"
-            | b"each_value"
-            | b"each_pair"
-            | b"each_line"
-            | b"each_byte"
-            | b"each_char"
-            | b"each_slice"
-            | b"each_cons"
-            | b"flat_map"
     )
 }
 
+fn is_enumerable_method(name: &[u8]) -> bool {
+    // Ruby's Enumerable.instance_methods + :each
+    matches!(
+        name,
+        b"all?"
+            | b"any?"
+            | b"chain"
+            | b"chunk"
+            | b"chunk_while"
+            | b"collect"
+            | b"collect_concat"
+            | b"compact"
+            | b"count"
+            | b"cycle"
+            | b"detect"
+            | b"drop"
+            | b"drop_while"
+            | b"each"
+            | b"each_cons"
+            | b"each_entry"
+            | b"each_slice"
+            | b"each_with_index"
+            | b"each_with_object"
+            | b"entries"
+            | b"filter"
+            | b"filter_map"
+            | b"find"
+            | b"find_all"
+            | b"find_index"
+            | b"first"
+            | b"flat_map"
+            | b"grep"
+            | b"grep_v"
+            | b"group_by"
+            | b"include?"
+            | b"inject"
+            | b"lazy"
+            | b"map"
+            | b"max"
+            | b"max_by"
+            | b"member?"
+            | b"min"
+            | b"min_by"
+            | b"minmax"
+            | b"minmax_by"
+            | b"none?"
+            | b"one?"
+            | b"partition"
+            | b"reduce"
+            | b"reject"
+            | b"reverse_each"
+            | b"select"
+            | b"slice_after"
+            | b"slice_before"
+            | b"slice_when"
+            | b"sort"
+            | b"sort_by"
+            | b"sum"
+            | b"take"
+            | b"take_while"
+            | b"tally"
+            | b"to_a"
+            | b"to_h"
+            | b"to_set"
+            | b"uniq"
+            | b"zip"
+    )
+}
+
+fn is_loop_method_name(name: &[u8]) -> bool {
+    is_enumerator_method(name) || is_enumerable_method(name)
+}
+
 /// Check if a sequence of statements has a break statement that isn't preceded
-/// by a continue keyword. This is the core logic shared by begin blocks,
-/// if/unless branches, rescue clauses, etc.
+/// by a continue keyword and doesn't have a conditional continue (|| next/redo).
+/// This is the core logic shared by begin blocks, if/unless branches, rescue clauses, etc.
 fn stmts_break(body: &[ruby_prism::Node<'_>]) -> bool {
     if let Some(break_stmt) = body.iter().find(|s| is_break_statement(s)) {
-        !preceded_by_continue(body, break_stmt)
+        !preceded_by_continue(body, break_stmt) && !conditional_continue_keyword(break_stmt)
     } else {
         false
     }
@@ -284,6 +402,47 @@ fn contains_continue_keyword(node: &ruby_prism::Node<'_>) -> bool {
     finder.found
 }
 
+/// Check if a break statement contains `|| next` or `|| redo` (conditional continue).
+/// This matches RuboCop's `conditional_continue_keyword?` method.
+/// e.g. `return do_something(value) || next`
+fn conditional_continue_keyword(node: &ruby_prism::Node<'_>) -> bool {
+    let mut finder = OrContinueFinder { found: false };
+    finder.visit(node);
+    finder.found
+}
+
+struct OrContinueFinder {
+    found: bool,
+}
+
+impl<'pr> Visit<'pr> for OrContinueFinder {
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        let right = node.right();
+        if right.as_next_node().is_some() || right.as_redo_node().is_some() {
+            self.found = true;
+        }
+        if !self.found {
+            ruby_prism::visit_or_node(self, node);
+        }
+    }
+
+    // Don't descend into inner loops
+    fn visit_while_node(&mut self, _node: &ruby_prism::WhileNode<'pr>) {}
+    fn visit_until_node(&mut self, _node: &ruby_prism::UntilNode<'pr>) {}
+    fn visit_for_node(&mut self, _node: &ruby_prism::ForNode<'pr>) {}
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if self.found {
+            return;
+        }
+        let method_name = node.name().as_slice();
+        if is_loop_method_name(method_name) && node.block().is_some() {
+            return;
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
 fn preceded_by_continue(body: &[ruby_prism::Node<'_>], break_stmt: &ruby_prism::Node<'_>) -> bool {
     let break_offset = break_stmt.location().start_offset();
     for sibling in body {
@@ -324,6 +483,28 @@ fn body_always_breaks(stmts: &ruby_prism::StatementsNode<'_>) -> bool {
     stmts_break(&body)
 }
 
+impl UnreachableLoopVisitor<'_, '_> {
+    /// Get the source text of a call node excluding the block portion.
+    /// This matches RuboCop's `send_node.source` which is the call without the block.
+    fn call_source_without_block(
+        &self,
+        call: &ruby_prism::CallNode<'_>,
+        block: &ruby_prism::BlockNode<'_>,
+    ) -> String {
+        let call_start = call.location().start_offset();
+        let block_start = block.location().start_offset();
+        let src = self.source.as_bytes();
+        let end = if block_start > call_start {
+            block_start
+        } else {
+            call.location().end_offset()
+        };
+        String::from_utf8_lossy(&src[call_start..end])
+            .trim()
+            .to_string()
+    }
+}
+
 impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         if let Some(stmts) = node.statements() {
@@ -357,12 +538,48 @@ impl<'pr> Visit<'pr> for UnreachableLoopVisitor<'_, '_> {
         ruby_prism::visit_until_node(self, node);
     }
 
+    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+        if let Some(stmts) = node.statements() {
+            if body_always_breaks(&stmts) {
+                let loc = node.location();
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                self.diagnostics.push(self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    "This loop will have at most one iteration.".to_string(),
+                ));
+            }
+        }
+        ruby_prism::visit_for_node(self, node);
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let method_name = node.name().as_slice();
 
         if is_loop_method_name(method_name) {
             if let Some(block) = node.block() {
                 if let Some(block_node) = block.as_block_node() {
+                    // Check AllowedPatterns against the call source (without block)
+                    if !self.allowed_patterns.is_empty() {
+                        let call_source = self.call_source_without_block(node, &block_node);
+                        if self
+                            .allowed_patterns
+                            .iter()
+                            .any(|re| re.is_match(&call_source))
+                        {
+                            // Still visit children to check inner loops
+                            if let Some(recv) = node.receiver() {
+                                self.visit(&recv);
+                            }
+                            if let Some(args) = node.arguments() {
+                                self.visit(&args.as_node());
+                            }
+                            self.visit(&block);
+                            return;
+                        }
+                    }
+
                     if let Some(body) = block_node.body() {
                         let breaks = if let Some(stmts) = body.as_statements_node() {
                             body_always_breaks(&stmts)

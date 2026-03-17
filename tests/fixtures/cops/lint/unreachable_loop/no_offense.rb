@@ -143,3 +143,13 @@ while true
     break 'bar'
   end
 end
+
+# return ... || next — the `next` provides a loop continuation path
+[nil, nil, 42].each do |value|
+  return do_something(value) || next
+end
+
+# return ... || redo — the `redo` provides a loop continuation path
+[nil, nil, 42].each do |value|
+  return do_something(value) || redo
+end

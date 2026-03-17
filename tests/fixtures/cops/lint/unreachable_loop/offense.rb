@@ -61,3 +61,45 @@ data.each_pair { fail }
 
 data.each_value { fail }
 ^^^^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# grep block with unconditional return
+files.grep(pattern) { |l| return true }
+^^^^^^^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# cycle with unconditional raise
+items.cycle { raise StopIteration }
+^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# reject! with unconditional raise
+items.reject! { raise StandardError }
+^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# select! with unconditional raise
+items.select! { raise StandardError }
+^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# filter with unconditional return
+items.filter { |x| return x }
+^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# sort_by with unconditional return
+items.sort_by { |x| return x }
+^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# find_all with unconditional return
+items.find_all { |x| return x }
+^^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# each_entry with unconditional raise
+data.each_entry { raise StandardError }
+^^^^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+
+# return ... || break — the `break` does NOT provide continuation
+[nil, nil, 42].each do |value|
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
+  return do_something(value) || break
+end
+
+# chained method call: the last method in chain is the loop
+string.split('-').map { raise StandardError }
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/UnreachableLoop: This loop will have at most one iteration.
