@@ -12,3 +12,11 @@ a = 1
 b = 2
 
 # another comment
+
+# Consecutive blank lines inside =begin/=end block comments ARE offenses.
+# RuboCop's tokens include embdoc tokens for =begin/=end content lines.
+=begin
+some documentation
+
+more documentation
+=end

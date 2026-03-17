@@ -43,21 +43,15 @@ use crate::parse::source::SourceFile;
 /// of `MultiTargetNode` groups were never checked. Fix: recurse into
 /// `MultiTargetNode` children via `collect_multi_target_locations`.
 ///
-/// ## Known false negatives (18 FN in corpus as of 2026-03-17)
+/// ## Block-local variable fix (2026-03-17)
 ///
-/// An attempt was made to fix block-local variable FNs (commit 19d87d7b,
-/// reverted ffa7be5a). The approach: include `BlockLocalVariableNode` from
-/// `block_params.locals()` in `collect_param_locations`, and replace byte
-/// scanning (`first_non_ws`/`last_non_ws`) with AST-based param positions.
-/// Code path changed: `collect_param_locations` + first/last arg boundary checks.
-/// Acceptance gate before: expected=551, actual=551, excess=0, missing=0.
-/// Acceptance gate after: expected=569, actual=2,284, excess=1,733, missing=0.
-/// This fixed the 18 block-local FNs but introduced 1,411 NEW false positives.
-/// Root cause of regression: replacing byte scanning with AST positions changed
-/// how first/last argument boundaries are calculated for ALL blocks, not just
-/// those with block-local variables. The fix was too broad.
-/// A correct fix needs to: keep byte scanning for normal blocks, and only add
-/// special handling for the semicolon+locals case (|; x| or |a; x|).
+/// Fixed 18 FNs from blocks with only block-local variables (|; foo|, |;a|).
+/// Previous attempt (commit 19d87d7b, reverted ffa7be5a) replaced byte scanning
+/// with AST positions globally, introducing 1,411 new FPs. The correct fix:
+/// keep byte scanning for normal blocks, and only override first_non_ws/last_non_ws
+/// with local variable positions when parameters() is None and locals() is non-empty.
+/// This uses `locals_only_positions()` to populate `first_local_start`/`last_local_end`
+/// in BlockInfo, which are applied as overrides in check_node before the style checks.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
@@ -77,6 +71,13 @@ struct BlockInfo {
     is_pipe_delimited: bool,
     /// Parameter nodes for per-arg extra-space checking.
     param_locations: Vec<(usize, usize)>,
+    /// Start offset of the first block-local variable name, when the block
+    /// has only locals and no regular parameters (e.g., `|; foo|`).
+    /// Used to override `first_non_whitespace` so the "space before first"
+    /// check sees the local var name (past the `;`), not the `;` itself.
+    first_local_start: Option<usize>,
+    /// End offset of the last block-local variable name (for "space after last" check).
+    last_local_end: Option<usize>,
 }
 
 impl Cop for SpaceAroundBlockParameters {
@@ -128,6 +129,17 @@ impl Cop for SpaceAroundBlockParameters {
         let Some(last_non_ws) = last_non_whitespace(bytes, inner_start, inner_end) else {
             return;
         };
+
+        // For blocks with only block-local variables (|; foo|), override the
+        // first/last positions to point at the local variable name rather than
+        // the `;`. This way the space checks see "content between | and foo"
+        // rather than "content between | and ;", matching RuboCop's behavior
+        // where shadowarg children are the "first"/"last" arguments.
+        let first_non_ws = info.first_local_start.unwrap_or(first_non_ws);
+        let last_non_ws = info
+            .last_local_end
+            .map(|end| end.saturating_sub(1))
+            .unwrap_or(last_non_ws);
         let trailing_start = last_non_ws + 1;
 
         match style {
@@ -397,6 +409,13 @@ fn extract_block_info(block: &ruby_prism::BlockNode<'_>) -> Option<BlockInfo> {
 
     let param_locations = collect_param_locations(&block_params);
 
+    // When there are no regular parameters but block-local variables exist
+    // (e.g., |; foo| or |;glark|), record the first/last local variable
+    // positions so the space checks can use them instead of byte scanning
+    // (which would find the `;` rather than the variable name).
+    let (first_local_start, last_local_end) =
+        locals_only_positions(&block_params, &param_locations);
+
     Some(BlockInfo {
         inner_start: opening_loc.end_offset(),
         inner_end: closing_loc.start_offset(),
@@ -405,6 +424,8 @@ fn extract_block_info(block: &ruby_prism::BlockNode<'_>) -> Option<BlockInfo> {
         body_start: block.body().map(|b| b.location().start_offset()),
         is_pipe_delimited: true,
         param_locations,
+        first_local_start,
+        last_local_end,
     })
 }
 
@@ -422,6 +443,8 @@ fn extract_lambda_info(lambda: &ruby_prism::LambdaNode<'_>) -> Option<BlockInfo>
     }
 
     let param_locations = collect_param_locations(&block_params);
+    let (first_local_start, last_local_end) =
+        locals_only_positions(&block_params, &param_locations);
 
     Some(BlockInfo {
         inner_start: opening_loc.end_offset(),
@@ -431,6 +454,8 @@ fn extract_lambda_info(lambda: &ruby_prism::LambdaNode<'_>) -> Option<BlockInfo>
         body_start: lambda.body().map(|b| b.location().start_offset()),
         is_pipe_delimited: false,
         param_locations,
+        first_local_start,
+        last_local_end,
     })
 }
 
@@ -514,6 +539,29 @@ fn collect_multi_target_locations(
             collect_multi_target_locations(&inner_mt, locations);
         }
     }
+}
+
+/// When block_params has no regular parameters but has locals (e.g., `|; foo|`),
+/// return the (first_local_start, last_local_end) from the locals list.
+/// Returns (None, None) when there ARE regular parameters or no locals.
+fn locals_only_positions(
+    block_params: &ruby_prism::BlockParametersNode<'_>,
+    param_locations: &[(usize, usize)],
+) -> (Option<usize>, Option<usize>) {
+    // Only activate when there are no regular params
+    if !param_locations.is_empty() {
+        return (None, None);
+    }
+    let locals = block_params.locals();
+    if locals.is_empty() {
+        return (None, None);
+    }
+    let first = locals.iter().next().unwrap();
+    let last = locals.iter().last().unwrap();
+    (
+        Some(first.location().start_offset()),
+        Some(last.location().end_offset()),
+    )
 }
 
 fn first_non_whitespace(bytes: &[u8], start: usize, end: usize) -> Option<usize> {

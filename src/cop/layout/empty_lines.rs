@@ -52,6 +52,19 @@ use crate::parse::source::SourceFile;
 /// using `parse_result.comments()` to find comment lines. Comment-only files
 /// now also get checked (they have comment tokens). The early return only triggers
 /// when there are zero tokens of any kind (no code AND no comments).
+///
+/// ## Corpus investigation (2026-03-17, FN=21 remaining)
+///
+/// ~16 FN inside `=begin`/`=end` blocks. Root cause: the cop used
+/// `code_map.is_code(byte_offset)` to skip blank lines in non-code regions.
+/// The CodeMap marks `=begin`/`=end` block comments as non-code (they are
+/// comments), so blank lines inside them were skipped. But RuboCop's
+/// `processed_source.tokens` includes `:tEMBDOC` tokens for `=begin`/`=end`
+/// content lines, so consecutive blank lines inside them are still flagged.
+/// Fix: switched from `is_code()` to `is_not_string()`, which skips
+/// strings/heredocs/regexes/symbols but NOT comments (including `=begin`/`=end`).
+/// This preserves heredoc/string skipping while allowing `=begin`/`=end`
+/// blank line detection.
 pub struct EmptyLines;
 
 impl Cop for EmptyLines {
@@ -138,8 +151,13 @@ impl Cop for EmptyLines {
                     consecutive_blanks = 0;
                     continue;
                 }
-                // Skip blank lines inside non-code regions (heredocs, strings)
-                if !code_map.is_code(byte_offset) {
+                // Skip blank lines inside string/heredoc/regex literals, but NOT
+                // inside =begin/=end block comments. RuboCop's token-based approach
+                // includes embdoc tokens for =begin/=end content, so consecutive
+                // blank lines inside those blocks are still flagged.
+                // is_not_string() returns false for strings/heredocs/regexes/symbols
+                // but true for comments (including =begin/=end blocks) and code.
+                if !code_map.is_not_string(byte_offset) {
                     byte_offset += line_len;
                     consecutive_blanks = 0;
                     continue;
@@ -343,6 +361,30 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not fire on blank lines inside heredoc"
+        );
+    }
+
+    #[test]
+    fn fire_blanks_in_begin_end_block() {
+        // RuboCop's tokens include embdoc tokens for =begin/=end content,
+        // so consecutive blank lines inside them are flagged.
+        let source = b"=begin\nsome docs\n\n\nmore docs\n=end\nx = 1\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            !diags.is_empty(),
+            "Should fire on consecutive blank lines inside =begin/=end"
+        );
+    }
+
+    #[test]
+    fn skip_single_blank_in_begin_end_block() {
+        // Single blank line inside =begin/=end is fine (same as regular code).
+        let source = b"=begin\nsome docs\n\nmore docs\n=end\nx = 1\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            diags.is_empty(),
+            "Should not fire on single blank line inside =begin/=end: {:?}",
+            diags
         );
     }
 }

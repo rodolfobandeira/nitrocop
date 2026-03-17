@@ -22,10 +22,9 @@ result = "test
 
                                     string"
 
-# Consecutive blank lines inside =begin/=end block comments are not offenses.
+# Single blank line inside =begin/=end block comment is fine.
 =begin
 some documentation
-
 
 more documentation
 =end

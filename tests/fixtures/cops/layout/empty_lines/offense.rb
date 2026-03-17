@@ -22,3 +22,13 @@ b = 2
 
 ^ Layout/EmptyLines: Extra blank line detected.
 # another comment
+
+# Consecutive blank lines inside =begin/=end block comments ARE offenses.
+# RuboCop's tokens include embdoc tokens for =begin/=end content lines.
+=begin
+some documentation
+
+
+^ Layout/EmptyLines: Extra blank line detected.
+more documentation
+=end
