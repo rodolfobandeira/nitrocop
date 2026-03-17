@@ -3,6 +3,11 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
+/// FN fix: was using `is_code()` to skip non-code regions, which excluded
+/// `=begin`/`=end` multi-line comment blocks. RuboCop only skips string
+/// literals (via `string_literal_ranges`), not comments. Changed to
+/// `is_not_string()` to match RuboCop's behavior. This fixed 225 FN across
+/// 8 corpus repos (WhatWeb: 136, greasyfork: 58, others: 31).
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {
@@ -34,8 +39,10 @@ impl Cop for IndentationStyle {
             // Advance offset past this line and its newline
             offset += line.len() + 1; // +1 for the '\n' delimiter
 
-            // Skip lines whose indentation starts in a non-code region (heredocs, strings)
-            if !code_map.is_code(line_start) {
+            // Skip lines whose indentation starts in a string/heredoc region.
+            // RuboCop checks indentation in comments (including =begin/=end blocks)
+            // but skips string literals, so use is_not_string() instead of is_code().
+            if !code_map.is_not_string(line_start) {
                 continue;
             }
 
@@ -49,8 +56,8 @@ impl Cop for IndentationStyle {
                 if indent.contains(&b'\t') {
                     let tab_col = indent.iter().position(|&b| b == b'\t').unwrap_or(0);
                     let tab_offset = line_start + tab_col;
-                    // Double-check the specific tab character is in a code region
-                    if code_map.is_code(tab_offset) {
+                    // Double-check the specific tab character is not in a string literal
+                    if code_map.is_not_string(tab_offset) {
                         let mut diag = self.diagnostic(
                             source,
                             line_num,
@@ -88,7 +95,7 @@ impl Cop for IndentationStyle {
                 if indent.contains(&b' ') {
                     let space_col = indent.iter().position(|&b| b == b' ').unwrap_or(0);
                     let space_offset = line_start + space_col;
-                    if code_map.is_code(space_offset) {
+                    if code_map.is_not_string(space_offset) {
                         let mut diag = self.diagnostic(
                             source,
                             line_num,
