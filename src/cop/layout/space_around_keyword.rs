@@ -269,8 +269,8 @@ impl Cop for SpaceAroundKeyword {
                     continue;
                 }
                 if !code_map.is_code(i)
-                    && !(code_map.is_heredoc_interpolation(i)
-                        && !code_map.is_non_code_in_heredoc_interpolation(i))
+                    && (!code_map.is_heredoc_interpolation(i)
+                        || code_map.is_non_code_in_heredoc_interpolation(i))
                 {
                     continue;
                 }
