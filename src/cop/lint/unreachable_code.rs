@@ -9,6 +9,26 @@ use ruby_prism::Visit;
 /// (flow-breaking). `Kernel#fail` never accepts blocks, so any `fail`/`raise`
 /// with a block is a DSL method call. Fixed by adding `call.block().is_none()`
 /// check to `is_raise_call` (dc856393).
+///
+/// ## Investigation (2026-03-17)
+///
+/// FP=1: `retry` at top level treated as flow-breaking. RuboCop with prism
+/// parser skips `retry` tests entirely (spec line 19). Removed `retry` from
+/// flow-breaking nodes since prism doesn't support it outside `begin/rescue`.
+///
+/// FN=89: Missing detection of several patterns:
+/// 1. `throw`, `exit`, `exit!`, `abort` not recognized as flow-breaking calls
+/// 2. `redo` not recognized as flow-breaking
+/// 3. Code after `if/else` or `case/when/else` where ALL branches break flow
+///    was not detected as unreachable
+/// 4. Code after `begin..end` blocks containing flow-breaking statements
+///    was not detected (e.g., `next` inside `begin..end` in `case/when`)
+///
+/// Fixed by adding all missing flow-breaking keywords/methods and implementing
+/// recursive `flow_expression?` logic matching RuboCop's approach: an if/else
+/// is flow-breaking if both branches are, case/when/else is flow-breaking if
+/// all branches (including else) are, and begin blocks are flow-breaking if
+/// any contained expression is flow-breaking.
 pub struct UnreachableCode;
 
 impl Cop for UnreachableCode {
@@ -45,27 +65,196 @@ struct UnreachableVisitor<'a, 'src> {
     diagnostics: Vec<Diagnostic>,
 }
 
-fn is_flow_breaking(node: &ruby_prism::Node<'_>) -> bool {
+/// Check if a node is a simple flow-breaking statement (return, break, next, etc.)
+fn is_flow_command(node: &ruby_prism::Node<'_>) -> bool {
     node.as_return_node().is_some()
         || node.as_break_node().is_some()
         || node.as_next_node().is_some()
-        || node.as_retry_node().is_some()
-        || is_raise_call(node)
+        || node.as_redo_node().is_some()
+        || is_flow_call(node)
 }
 
-fn is_raise_call(node: &ruby_prism::Node<'_>) -> bool {
+/// Check if a node is a flow-breaking method call (raise, fail, throw, exit, exit!, abort)
+fn is_flow_call(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         // Kernel#raise/fail never accept blocks — a block means this is a DSL
         // method call (e.g. FactoryBot `fail { false }`), not flow-breaking.
-        if (name == b"raise" || name == b"fail")
-            && call.receiver().is_none()
-            && call.block().is_none()
-        {
-            return true;
+        if call.block().is_some() {
+            return false;
+        }
+        // Only bare calls or calls on Kernel are flow-breaking
+        match call.receiver() {
+            None => {
+                matches!(
+                    name,
+                    b"raise" | b"fail" | b"throw" | b"exit" | b"exit!" | b"abort"
+                )
+            }
+            Some(recv) => {
+                // Kernel.raise, Kernel.exit, etc.
+                if let Some(cr) = recv.as_constant_read_node() {
+                    if cr.name().as_slice() == b"Kernel" {
+                        return matches!(
+                            name,
+                            b"raise" | b"fail" | b"throw" | b"exit" | b"exit!" | b"abort"
+                        );
+                    }
+                }
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
+/// Recursively check if an expression always breaks flow.
+/// This matches RuboCop's `flow_expression?` method:
+/// - Simple flow commands (return, break, next, redo, raise, fail, throw, exit, etc.)
+/// - `if/else` where BOTH branches break flow
+/// - `case/when/else` where ALL branches (including else) break flow
+/// - `begin`/`kwbegin` where ANY expression breaks flow (since it stops execution)
+fn flow_expression(node: &ruby_prism::Node<'_>) -> bool {
+    if is_flow_command(node) {
+        return true;
+    }
+
+    // if/elsif/else: flow-breaking if both if-branch and else-branch break flow
+    if let Some(if_node) = node.as_if_node() {
+        return check_if_flow(&if_node);
+    }
+
+    // unless: also an IfNode in Prism (just with different structure)
+    // Prism represents `unless` as an IfNode too, so covered above.
+
+    // case/when/else
+    if let Some(case_node) = node.as_case_node() {
+        return check_case_flow(&case_node);
+    }
+
+    // case/in pattern matching
+    if let Some(case_match) = node.as_case_match_node() {
+        return check_case_match_flow(&case_match);
+    }
+
+    // begin..end (explicit)
+    if let Some(begin_node) = node.as_begin_node() {
+        if let Some(stmts) = begin_node.statements() {
+            return stmts.body().iter().any(|s| flow_expression(&s));
         }
     }
+
+    // parenthesized expression
+    if let Some(parens) = node.as_parentheses_node() {
+        if let Some(stmts) = parens.body() {
+            if let Some(stmts_node) = stmts.as_statements_node() {
+                return stmts_node.body().iter().any(|s| flow_expression(&s));
+            }
+        }
+    }
+
     false
+}
+
+fn check_if_flow(node: &ruby_prism::IfNode<'_>) -> bool {
+    let if_branch = node.statements();
+    let else_branch = node.subsequent();
+
+    // Must have both branches
+    let Some(if_stmts) = if_branch else {
+        return false;
+    };
+    let Some(else_clause) = else_branch else {
+        return false;
+    };
+
+    // Check if-branch: any statement in the if body is flow-breaking
+    let if_breaks = if_stmts.body().iter().any(|s| flow_expression(&s));
+    if !if_breaks {
+        return false;
+    }
+
+    // Check else-branch: could be ElseNode or another IfNode (elsif)
+    if let Some(else_node) = else_clause.as_else_node() {
+        if let Some(stmts) = else_node.statements() {
+            return stmts.body().iter().any(|s| flow_expression(&s));
+        }
+        return false;
+    }
+    if let Some(ref elsif_node) = else_clause.as_if_node() {
+        return check_if_flow(elsif_node);
+    }
+    false
+}
+
+fn check_case_flow(node: &ruby_prism::CaseNode<'_>) -> bool {
+    // Must have an else branch
+    let Some(else_clause) = node.else_clause() else {
+        return false;
+    };
+    // Check else branch
+    if let Some(stmts) = else_clause.statements() {
+        if !stmts.body().iter().any(|s| flow_expression(&s)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    // Check all when branches
+    let conditions = node.conditions();
+    if conditions.is_empty() {
+        return false;
+    }
+    for condition in conditions.iter() {
+        if let Some(when_node) = condition.as_when_node() {
+            if let Some(stmts) = when_node.statements() {
+                if !stmts.body().iter().any(|s| flow_expression(&s)) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn check_case_match_flow(node: &ruby_prism::CaseMatchNode<'_>) -> bool {
+    // Must have an else branch
+    let Some(else_clause) = node.else_clause() else {
+        return false;
+    };
+    if let Some(stmts) = else_clause.statements() {
+        if !stmts.body().iter().any(|s| flow_expression(&s)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    // Check all in branches
+    let conditions = node.conditions();
+    if conditions.is_empty() {
+        return false;
+    }
+    for condition in conditions.iter() {
+        if let Some(in_node) = condition.as_in_node() {
+            if let Some(stmts) = in_node.statements() {
+                if !stmts.body().iter().any(|s| flow_expression(&s)) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
@@ -85,7 +274,7 @@ impl<'pr> Visit<'pr> for UnreachableVisitor<'_, '_> {
                 ));
                 break; // Only flag the first unreachable statement
             }
-            if is_flow_breaking(stmt) {
+            if flow_expression(stmt) {
                 flow_broken = true;
             }
         }

@@ -22,3 +22,55 @@ FactoryBot.define do
     error { false }
   end
 end
+
+# if without else — not all branches break, so code after is reachable
+def test_if_only
+  if condition
+    return 1
+  end
+  do_something
+end
+
+# if/else where only one branch breaks
+def test_if_one_branch
+  if condition
+    something
+    return 1
+  else
+    something2
+  end
+  do_something
+end
+
+# case without else — not all branches break
+def test_case_no_else
+  case value
+  when 1
+    return :one
+  when 2
+    return :two
+  end
+  do_something
+end
+
+# throw with receiver is not flow-breaking (could be custom method)
+def test_throw_with_receiver
+  obj.throw :tag
+  do_something
+end
+
+# raise with receiver is not flow-breaking
+def test_raise_with_receiver
+  validator.raise 'custom'
+  do_something
+end
+
+# conditional return in if branch
+def test_conditional
+  if cond
+    return 1
+  else
+    something
+  end
+  more_code
+end
