@@ -332,3 +332,84 @@ def assign_in_branch_with_block
   end
   puts changed
 end
+
+# Variable initialized before begin/rescue, reassigned inside, read after
+# The initial assignment is NOT useless: if an exception fires before the
+# reassignment, the initial value is what remains.
+def begin_rescue_init
+  result = nil
+  begin
+    result = do_something
+  rescue => e
+    handle_error(e)
+  end
+  result
+end
+
+# Variable initialized before begin/rescue, rescue re-raises
+# RuboCop still does not flag the initial assignment because the begin body
+# might partially execute before reaching the reassignment.
+def begin_rescue_reraise
+  result = nil
+  begin
+    driver = create_driver
+    result = driver.process(options)
+    save!
+  rescue => e
+    message = handle_error(e)
+    save!
+    raise e, message
+  end
+  result
+end
+
+# Variable initialized before begin with multiple rescues
+def begin_multiple_rescue
+  data = {}
+  begin
+    data = fetch_data(url)
+  rescue Timeout::Error
+    log_timeout
+  rescue => e
+    log_error(e)
+  end
+  data
+end
+
+# Singleton class reads the variable (class << obj)
+def singleton_class_receiver
+  obj = Object.new
+  class << obj
+    def foo; "bar"; end
+  end
+end
+
+# Singleton class with method calls after
+def singleton_class_with_method
+  clone_obj = original.clone
+  class << clone_obj
+    CLONE_CONST = :clone
+  end
+end
+
+# Variable assigned before begin/ensure (no rescue) — not useless
+# The begin body might raise, so `result` remains nil and ensure runs.
+def begin_ensure_init
+  result = nil
+  begin
+    result = do_something
+  ensure
+    cleanup(result)
+  end
+end
+
+# Variable assigned before begin, used in both success and rescue paths
+def begin_rescue_used_both_paths
+  data = default_data
+  begin
+    data = fetch_data(url)
+  rescue => e
+    log_error(data, e)
+  end
+  process(data)
+end

@@ -396,6 +396,10 @@ impl ScopeAnalyzer {
                     self.analyze_node(&superclass, state);
                 }
             }
+            // class << expr reads the expression (e.g., `class << obj` reads `obj`)
+            if let Some(sclass_node) = node.as_singleton_class_node() {
+                self.analyze_node(&sclass_node.expression(), state);
+            }
             return;
         }
 
@@ -1126,6 +1130,19 @@ impl ScopeAnalyzer {
     }
 
     fn analyze_begin(&mut self, node: &ruby_prism::BeginNode<'_>, state: &mut LiveState) {
+        let has_rescue = node.rescue_clause().is_some();
+        let has_ensure = node.ensure_clause().is_some();
+
+        // When a rescue or ensure clause exists, protect pre-begin writes from
+        // being marked useless during begin body analysis. Any statement in the
+        // body could raise, so the pre-begin value may still be the live one
+        // when control reaches the rescue/ensure or post-begin code.
+        let saved_protected = if has_rescue || has_ensure {
+            self.protect_live_writes(state)
+        } else {
+            self.protected_offsets.clone()
+        };
+
         // Begin body
         let before = state.clone();
         if let Some(stmts) = node.statements() {
@@ -1135,9 +1152,8 @@ impl ScopeAnalyzer {
 
         // Rescue clauses — each is an optional branch from the begin body
         if let Some(rescue_node) = node.rescue_clause() {
-            let saved_protected = self.protect_live_writes(&before);
+            self.protect_live_writes(&before);
             self.analyze_rescue_chain(&rescue_node, &before, state);
-            self.restore_protected(saved_protected);
         }
 
         // Else clause (runs if no exception)
@@ -1155,6 +1171,8 @@ impl ScopeAnalyzer {
                 self.analyze_statements(&body, state);
             }
         }
+
+        self.restore_protected(saved_protected);
     }
 
     fn analyze_rescue_chain(
@@ -1298,6 +1316,11 @@ impl<'pr> Visit<'pr> for ReadFinder {
     }
     fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        // The expression (e.g., `obj` in `class << obj`) reads the variable
+        self.visit(&node.expression());
+        // Don't recurse into body — new scope
+    }
 }
 
 /// Collects reads and writes from a closure (block/lambda body).
@@ -1402,6 +1425,16 @@ impl<'pr> Visit<'pr> for ClosureCollector {
 
     fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
     fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        // The expression (e.g., `obj` in `class << obj`) reads the variable
+        if let Some(read_node) = node.expression().as_local_variable_read_node() {
+            let name = node_name(read_node.name().as_slice());
+            if !self.params.contains(&name) {
+                self.reads.insert(name);
+            }
+        }
+        // Don't recurse into body — new scope
+    }
 
     // Nested blocks create child closures that also capture outer variables
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
