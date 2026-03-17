@@ -29,9 +29,13 @@ When the corpus oracle has concrete FP/FN examples for a cop, use
 `verify-cop-locations.py` as the location-level check before treating that cop
 as done locally.
 
-**Worktree isolation depends on platform:** On macOS (local dev), use `isolation: "worktree"`
-for teammates. On Linux (cloud VM), do NOT use worktree isolation — teammates commit directly
-to the current branch. Cloud VM worktrees get cleaned up on agent timeout, losing committed work.
+**Worktree isolation depends on platform:** On macOS (local dev) and Linux devcontainers,
+use `isolation: "worktree"` for teammates. On ephemeral cloud VMs (not devcontainers), do NOT
+use worktree isolation — teammates commit directly to the current branch. Cloud VM worktrees
+get cleaned up on agent timeout, losing committed work.
+
+To detect devcontainers: check if `$USER` is `vscode` and `/.dockerenv` exists.
+Ephemeral cloud VMs typically run as `root` or a CI-specific user, not `vscode`.
 
 ## Workflow
 
@@ -153,8 +157,8 @@ findings. Do NOT expect teammates to web-search for specific repo files.
    - `subagent_type: "general-purpose"` — needs full edit/bash access
    - `team_name: "fix-department"`
    - `mode: "bypassPermissions"` — teammates need to run cargo test etc.
-   - **macOS only:** add `isolation: "worktree"` so each teammate gets its own git worktree
-   - **Linux (cloud VM):** do NOT use `isolation: "worktree"` — teammates commit directly
+   - **macOS and Linux devcontainers:** add `isolation: "worktree"` so each teammate gets its own git worktree
+   - **Ephemeral cloud VMs (not devcontainers):** do NOT use `isolation: "worktree"` — teammates commit directly
      to the current branch (worktrees get cleaned up on timeout, losing work)
 
 4. Each teammate prompt MUST include:
@@ -275,9 +279,9 @@ if the prompt/examples require local corpus source context.
 1. Wait for all teammates to report back.
 
 2. For each completed fix:
-   - **macOS (worktree mode):** note the worktree branch name from the Task result
+   - **Worktree mode (macOS / devcontainer):** note the worktree branch name from the Task result
      and cherry-pick the commit into your working branch
-   - **Linux (no worktree):** commits are already on the current branch — no cherry-picking needed
+   - **No-worktree mode (ephemeral cloud VM):** commits are already on the current branch — no cherry-picking needed
 
 3. Run full verification:
    ```bash
