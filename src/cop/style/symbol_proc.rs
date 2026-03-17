@@ -37,6 +37,18 @@ use crate::parse::source::SourceFile;
 ///    to skip when the *outer* method (the one receiving the block) has arguments.
 ///
 /// All fixes applied in this revision.
+///
+/// ## Investigation findings (2026-03-17)
+///
+/// **FP root cause (remaining):** `proc`/`lambda`/`Proc.new` blocks were only
+/// skipped when `ActiveSupportExtensionsEnabled: true`. RuboCop ALWAYS skips
+/// these via `lambda_or_proc?` regardless of config. Fix: moved the skip
+/// outside the ActiveSupport guard.
+///
+/// **FN root cause (100 FNs across 13 repos):** Ruby 3.4 `it` blocks and
+/// numbered parameter `_1` blocks were not detected. These parse as blocks
+/// with `ItParametersNode` or `NumberedParametersNode` params (not
+/// `BlockParametersNode`). Fix: added detection for both patterns.
 pub struct SymbolProc;
 
 impl Cop for SymbolProc {
@@ -68,7 +80,7 @@ impl Cop for SymbolProc {
         let allowed_methods = config.get_string_array("AllowedMethods");
         let allowed_patterns = config.get_string_array("AllowedPatterns");
         let allow_comments = config.get_bool("AllowComments", false);
-        let active_support = config.get_bool("ActiveSupportExtensionsEnabled", false);
+        let _active_support = config.get_bool("ActiveSupportExtensionsEnabled", false);
 
         // Look for blocks like { |x| x.foo } that can be replaced with (&:foo)
         // We match on CallNode (the method receiving the block) so we can
@@ -86,12 +98,14 @@ impl Cop for SymbolProc {
             None => return,
         };
 
-        // When ActiveSupportExtensionsEnabled is true, skip proc/lambda/Proc.new blocks.
-        // RuboCop skips these because ActiveSupport makes Symbol#to_proc behave differently.
-        if active_support {
+        // Always skip proc/lambda/Proc.new blocks — RuboCop's `lambda_or_proc?` check
+        // skips these unconditionally (not just when ActiveSupportExtensionsEnabled).
+        // `proc { |x| x.foo }` creates a Proc object, not a method call with a block.
+        {
             let outer_name = call_with_block.name().as_slice();
-            // Skip `proc { |x| x.foo }` and `lambda { |x| x.foo }`
-            if outer_name == b"proc" || outer_name == b"lambda" {
+            if (outer_name == b"proc" || outer_name == b"lambda")
+                && call_with_block.receiver().is_none()
+            {
                 return;
             }
             // Skip `Proc.new { |x| x.foo }` and `::Proc.new { |x| x.foo }`
@@ -146,52 +160,7 @@ impl Cop for SymbolProc {
             return;
         }
 
-        // Must have exactly one parameter
-        let params = match block.parameters() {
-            Some(p) => p,
-            None => return,
-        };
-
-        let block_params = match params.as_block_parameters_node() {
-            Some(bp) => bp,
-            None => return,
-        };
-
-        // Check for destructuring block argument: `{ |x,| x.foo }` — trailing comma
-        // In the source, if the params region contains a comma, it's destructuring.
-        let params_loc = block_params.location();
-        let params_source = &source.as_bytes()[params_loc.start_offset()..params_loc.end_offset()];
-        if params_source.contains(&b',') {
-            return;
-        }
-
-        let param_node = match block_params.parameters() {
-            Some(p) => p,
-            None => return,
-        };
-
-        let requireds: Vec<_> = param_node.requireds().iter().collect();
-        if requireds.len() != 1 {
-            return;
-        }
-
-        let param_name = if let Some(rp) = requireds[0].as_required_parameter_node() {
-            rp.name().as_slice().to_vec()
-        } else {
-            return;
-        };
-
-        // Must have no rest, keyword, optional, or block params
-        if param_node.optionals().iter().count() > 0
-            || param_node.rest().is_some()
-            || param_node.keywords().iter().count() > 0
-            || param_node.keyword_rest().is_some()
-            || param_node.block().is_some()
-        {
-            return;
-        }
-
-        // Body must be a single method call on the parameter
+        // Extract the single method call from the block body (shared by all paths)
         let body = match block.body() {
             Some(b) => b,
             None => return,
@@ -219,22 +188,6 @@ impl Cop for SymbolProc {
             }
         }
 
-        // The receiver must be the block parameter
-        let receiver = match call.receiver() {
-            Some(r) => r,
-            None => return,
-        };
-
-        let is_param = if let Some(lv) = receiver.as_local_variable_read_node() {
-            lv.name().as_slice() == param_name
-        } else {
-            false
-        };
-
-        if !is_param {
-            return;
-        }
-
         // Inner method must not have arguments — can't convert { |x| x.foo(bar) } to &:foo
         if call.arguments().is_some() {
             return;
@@ -242,6 +195,73 @@ impl Cop for SymbolProc {
 
         // Must not have a block
         if call.block().is_some() {
+            return;
+        }
+
+        let receiver = match call.receiver() {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Check if receiver matches the block parameter (three paths)
+        let receiver_is_param = match block.parameters() {
+            Some(params) => {
+                // Path 1: Explicit params `{ |x| x.foo }`
+                if let Some(block_params) = params.as_block_parameters_node() {
+                    // Check for destructuring block argument: `{ |x,| x.foo }`
+                    let params_loc = block_params.location();
+                    let params_source =
+                        &source.as_bytes()[params_loc.start_offset()..params_loc.end_offset()];
+                    if params_source.contains(&b',') {
+                        return;
+                    }
+
+                    let param_node = match block_params.parameters() {
+                        Some(p) => p,
+                        None => return,
+                    };
+
+                    let requireds: Vec<_> = param_node.requireds().iter().collect();
+                    if requireds.len() != 1 {
+                        return;
+                    }
+
+                    let param_name = if let Some(rp) = requireds[0].as_required_parameter_node() {
+                        rp.name().as_slice()
+                    } else {
+                        return;
+                    };
+
+                    // Must have no rest, keyword, optional, or block params
+                    if param_node.optionals().iter().count() > 0
+                        || param_node.rest().is_some()
+                        || param_node.keywords().iter().count() > 0
+                        || param_node.keyword_rest().is_some()
+                        || param_node.block().is_some()
+                    {
+                        return;
+                    }
+
+                    receiver
+                        .as_local_variable_read_node()
+                        .is_some_and(|lv| lv.name().as_slice() == param_name)
+                } else if params.as_numbered_parameters_node().is_some() {
+                    // Path 2: Numbered params `{ _1.foo }`
+                    // Only _1 (first numbered param) is convertible to &:foo
+                    receiver
+                        .as_local_variable_read_node()
+                        .is_some_and(|lv| lv.name().as_slice() == b"_1")
+                } else if params.as_it_parameters_node().is_some() {
+                    // Path 3: Ruby 3.4 `it` blocks `{ it.foo }`
+                    receiver.as_it_local_variable_read_node().is_some()
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+
+        if !receiver_is_param {
             return;
         }
 
@@ -409,7 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn active_support_disabled_flags_proc_blocks() {
+    fn active_support_disabled_still_skips_proc_blocks() {
+        // proc/lambda/Proc.new are ALWAYS skipped regardless of ActiveSupport
         let mut config = CopConfig::default();
         config.options.insert(
             "ActiveSupportExtensionsEnabled".to_string(),
@@ -417,7 +438,7 @@ mod tests {
         );
         let source = b"proc { |x| x.foo }\n";
         let diags = run_cop_full_with_config(&SymbolProc, source, config);
-        assert_eq!(diags.len(), 1);
+        assert_eq!(diags.len(), 0);
     }
 
     #[test]

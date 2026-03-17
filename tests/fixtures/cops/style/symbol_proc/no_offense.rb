@@ -49,3 +49,7 @@ items.map { _1.to_s(16) }
 [1, 2, 3].max { _1.foo }
 # Numbered param _2 (only _1 maps to single param)
 something { _2.first }
+# proc/lambda/Proc.new are always skipped (not method calls with blocks)
+proc { |x| x.foo }
+lambda { |x| x.foo }
+Proc.new { |x| x.foo }
