@@ -170,3 +170,22 @@ x ({ y: 1 }.merge({ y: 2 })), z
 (hash || {}).merge(other)
 (x.y).z(arg)
 (a & b).include?(item)
+# Assignment in default parameter value — parens syntactically required
+def method(value = (not_set = true))
+end
+def suffix(value = (not_set = true; value))
+end
+def prompt(value = (default = "yes"))
+end
+def foo(bar = (baz = :quux))
+end
+# Assignment in default keyword parameter value
+def method(key: (default = compute_default))
+end
+# class << with assignment expression — parens needed to group assignment
+class << (RANDOM = Random.new)
+end
+# def with assignment in receiver — parens needed
+def (@matcher = BasicObject.new).===(obj)
+  obj
+end

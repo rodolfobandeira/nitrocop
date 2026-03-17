@@ -54,6 +54,19 @@ use crate::parse::source::SourceFile;
 ///   prevent `{` from being parsed as a block. RuboCop's `first_arg_begins_with_hash_literal?`
 ///   catches this. Added simplified equivalent: skip when inner begins with hash literal and
 ///   there's an unparenthesized Call ancestor.
+///
+/// ## Investigation findings (2026-03-17)
+///
+/// ### FP root causes fixed:
+/// - **Default parameter assignments (~100+ FPs):** `def method(value = (not_set = true))` —
+///   parenthesized assignment in default parameter values is syntactically required. Was flagged
+///   because OptionalParameterNode mapped to ParentKind::Other, which the assignment check
+///   treats as begin_type. Fixed by adding ParentKind::Parameter set on
+///   visit_optional_parameter_node / visit_optional_keyword_parameter_node.
+/// - **`class << (RANDOM = Random.new)`:** assignment in singleton class expression receiver.
+///   Fixed by adding ParentKind::SingletonClass.
+/// - **`def (@matcher = BasicObject.new).===(obj)`:** assignment in def receiver expression.
+///   Fixed by adding ParentKind::Def.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -101,6 +114,9 @@ enum ParentKind {
     Case,
     Array,
     Pair,
+    Parameter,
+    SingletonClass,
+    Def,
     Other,
 }
 
@@ -258,6 +274,8 @@ impl RedundantParensVisitor<'_> {
         // parent being nil maps to us having no real parent (top-level or begin statements).
         // begin_type in RuboCop maps to a wrapping begin/statements node, which in our parent
         // stack shows up as ParentKind::Other with no specific parent.
+        // Exclude Parameter (default param values), SingletonClass (class << expr),
+        // and Def (def receiver) because those are not begin_type in RuboCop.
         if is_assignment(inner) {
             let should_flag = match parent {
                 None => true,
@@ -1270,6 +1288,37 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.kind = ParentKind::Pair;
         }
         ruby_prism::visit_assoc_node(self, node);
+    }
+
+    fn visit_optional_parameter_node(&mut self, node: &ruby_prism::OptionalParameterNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Parameter;
+        }
+        ruby_prism::visit_optional_parameter_node(self, node);
+    }
+
+    fn visit_optional_keyword_parameter_node(
+        &mut self,
+        node: &ruby_prism::OptionalKeywordParameterNode<'pr>,
+    ) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Parameter;
+        }
+        ruby_prism::visit_optional_keyword_parameter_node(self, node);
+    }
+
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::SingletonClass;
+        }
+        ruby_prism::visit_singleton_class_node(self, node);
+    }
+
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Def;
+        }
+        ruby_prism::visit_def_node(self, node);
     }
 }
 
