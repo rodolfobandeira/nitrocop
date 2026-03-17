@@ -47,6 +47,39 @@ use crate::parse::source::SourceFile;
 ///    `rescue Bar` as trailing code and bailed out. Fix: handle
 ///    `visit_rescue_modifier_node` to pass the modifier's end_offset,
 ///    bypassing the trailing-code check.
+///
+/// ## Investigation findings (2026-03-17, FP=1, FN=43)
+///
+/// FP=1: `prepend :funcname do` in rouge-ruby/rouge treated as module
+/// inclusion. It's actually a method call with a symbol argument and block,
+/// not a module prepend. Root cause: `is_module_inclusion_line` matches
+/// bare `prepend` keyword regardless of arguments. Fix needed: check that
+/// the argument is a constant (module name), not a symbol or string.
+///
+/// FN=43 across 25 repos. Three distinct patterns:
+///
+/// 1. **Single-line class/module with semicolons** (jruby, chef): e.g.,
+///    `class C < A; include B; def bar; foo; end; end` and
+///    `class V1Class; extend Chef::Mixin::VersionedAPI; minimum_api_version 1; end`.
+///    `line_has_trailing_code` returns true and bails out. RuboCop uses
+///    AST-based `next_line_node` which finds the next sibling statement
+///    regardless of semicolons. Fix: needs AST-based sibling walking instead
+///    of text-based next-line detection.
+///
+/// 2. **Module.new / Class.new blocks** (jruby, ffi): e.g.,
+///    `Module.new do; extend FFI::Library; ffi_lib ...`.
+///    The `in_block_or_send` flag suppresses these because the include is
+///    inside a block. But RuboCop checks `node.parent.if_type?` and
+///    `node.parent.type?(:send, :any_block, :array)` — in Parser AST,
+///    multi-statement block bodies use `begin` parent, so `any_block?` is
+///    false. The current single-vs-multi statement heuristic may not
+///    correctly handle all Module.new block patterns.
+///
+/// 3. **Consecutive includes where one has `rescue` modifier** (chef):
+///    `include X; include Y rescue LoadError; include Z` — RuboCop may
+///    treat the `rescue` modifier as breaking the inclusion group, requiring
+///    a blank line after each individual include. Needs more investigation
+///    to confirm exact RuboCop grouping behavior with rescue modifiers.
 pub struct EmptyLinesAfterModuleInclusion;
 
 const MODULE_INCLUSION_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
