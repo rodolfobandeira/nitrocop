@@ -41,6 +41,23 @@ use crate::parse::source::SourceFile;
 /// - From the parent `if` node, walk the subsequent chain to count elsifs
 /// - Only check the single elsif for boolean literal branches when elsif_count == 1
 /// - Extracted `check_elsif_node` helper method for the elsif-specific logic
+///
+/// ## Investigation findings (2026-03-17)
+///
+/// **FP root cause (21 FPs across 17 repos):** Single `!` negation was treated as
+/// boolean-returning, but RuboCop only considers `!!` (double negation) as boolean.
+/// RuboCop's `double_negative?` matcher is `(send (send _ :!) :!)` — it requires TWO
+/// nested `!` calls. A single `!x` or `!x.predicate?` is NOT considered boolean.
+/// This caused FPs whenever the rightmost operand of `&&` was `!something`, including:
+/// - `if id && !method` (steep)
+/// - `if record && !record.can_delete?(self)` (otwarchive)
+/// - `@stored[key] && !@stored[key].empty?` (algorithms)
+/// - elsif conditions with `!` in the predicate chain (lobsters, gumroad, browsercms)
+///
+/// **Fix applied:**
+/// - Changed `!` handler in `condition_returns_boolean` to only match `!!` (double
+///   negation): checks that the receiver of the `!` call is also a `!` call.
+/// - Remaining FPs (if any) are likely config/rubocop_todo.yml issues in target repos.
 pub struct IfWithBooleanLiteralBranches;
 
 impl Cop for IfWithBooleanLiteralBranches {
@@ -335,9 +352,17 @@ fn condition_returns_boolean(
             return true;
         }
 
-        // Negation operator `!` (including double negation `!!`)
+        // Double negation `!!` only (not single `!`).
+        // RuboCop's double_negative? matches `(send (send _ :!) :!)`.
+        // Single `!` is NOT considered boolean-returning.
         if method_bytes == b"!" {
-            return true;
+            if let Some(receiver) = call.receiver() {
+                if let Some(inner_call) = receiver.as_call_node() {
+                    if inner_call.name().as_slice() == b"!" {
+                        return true;
+                    }
+                }
+            }
         }
     }
 

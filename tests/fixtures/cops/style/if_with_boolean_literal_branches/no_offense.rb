@@ -84,3 +84,76 @@ elsif template_options[:except] && !template_options[:except].include?(action_na
 else
   false
 end
+
+# Single negation `!` is not considered boolean-returning by RuboCop
+# (only `!!` double negation is). These should not be flagged.
+if generate && !verify_options
+  false
+else
+  true
+end
+
+if record && !record.can_delete?(self)
+  false
+else
+  true
+end
+
+if id && !method
+  true
+else
+  false
+end
+
+@stored[key] && !@stored[key].empty? ? true : false
+
+membership.nil? || !membership.exists? ? false : true
+
+!ENV["DOCKER"].nil? && !ENV["DOCKER"].empty? ? true : false
+
+uri.is_a?(URI::HTTP) && !uri.host.nil? ? true : false
+
+(index == 0 && !subscribed?(feed)) ? true : false
+
+# elsif with single `!` in condition (not boolean by RuboCop)
+if user&.is_moderator?
+  true
+elsif user && user.id == user_id && !is_moderated?
+  true
+else
+  false
+end
+
+if charged_using_account? && using_account_for_user?
+  true
+elsif migration_enabled? && !merchant_account&.is_managed?
+  false
+else
+  true
+end
+
+if section_node.root?
+  false
+elsif !children.empty?
+  true
+else
+  false
+end
+
+if url.try(:empty) || account.try(:empty?)
+  raise "not configured"
+elsif !url && !account
+  false
+else
+  true
+end
+
+# elsif with =~ regex match (not boolean)
+if link["data-skip"]
+  link.remove_attribute("data-skip")
+  true
+elsif link["href"].to_s =~ /unsubscribe/i && !options[:unsubscribe_links]
+  true
+else
+  false
+end
