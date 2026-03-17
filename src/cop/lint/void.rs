@@ -111,6 +111,33 @@ use ruby_prism::Visit;
 /// Remaining gaps (~0 FP, ~453 FN): FNs are diverse across jruby, eye, natalie
 /// repos — mostly location mismatches for complex multiline patterns and missing
 /// operator detection in deeply nested contexts.
+///
+/// ## Investigation findings (2026-03-17, round 2)
+///
+/// Root causes of remaining FP (1) and FNs (453):
+///
+/// **FP: `proc { _1 + _2 }` flagged as void** — RuboCop's `proc?` matcher uses
+/// `(block (send nil? :proc) ...)` which only matches `:block` AST type, NOT
+/// `:numblock` or `:itblock`. Blocks with numbered params (`_1`, `_2`) or
+/// it-keyword params are parsed as `numblock`/`itblock` in Parser 3.4+, so
+/// `lambda_or_proc?` returns false. In Prism, these are `BlockNode` with
+/// `NumberedParametersNode` or `ItParametersNode` — must exclude from detection.
+///
+/// **FN: `in_each_block` propagated to nested blocks** — The `in_each_block` flag
+/// was set when entering an `each` block and remained true for all descendant
+/// nodes, including nested blocks like `it "..." do ... end`. RuboCop checks
+/// `node.each_ancestor(:any_block).first` — the nearest ancestor block, not all
+/// ancestors. Fixed by resetting `in_each_block = false` in `visit_block_node`.
+///
+/// **FN: `[]=` not matched as setter** — `is_void_def` required the char before
+/// `=` to be alphanumeric/underscore, missing `[]=`. RuboCop's `assignment_method?`
+/// is `!comparison_method? && end_with?('=')`, which matches `[]=`. Fixed to use
+/// the same comparison-operator exclusion approach.
+///
+/// **FN: singleton setters excluded** — `is_void_def` skipped all singleton
+/// methods (`def self.foo=`). RuboCop's `void_context?` returns true for setter
+/// methods via `assignment_method?` regardless of receiver; only `initialize`
+/// requires no receiver. Fixed by only excluding receiver for `initialize`.
 pub struct Void;
 
 impl Cop for Void {
@@ -347,25 +374,30 @@ fn is_each_method(call: &ruby_prism::CallNode<'_>) -> bool {
 }
 
 /// Check if a def node is a void context (initialize or setter method).
-/// RuboCop uses `assignment_method?` which matches `/^[a-z_]\w*=$/`.
-/// This must NOT match operator methods like `==`, `===`, `!=`, `<=>`.
-/// Only instance methods (no receiver) are void context — `def self.initialize`
-/// and `def self.foo=` are NOT void (they are `defs` nodes in Parser gem where
-/// `void_context?` returns false).
+/// RuboCop's `void_context?` on DefNode:
+///   `(def_type? && method?(:initialize)) || assignment_method?`
+/// Where `assignment_method?` is: `!comparison_method? && method_name.end_with?('=')`
+/// And comparison operators are: `== === != <= >= > <`
+///
+/// This means:
+/// - `initialize` is void only for instance methods (def_type?, not defs)
+/// - Setter methods (`foo=`, `[]=`) are void for BOTH instance and singleton methods
+/// - Comparison operators (`==`, `===`, `!=`, `<=`, `>=`) are NOT void
 fn is_void_def(node: &ruby_prism::DefNode<'_>) -> bool {
-    // Singleton methods (def self.foo) are NOT void context
-    if node.receiver().is_some() {
-        return false;
-    }
     let name = node.name().as_slice();
-    if name == b"initialize" {
+
+    // `initialize` is void only for instance methods (no receiver).
+    // RuboCop uses `def_type?` which is false for `defs` (singleton methods).
+    if name == b"initialize" && node.receiver().is_none() {
         return true;
     }
-    // Setter method: must end in '=' but NOT be an operator like ==, ===, !=
-    // The char before '=' must be alphanumeric or underscore (i.e., a word char)
-    if name.len() >= 2 && name[name.len() - 1] == b'=' {
-        let before_eq = name[name.len() - 2];
-        before_eq.is_ascii_alphanumeric() || before_eq == b'_'
+
+    // Assignment method: ends with '=' but is NOT a comparison operator.
+    // Matches RuboCop's `!comparison_method? && method_name.end_with?('=')`
+    // This works for both instance and singleton methods (def self.foo=).
+    if name.last() == Some(&b'=') {
+        // Exclude comparison operators: ==, ===, !=, <=, >=
+        !matches!(name, b"==" | b"===" | b"!=" | b"<=" | b">=")
     } else {
         false
     }
@@ -425,18 +457,46 @@ fn is_void_lambda_or_proc(node: &ruby_prism::Node<'_>) -> bool {
     // lambda { bar } or proc { bar } — these are CallNode with a block
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
-        if (name == b"lambda" || name == b"proc")
-            && call.receiver().is_none()
-            && call.block().is_some()
-        {
-            return true;
+        if (name == b"lambda" || name == b"proc") && call.receiver().is_none() {
+            if let Some(block) = call.block() {
+                if let Some(block_node) = block.as_block_node() {
+                    // RuboCop's `proc?` uses `(block ...)` which only matches :block,
+                    // NOT :numblock or :itblock. `lambda?` uses `(any_block ...)` which
+                    // matches all. In Prism, numbered/it params are BlockNode with
+                    // NumberedParametersNode or ItParametersNode.
+                    // For `proc`, skip if using numbered/it params (matches RuboCop).
+                    // For `lambda`, always match (matches RuboCop's `any_block`).
+                    if name == b"proc" {
+                        if let Some(params) = block_node.parameters() {
+                            if params.as_numbered_parameters_node().is_some()
+                                || params.as_it_parameters_node().is_some()
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    return true;
+                }
+            }
         }
         // Proc.new { bar }
         if name == b"new" {
             if let Some(recv) = call.receiver() {
                 if let Some(c) = recv.as_constant_read_node() {
-                    if c.name().as_slice() == b"Proc" && call.block().is_some() {
-                        return true;
+                    if c.name().as_slice() == b"Proc" {
+                        if let Some(block) = call.block() {
+                            if let Some(block_node) = block.as_block_node() {
+                                // Same numblock/itblock exclusion as proc
+                                if let Some(params) = block_node.parameters() {
+                                    if params.as_numbered_parameters_node().is_some()
+                                        || params.as_it_parameters_node().is_some()
+                                    {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            }
+                        }
                     }
                 }
             }
@@ -648,6 +708,21 @@ impl<'pr> Visit<'pr> for VoidVisitor<'_, '_> {
             }
         }
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        // Reset in_each_block when entering nested blocks.
+        // RuboCop's check_void_op uses `node.each_ancestor(:any_block).first`
+        // to find the nearest ancestor block — only operators directly inside
+        // an `each` block body are exempted, not operators inside nested blocks
+        // (like `it "..." do ... end` inside `each`).
+        // Our visit_call_node handles the direct each/tap block body manually,
+        // so this override only fires for blocks reached through the default
+        // visitor (i.e., nested blocks).
+        let old_in_each = self.in_each_block;
+        self.in_each_block = false;
+        ruby_prism::visit_block_node(self, node);
+        self.in_each_block = old_in_each;
     }
 
     fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {

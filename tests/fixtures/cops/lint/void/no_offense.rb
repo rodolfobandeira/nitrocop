@@ -194,12 +194,13 @@ def bar=(rhs)
   true
 end
 
-# Singleton methods (def self.foo) are NOT void context
+# Singleton def self.initialize is NOT void context (def_type? is false for defs)
 def self.initialize(**opts)
   transformer = allocate
   transformer
 end
 
+# Single-expression singleton setter body — not checked (same as instance setters)
 def self.foo=(value)
   nil
 end
@@ -236,3 +237,9 @@ def power_operator
   c ** 3r
   do_something
 end
+
+# proc with numbered parameters — RuboCop's proc? uses (block ...) which
+# doesn't match numblock/itblock in Parser gem. Not flagged.
+proc { _1 + _2 }
+[1, 2].map { _1 * 2 }
+-> { _1 }

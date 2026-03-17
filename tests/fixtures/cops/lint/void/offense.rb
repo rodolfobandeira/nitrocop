@@ -232,3 +232,29 @@ def void_multiline_operator
            ^^ Lint/Void: Void value expression detected.
   something_else
 end
+
+# Void context: []= is a setter method (assignment_method? in RuboCop)
+def []=(key, value)
+  @hash ||= {}
+  @hash[key] = value
+  value
+  ^^^^^ Lint/Void: Void value expression detected.
+end
+
+# Void context: singleton setter method (def self.foo=)
+def self.log_output=(output)
+  @log_output = output
+  @logger = new_logger(output)
+  output
+  ^^^^^^ Lint/Void: Void value expression detected.
+end
+
+# Operator inside nested block within each — should NOT be exempted
+# RuboCop only exempts operators in the direct each block body
+[1, 2].each do |item|
+  it "test #{item}" do
+    result.should == item
+                  ^^ Lint/Void: Void value expression detected.
+    other_result
+  end
+end
