@@ -16,3 +16,33 @@ file == "Pipfile" || file == "pyproject.toml" || file.end_with?(".in") || file.e
 lower_segment == "a" || lower_segment == "alpha" || lower_segment.match?(/^(a|alpha)\d/)
 normalized_path == pattern || normalized_path == normalized_pattern
 a == "x" || a == "y" || a.start_with?("z")
+
+# Both comparison values are local variables (simple_double_comparison)
+still_active = 259
+exit_status = 0
+while exit_status == 0 || exit_status == still_active
+  break
+end
+
+# Block params as comparison values — both sides are lvars
+value = 1
+tuples.select { |x, y| value == x || value == y }
+
+# Two local variables compared (lvar == lvar is not flagged)
+a = "a"
+b = "b"
+if a == b || b == a
+  print a
+end
+
+# Comparison value is a local variable, not a literal
+prototype_path = "sig/prototype"
+generated_path = "sig/generated"
+paths.reject { |path| path == prototype_path || path == generated_path }
+
+# Only one literal comparison value (below threshold)
+actual_height = 100
+expected_height = 200
+unless actual_height == expected_height || actual_height == 0
+  nil
+end
