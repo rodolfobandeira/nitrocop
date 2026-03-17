@@ -127,27 +127,3 @@ def compress(body)
     }
   end
 end
-
-# FN fix: variable from earlier elsif condition leaks to next elsif
-def validate_entries
-  if archive.too_many_files?
-    errors.add(:base, "too many")
-  elsif entry = archive.entries.find { |entry| entry.starts_with?("/") }
-    errors.add(:base, "bad path")
-  elsif entry = archive.entries.find { |entry| entry.traversal? }
-                                        ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `entry`.
-    errors.add(:base, "traversal")
-  end
-end
-
-# FN fix: block param shadows outer in nested block (not in else)
-def nested_shadow_in_if
-  if heading =~ /pattern/
-    structure.each do |k, v|
-      v[2].each do |k, txt|
-                    ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `k`.
-        puts k, txt
-      end
-    end
-  end
-end

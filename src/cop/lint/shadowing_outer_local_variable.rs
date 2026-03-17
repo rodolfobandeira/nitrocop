@@ -54,38 +54,6 @@ use ruby_prism::Visit;
 ///   Blocks in the same `when` body that reuse the variable name are suppressed.
 ///   This matches RuboCop's `same_conditions_node_different_branch?` logic where both
 ///   the block and the outer variable resolve to the same conditional (case) node.
-///
-/// ## Corpus investigation (2026-03-17)
-///
-/// Corpus oracle reported FP=4, FN=26. After fixes: FP=0, FN=18.
-///
-/// FP fixes applied:
-/// - **Else clause suppression**: Added `in_else_of_if` tracking. When both the outer
-///   variable and block are in the same else clause, suppresses shadowing. Matches
-///   RuboCop's `variable_node == outer_local_variable_node.else_branch` check.
-///   Only set for actual else clauses, not elsif chains.
-/// - **If-predicate suppression**: Added `in_predicate_of_if` tracking. When the outer
-///   variable was assigned in an if/unless predicate (`if item = expr`) and the block
-///   is in the body or else of the same conditional, suppresses shadowing. Matches
-///   RuboCop's `variable_node == outer_local_variable_node` check.
-/// - **Adjacent elsif predicate refinement**: Skip adjacent elsif suppression when BOTH
-///   the outer variable and block are in predicates of adjacent elsifs. In Parser AST,
-///   the block inside `elsif x = find { |x| }` has a send parent (not the elsif node),
-///   so RuboCop's else_branch check doesn't match.
-/// - **Variable reassignment context preservation**: `add_local` now preserves the first
-///   assignment's conditional context on reassignment. Fixes FP where `node = x;
-///   node = y while cond` changed the variable's context from case/when to while.
-///
-/// FN fixes applied:
-/// - **Non-adjacent elsif branches**: Variables from 2+ elsifs apart now correctly
-///   shadow (e.g., `e` in elsif #2 shadowed by `|e|` in elsif #4).
-/// - **While-loop variable in else**: `part` assigned in `while` inside if-body correctly
-///   shadows `|part|` in the else clause of the same if.
-/// - **Block body scope inherits else context**: `build_block_body_scope` now receives
-///   `in_else_of_if` so block params get the correct else context for nested blocks.
-///
-/// Remaining FN (18): Various patterns including lambda scoping, complex control flow,
-/// and edge cases in VariableForce's variable_table lookup order.
 pub struct ShadowingOuterLocalVariable;
 
 impl Cop for ShadowingOuterLocalVariable {
@@ -119,8 +87,6 @@ impl Cop for ShadowingOuterLocalVariable {
             conditional_branch_stack: Vec::new(),
             when_condition_case_offset: None,
             in_when_body_of_case: None,
-            in_else_of_if: None,
-            in_predicate_of_if: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -146,16 +112,6 @@ struct VarInfo {
     /// RuboCop's VariableForce behavior where both resolve to the same
     /// conditional (case) node.
     when_condition_of_case: Option<usize>,
-    /// If the variable is inside an else/elsif clause of an if/unless,
-    /// this is the offset of the if/unless node that owns the else clause.
-    /// RuboCop suppresses shadowing when `variable_node == olv.else_branch`,
-    /// which fires when the block's parent IS the else clause body.
-    in_else_of_if: Option<usize>,
-    /// If the variable was assigned in the predicate of an if/unless
-    /// (e.g., `if item = expr`), this is the offset of that if/unless node.
-    /// RuboCop suppresses when `variable_node == outer_local_variable_node`,
-    /// which fires when the block's parent IS the same conditional.
-    in_predicate_of_if: Option<usize>,
 }
 
 struct ShadowVisitor<'a, 'src> {
@@ -173,12 +129,6 @@ struct ShadowVisitor<'a, 'src> {
     when_condition_case_offset: Option<usize>,
     /// When inside a `when` body, the case node offset for suppression checks.
     in_when_body_of_case: Option<usize>,
-    /// When inside an else/elsif clause, the if/unless node offset.
-    /// Variables assigned here get `in_else_of_if` set.
-    in_else_of_if: Option<usize>,
-    /// When visiting an if/unless predicate, the if/unless node offset.
-    /// Variables assigned here get `in_predicate_of_if` set.
-    in_predicate_of_if: Option<usize>,
 }
 
 impl ShadowVisitor<'_, '_> {
@@ -194,21 +144,11 @@ impl ShadowVisitor<'_, '_> {
 
     fn add_local(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() {
-            // If the variable already exists in this scope, preserve its
-            // original conditional context. RuboCop's VariableForce uses
-            // the FIRST declaration's conditional ancestor, not the latest
-            // reassignment. Without this, `node = x; node = y while cond`
-            // would change node's conditional from case/when to while.
-            if scope.contains_key(name) {
-                return;
-            }
             let last = self.conditional_branch_stack.last();
             let info = VarInfo {
                 conditional_branch: last.map(|&(c, b, _)| (c, b)),
                 cond_subsequent_offset: last.and_then(|&(_, _, s)| s),
                 when_condition_of_case: self.when_condition_case_offset,
-                in_else_of_if: self.in_else_of_if,
-                in_predicate_of_if: self.in_predicate_of_if,
             };
             scope.insert(name.to_string(), info);
         }
@@ -243,15 +183,9 @@ impl ShadowVisitor<'_, '_> {
             .unwrap_or(if_offset);
 
         // Visit predicate with the then-body's conditional context.
-        // Variables assigned in the predicate (e.g., `if item = expr`) get
-        // in_predicate_of_if set, enabling suppression when a block in the
-        // same if body reuses the variable name.
         self.conditional_branch_stack
             .push((if_offset, then_branch_offset, subsequent_offset));
-        let saved_pred = self.in_predicate_of_if;
-        self.in_predicate_of_if = Some(if_offset);
         self.visit(&node.predicate());
-        self.in_predicate_of_if = saved_pred;
         self.conditional_branch_stack.pop();
 
         // Visit then-body with the same branch tracking
@@ -262,28 +196,23 @@ impl ShadowVisitor<'_, '_> {
             self.conditional_branch_stack.pop();
         }
 
-        // Visit else/elsif — set in_else_of_if only for actual else clauses,
-        // NOT for elsif chains. For elsif, the nested `visit_if_node_impl`
-        // will set in_else_of_if for its own else clause if present.
+        // Visit else/elsif
         if let Some(subsequent) = node.subsequent() {
             if let Some(elsif_node) = subsequent.as_if_node() {
-                // elsif — do NOT set in_else_of_if here. The elsif is a
-                // separate conditional, not the else body.
+                // elsif — push this if's else context, then visit the elsif
+                // which will push its own context on top
                 let branch_offset = subsequent.location().start_offset();
                 self.conditional_branch_stack
                     .push((if_offset, branch_offset, None));
                 self.visit_if_node_impl(&elsif_node);
                 self.conditional_branch_stack.pop();
             } else {
-                // else clause — set in_else_of_if for this if
-                let saved_else = self.in_else_of_if;
-                self.in_else_of_if = Some(if_offset);
+                // else clause
                 let branch_offset = subsequent.location().start_offset();
                 self.conditional_branch_stack
                     .push((if_offset, branch_offset, None));
                 self.visit(&subsequent);
                 self.conditional_branch_stack.pop();
-                self.in_else_of_if = saved_else;
             }
         }
     }
@@ -575,8 +504,6 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         let outer_locals = self.current_locals();
         let block_cond_branch = self.current_conditional_branch();
         let when_body_case = self.in_when_body_of_case;
-        let block_in_else_of_if = self.in_else_of_if;
-        let block_in_predicate = self.in_predicate_of_if.is_some();
 
         // Check block parameters against outer locals
         if let Some(params_node) = node.parameters() {
@@ -588,8 +515,6 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
                     &outer_locals,
                     block_cond_branch,
                     when_body_case,
-                    block_in_else_of_if,
-                    block_in_predicate,
                     &mut self.diagnostics,
                 );
             }
@@ -602,7 +527,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         let mut body_scope = HashMap::new();
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
-                body_scope = build_block_body_scope(&block_params, block_in_else_of_if);
+                body_scope = build_block_body_scope(&block_params);
             }
         }
         self.scopes.push(body_scope);
@@ -615,8 +540,6 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         let outer_locals = self.current_locals();
         let block_cond_branch = self.current_conditional_branch();
         let when_body_case = self.in_when_body_of_case;
-        let block_in_else_of_if = self.in_else_of_if;
-        let block_in_predicate = self.in_predicate_of_if.is_some();
 
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
@@ -627,8 +550,6 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
                     &outer_locals,
                     block_cond_branch,
                     when_body_case,
-                    block_in_else_of_if,
-                    block_in_predicate,
                     &mut self.diagnostics,
                 );
             }
@@ -639,7 +560,7 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         let mut body_scope = HashMap::new();
         if let Some(params_node) = node.parameters() {
             if let Some(block_params) = params_node.as_block_parameters_node() {
-                body_scope = build_block_body_scope(&block_params, block_in_else_of_if);
+                body_scope = build_block_body_scope(&block_params);
             }
         }
         self.scopes.push(body_scope);
@@ -659,11 +580,8 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
         let unless_offset = node.location().start_offset();
         let else_offset = node.else_clause().map(|e| e.location().start_offset());
 
-        // Visit predicate with in_predicate_of_if set
-        let saved_pred = self.in_predicate_of_if;
-        self.in_predicate_of_if = Some(unless_offset);
+        // Visit predicate normally
         self.visit(&node.predicate());
-        self.in_predicate_of_if = saved_pred;
 
         // Visit body (the unless-true branch) with branch tracking
         if let Some(stmts) = node.statements() {
@@ -674,20 +592,13 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
             self.conditional_branch_stack.pop();
         }
 
-        // Visit else clause with branch tracking and in_else_of_if set.
-        // In Parser gem, `unless A; B; else; C; end` → `if A; C(then); B(else)`.
-        // So the unless-else body is treated as the then-branch. But RuboCop's
-        // suppression still fires because the block parent matches the else_branch
-        // check. We set in_else_of_if for consistency.
+        // Visit else clause with branch tracking
         if let Some(else_clause) = node.else_clause() {
             let branch_offset = else_clause.location().start_offset();
-            let saved_else = self.in_else_of_if;
-            self.in_else_of_if = Some(unless_offset);
             self.conditional_branch_stack
                 .push((unless_offset, branch_offset, None));
             self.visit_else_node(&else_clause);
             self.conditional_branch_stack.pop();
-            self.in_else_of_if = saved_else;
         }
     }
 
@@ -776,7 +687,6 @@ impl<'pr> Visit<'pr> for ShadowVisitor<'_, '_> {
 fn is_different_conditional_branch(
     outer_info: &VarInfo,
     block_branch: Option<(usize, usize)>,
-    block_in_predicate: bool,
 ) -> bool {
     let Some(block_branch) = block_branch else {
         return false;
@@ -791,18 +701,9 @@ fn is_different_conditional_branch(
     // If the outer variable's conditional has a subsequent (else/elsif) and
     // the block's nearest conditional starts AT that subsequent, the block
     // is in the immediate next elsif/else → suppress.
-    // EXCEPTION: if BOTH the outer variable and the block are in predicates
-    // of adjacent elsifs (e.g., `elsif a = find { |a| }; elsif a = find { |a| }`),
-    // do NOT suppress. RuboCop's check compares block.parent with if.else_branch;
-    // a block nested inside a predicate's call chain has a send/call parent, not
-    // the elsif node. But if only the block is in a predicate (block IS the
-    // predicate expression), its parent IS the elsif node → suppress correctly.
-    let both_in_predicates = block_in_predicate && outer_info.in_predicate_of_if.is_some();
-    if !both_in_predicates {
-        if let Some(subsequent_offset) = outer_info.cond_subsequent_offset {
-            if block_branch.0 == subsequent_offset {
-                return true;
-            }
+    if let Some(subsequent_offset) = outer_info.cond_subsequent_offset {
+        if block_branch.0 == subsequent_offset {
+            return true;
         }
     }
     false
@@ -831,7 +732,6 @@ fn is_ractor_new_call(node: &ruby_prism::CallNode<'_>) -> bool {
 
 /// Check multi-target (destructured) block params for shadowing.
 /// E.g., `|(theme_id, upload_id, sprite)|`
-#[allow(clippy::too_many_arguments)]
 fn check_multi_target_shadow(
     cop: &ShadowingOuterLocalVariable,
     source: &SourceFile,
@@ -839,8 +739,6 @@ fn check_multi_target_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     block_cond_branch: Option<(usize, usize)>,
     in_when_body_of_case: Option<usize>,
-    block_in_else_of_if: Option<usize>,
-    block_in_predicate: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for target in mt.lefts().iter() {
@@ -856,8 +754,6 @@ fn check_multi_target_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         } else if let Some(inner) = target.as_multi_target_node() {
@@ -868,8 +764,6 @@ fn check_multi_target_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
@@ -887,15 +781,12 @@ fn check_multi_target_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_block_parameters_shadow(
     cop: &ShadowingOuterLocalVariable,
     source: &SourceFile,
@@ -903,8 +794,6 @@ fn check_block_parameters_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     block_cond_branch: Option<(usize, usize)>,
     in_when_body_of_case: Option<usize>,
-    block_in_else_of_if: Option<usize>,
-    block_in_predicate: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let Some(inner_params) = block_params.parameters() {
@@ -915,8 +804,6 @@ fn check_block_parameters_shadow(
             outer_locals,
             block_cond_branch,
             in_when_body_of_case,
-            block_in_else_of_if,
-            block_in_predicate,
             diagnostics,
         );
 
@@ -929,8 +816,6 @@ fn check_block_parameters_shadow(
                     outer_locals,
                     block_cond_branch,
                     in_when_body_of_case,
-                    block_in_else_of_if,
-                    block_in_predicate,
                     diagnostics,
                 );
             }
@@ -945,8 +830,6 @@ fn check_block_parameters_shadow(
                     outer_locals,
                     block_cond_branch,
                     in_when_body_of_case,
-                    block_in_else_of_if,
-                    block_in_predicate,
                     diagnostics,
                 );
             }
@@ -969,14 +852,11 @@ fn check_block_parameters_shadow(
             outer_locals,
             block_cond_branch,
             in_when_body_of_case,
-            block_in_else_of_if,
-            block_in_predicate,
             diagnostics,
         );
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_block_params_shadow(
     cop: &ShadowingOuterLocalVariable,
     source: &SourceFile,
@@ -984,8 +864,6 @@ fn check_block_params_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     block_cond_branch: Option<(usize, usize)>,
     in_when_body_of_case: Option<usize>,
-    block_in_else_of_if: Option<usize>,
-    block_in_predicate: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Required params
@@ -1002,8 +880,6 @@ fn check_block_params_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
@@ -1023,8 +899,6 @@ fn check_block_params_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
@@ -1044,8 +918,6 @@ fn check_block_params_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
@@ -1066,8 +938,6 @@ fn check_block_params_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         } else if let Some(keyword) = p.as_optional_keyword_parameter_node() {
@@ -1083,8 +953,6 @@ fn check_block_params_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
@@ -1105,8 +973,6 @@ fn check_block_params_shadow(
                     outer_locals,
                     block_cond_branch,
                     in_when_body_of_case,
-                    block_in_else_of_if,
-                    block_in_predicate,
                     diagnostics,
                 );
             }
@@ -1128,8 +994,6 @@ fn check_block_params_shadow(
                     outer_locals,
                     block_cond_branch,
                     in_when_body_of_case,
-                    block_in_else_of_if,
-                    block_in_predicate,
                     diagnostics,
                 );
             }
@@ -1150,8 +1014,6 @@ fn check_block_params_shadow(
                 outer_locals,
                 block_cond_branch,
                 in_when_body_of_case,
-                block_in_else_of_if,
-                block_in_predicate,
                 diagnostics,
             );
         }
@@ -1160,7 +1022,6 @@ fn check_block_params_shadow(
 
 fn build_block_body_scope(
     block_params: &ruby_prism::BlockParametersNode<'_>,
-    in_else_of_if: Option<usize>,
 ) -> HashMap<String, VarInfo> {
     let mut scope = HashMap::new();
 
@@ -1174,12 +1035,10 @@ fn build_block_body_scope(
                     conditional_branch: None,
                     cond_subsequent_offset: None,
                     when_condition_of_case: None,
-                    in_else_of_if,
-                    in_predicate_of_if: None,
                 },
             );
         }
-        collect_multi_target_names_from_params(&params, &mut scope, in_else_of_if);
+        collect_multi_target_names_from_params(&params, &mut scope);
     }
 
     for local in block_params.locals().iter() {
@@ -1193,8 +1052,6 @@ fn build_block_body_scope(
                     conditional_branch: None,
                     cond_subsequent_offset: None,
                     when_condition_of_case: None,
-                    in_else_of_if,
-                    in_predicate_of_if: None,
                 },
             );
         }
@@ -1212,8 +1069,6 @@ fn check_shadow(
     outer_locals: &HashMap<String, VarInfo>,
     block_cond_branch: Option<(usize, usize)>,
     in_when_body_of_case: Option<usize>,
-    block_in_else_of_if: Option<usize>,
-    block_in_predicate: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if name.is_empty() || name.starts_with('_') {
@@ -1222,7 +1077,7 @@ fn check_shadow(
     if let Some(info) = outer_locals.get(name) {
         // Skip if the outer variable and block are in different branches
         // of the same conditional (case/when, if/else).
-        if is_different_conditional_branch(info, block_cond_branch, block_in_predicate) {
+        if is_different_conditional_branch(info, block_cond_branch) {
             return;
         }
         // Skip if the outer variable was assigned in a `when` condition and
@@ -1233,32 +1088,6 @@ fn check_shadow(
             (info.when_condition_of_case, in_when_body_of_case)
         {
             if var_case == block_case {
-                return;
-            }
-        }
-        // Suppress when both the outer variable and the block are inside
-        // the same else/elsif clause of the same if/unless. In RuboCop,
-        // `variable_node == outer_local_variable_node.else_branch` fires
-        // because the block's parent in Parser AST IS the else clause body.
-        if let (Some(var_else), Some(block_else)) = (info.in_else_of_if, block_in_else_of_if) {
-            if var_else == block_else {
-                return;
-            }
-        }
-        // Suppress when the outer variable was assigned in an if/unless
-        // predicate (e.g., `if item = expr`) and the block is inside
-        // the same conditional. In RuboCop, `variable_node ==
-        // outer_local_variable_node` fires because the block's parent
-        // IS the if node itself.
-        if let Some(pred_if) = info.in_predicate_of_if {
-            // Block is in the body of the same if (same cond offset)
-            if let Some((block_cond, _)) = block_cond_branch {
-                if block_cond == pred_if {
-                    return;
-                }
-            }
-            // Block is in the else clause of the same if
-            if block_in_else_of_if == Some(pred_if) {
                 return;
             }
         }
@@ -1308,7 +1137,6 @@ fn collect_multi_target_names(node: &ruby_prism::MultiTargetNode<'_>, names: &mu
 fn collect_multi_target_names_from_params(
     params: &ruby_prism::ParametersNode<'_>,
     scope: &mut HashMap<String, VarInfo>,
-    in_else_of_if: Option<usize>,
 ) {
     for p in params.requireds().iter() {
         if let Some(mt) = p.as_multi_target_node() {
@@ -1321,8 +1149,6 @@ fn collect_multi_target_names_from_params(
                         conditional_branch: None,
                         when_condition_of_case: None,
                         cond_subsequent_offset: None,
-                        in_else_of_if,
-                        in_predicate_of_if: None,
                     },
                 );
             }
@@ -1340,8 +1166,6 @@ fn collect_multi_target_names_from_params(
                         conditional_branch: None,
                         when_condition_of_case: None,
                         cond_subsequent_offset: None,
-                        in_else_of_if,
-                        in_predicate_of_if: None,
                     },
                 );
             }
