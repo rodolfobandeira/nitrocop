@@ -30,6 +30,30 @@ use ruby_prism::Visit;
 /// - FN: For-loop variables were not checked.
 /// - FP (503 in corpus): Various control-flow patterns where conservative
 ///   analysis incorrectly flagged assignments used through branches/loops.
+///
+/// ## Fixes applied
+///
+/// - FP fix: `begin/rescue` and `begin/ensure` blocks now protect pre-begin
+///   writes from being marked useless during body analysis. Any statement in
+///   the body could raise, so the pre-begin value may still be live when
+///   control reaches the rescue/ensure or post-begin code. This fixed 270+
+///   FPs from the `result = nil; begin; result = expr; rescue; end; result`
+///   pattern common in Rails and other frameworks.
+/// - FP fix: `class << expr` now correctly analyzes the expression as a read.
+///   Previously `obj = Object.new; class << obj; end` flagged `obj` as useless
+///   because the singleton class expression was not traversed for variable reads.
+///
+/// ## Remaining gaps (821 FP, 1425 FN as of investigation)
+///
+/// - FP: Multi-write targets (`a, b = expr`) where one target is unused —
+///   RuboCop's VariableForce has more nuanced handling of multi-writes.
+/// - FP: Complex control flow in loop bodies with if/elsif branches that
+///   reset variables — the 2-pass simulation doesn't fully capture all
+///   back-edge read patterns.
+/// - FP: `rescue => e` where `e` is unused — some RuboCop configurations
+///   suppress this detection.
+/// - FN: Various patterns requiring deeper flow analysis that our sequential
+///   approximation misses.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
