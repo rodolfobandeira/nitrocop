@@ -209,3 +209,128 @@ def optimize(code)
   nil while
     code.gsub!(/pattern/) { |f| f.upcase }
 end
+
+# Modifier if last of multiple statements before elsif — no right sibling
+if valid_period
+  posts_left = 0
+  url = "#{view.topic.url}/2"
+  reply_count = view.filtered_posts.count - 1
+  reply_count = 0 if reply_count < 0
+  posts_left = reply_count - limit if reply_count >
+    limit
+elsif embed_url.present?
+  enqueue(:retrieve, user_id: current_user.try(:id))
+end
+
+# Modifier if last of multiple statements before else — no right sibling
+if params[:archetype].present?
+  args[:archetype] = params[:archetype]
+  args[:participants] = params[:participants] if params[:participants].present? &&
+    params[:archetype] == "private_message"
+else
+  args[:category_id] = params[:category_id].to_i if params[:category_id].present?
+end
+
+# Modifier if last of multiple statements before else (assignment form)
+if opts[:private_message]
+  scale_entropy = min_length.to_f / min_post_length.to_f
+  entropy = (entropy * scale_entropy).to_i
+  entropy =
+    (min_length.to_f * ENTROPY_SCALE).to_i if entropy >
+    min_length
+else
+  entropy = (min_post_length.to_f * ENTROPY_SCALE).to_i if entropy >
+    min_post_length
+end
+
+# Modifier unless inside rescue handler before next rescue — no right sibling
+begin
+  constantize(word)
+rescue NameError => e
+  raise unless e.message =~ /(uninitialized constant|wrong constant name) #{const_regexp(word)}$/ ||
+    e.name.to_s == word.to_s
+rescue ArgumentError => e
+  raise unless e.message =~ /not missing constant #{const_regexp(word)}\!$/
+end
+
+# Modifier if inside rescue handler before next rescue — no right sibling
+def safe_constantize(word)
+  constantize(word)
+rescue NameError => e
+  raise if e.name && !(word.to_s.split("::").include?(e.name.to_s) ||
+    e.name.to_s == word.to_s)
+rescue LoadError => e
+  message = e.respond_to?(:original_message) ? e.original_message : e.message
+  raise unless /Unable to autoload constant #{const_regexp(word)}/.match?(message)
+end
+
+# Modifier unless last of multiple statements before rescue — no right sibling
+def validate_upload
+  return if current_admin.present?
+  head :unprocessable_entity unless [
+    maximum_allowed_size.try(:to_i) >= blob_args[:byte_size].try(:to_i),
+    content_types.any? { |pattern| pattern.match?(blob_args[:content_type]) },
+    allowed_extensions.any? { |pattern| pattern.match?(extension) }
+  ].all?
+rescue NoMethodError
+  head :unprocessable_entity
+end
+
+# Modifier unless with do..end block before rescue — no right sibling
+def determine_validity(import_file_upload)
+  widgets = YAML.load(import_file_upload.uploaded_content)
+  raise InvalidWidgetYamlError unless widgets.all? do |widget_or_key, _|
+    widget_or_key["MiqWidget"] || widget_or_key == "MiqWidget"
+  end
+rescue Psych::SyntaxError
+  raise NonYamlError
+end
+
+# Modifier unless with multiline call args before else — no right sibling
+def increment(key, amount = 1, options = {})
+  backend.transaction do
+    if existing = @load_for_update.call(key: key)
+      existing_value = existing[config.value_column]
+      amount += Integer(existing_value)
+      raise IncrementError, "no update" unless @increment_update.call(
+        key: key,
+        value: existing_value,
+        new_value: blob(amount.to_s)
+      ) == 1
+    else
+      @create.call(key: key, value: blob(amount.to_s))
+    end
+  end
+end
+
+# Modifier unless before rescue (raise with line continuation)
+raise "failed to create test zip" \
+  unless system(
+    "zip -q file.zip entry1 entry2"
+  )
+rescue StandardError
+  puts "zip failed"
+
+# Modifier if before rescue inside iterator — no right sibling
+entries.each do |dev_path|
+  dev = File.basename(dev_path)
+  return id if (dev.start_with?("nvme") && id.include?("nvme-eui.")) ||
+    (dev.start_with?("sd") && id.include?("wwn-")) ||
+    (dev.start_with?("md") && id.include?("md-uuid-"))
+rescue SystemCallError
+  next
+end
+
+# Modifier if inside case/when before else — no right sibling
+case access
+when :any
+  return true if group_through.klass.eager_load(:group).exists?(
+    group_through.foreign_key => id,
+    group_id: group,
+    groups: {
+      active: true
+    }
+  )
+else
+  return true if has_permission?(access)
+end

@@ -70,6 +70,21 @@ use ruby_prism::Visit;
 ///   `else`/`elsif`/`rescue`/`ensure` from the terminator list, keeping only `end`,
 ///   `}`, and `when` as true scope-closers.
 ///
+/// **FP root causes (round 4, 13 FP → 2 FP):**
+/// - `has_right_sibling` treated `else`/`elsif`/`rescue`/`ensure` as always
+///   indicating a right sibling. But in RuboCop's Parser AST, these keywords
+///   are only right siblings when the modifier is the SOLE statement in its
+///   parent body. When the modifier is the last of multiple statements, they
+///   are wrapped in a `begin` node and `right_sibling` returns nil.
+/// - Additionally, inside a `rescue` handler body, the next `rescue`/`ensure`
+///   is a sibling of the `resbody` node, never of the body statement.
+/// - Inside a `when` body, `else` is a child of `case`, not `when`.
+/// - Fixed by passing statement_start_line to `has_right_sibling` and using
+///   `is_sole_body_statement` to look backwards: if preceding non-blank
+///   non-comment line has the same indentation → multiple statements → no
+///   right sibling. If enclosing scope is `when` or `rescue` handler → no
+///   right sibling for `else`/`rescue`.
+///
 /// **Remaining FP (2 in camping, unfixable):**
 /// - Both FPs are in `camping__camping__f2479aa` — heavily minified Ruby with
 ///   semicolons and code crammed on single lines. These are edge cases where
@@ -146,7 +161,9 @@ impl Cop for EmptyLineAfterMultilineCondition {
                 let predicate = if_node.predicate();
                 let pred_end = predicate.location().end_offset().saturating_sub(1);
                 let (pred_end_line, _) = source.offset_to_line_col(pred_end);
-                if has_right_sibling(source, pred_end_line) {
+                let (stmt_start_line, _) =
+                    source.offset_to_line_col(if_node.location().start_offset());
+                if has_right_sibling(source, stmt_start_line, pred_end_line) {
                     diagnostics.extend(self.check_multiline_condition(source, &predicate));
                 }
             } else {
@@ -167,7 +184,9 @@ impl Cop for EmptyLineAfterMultilineCondition {
             if is_modifier {
                 let pred_end = predicate.location().end_offset().saturating_sub(1);
                 let (pred_end_line, _) = source.offset_to_line_col(pred_end);
-                if has_right_sibling(source, pred_end_line) {
+                let (stmt_start_line, _) =
+                    source.offset_to_line_col(unless_node.location().start_offset());
+                if has_right_sibling(source, stmt_start_line, pred_end_line) {
                     diagnostics.extend(self.check_multiline_condition(source, &predicate));
                 }
             } else {
@@ -191,7 +210,9 @@ impl Cop for EmptyLineAfterMultilineCondition {
             if is_begin_modifier {
                 let pred_end = predicate.location().end_offset().saturating_sub(1);
                 let (pred_end_line, _) = source.offset_to_line_col(pred_end);
-                if has_right_sibling(source, pred_end_line) {
+                let (stmt_start_line, _) =
+                    source.offset_to_line_col(while_node.location().start_offset());
+                if has_right_sibling(source, stmt_start_line, pred_end_line) {
                     diagnostics.extend(self.check_multiline_condition(source, &predicate));
                 }
             } else {
@@ -213,7 +234,9 @@ impl Cop for EmptyLineAfterMultilineCondition {
             if is_begin_modifier {
                 let pred_end = predicate.location().end_offset().saturating_sub(1);
                 let (pred_end_line, _) = source.offset_to_line_col(pred_end);
-                if has_right_sibling(source, pred_end_line) {
+                let (stmt_start_line, _) =
+                    source.offset_to_line_col(until_node.location().start_offset());
+                if has_right_sibling(source, stmt_start_line, pred_end_line) {
                     diagnostics.extend(self.check_multiline_condition(source, &predicate));
                 }
             } else {
@@ -265,15 +288,25 @@ const MSG: &str = "Use empty line after multiline condition.";
 /// This approximates RuboCop's `right_sibling` check for modifier forms.
 ///
 /// In RuboCop's AST (Parser gem), `right_sibling` returns the next child of
-/// the parent node. For a modifier if/unless that is the direct body of an
-/// outer `if` node (single-statement body), the parent is the outer `if` and
-/// `right_sibling` returns the else/elsif body. Similarly, in a `begin` block,
-/// `rescue`/`ensure` are sibling positions. So `else`, `elsif`, `rescue`, and
-/// `ensure` keywords indicate a right sibling exists.
+/// the parent node. The behavior depends on whether the modifier is the sole
+/// statement in its parent body or one of multiple:
 ///
-/// Only `end`, `}`, and `when` are true terminators (scope-closing or
-/// case-branch boundaries where the modifier's parent is a `when` body).
-fn has_right_sibling(source: &SourceFile, condition_end_line: usize) -> bool {
+/// - **Sole statement**: the modifier IS the direct child of the parent node
+///   (e.g., `if`/`def`/`begin`), so `else`/`elsif`/`rescue`/`ensure` from
+///   the parent structure ARE right siblings → fire.
+/// - **Last of multiple**: statements are wrapped in a `begin` node, and
+///   the modifier is the last child of `begin` → `right_sibling` returns
+///   nil → don't fire.
+///
+/// Special cases:
+/// - Inside a `rescue` handler body: the next `rescue`/`ensure` is a sibling
+///   of the `resbody` node, never of the body statement → don't fire.
+/// - Inside a `when` body: `else` is a child of `case`, not `when` → don't fire.
+fn has_right_sibling(
+    source: &SourceFile,
+    statement_start_line: usize,
+    condition_end_line: usize,
+) -> bool {
     let lines: Vec<&[u8]> = source.lines().collect();
     // Look at lines after the condition end
     for line in lines.iter().skip(condition_end_line) {
@@ -303,14 +336,119 @@ fn has_right_sibling(source: &SourceFile, condition_end_line: usize) -> bool {
             if rest.starts_with(b"when ") || rest.starts_with(b"when\n") || rest == b"when" {
                 return false;
             }
-            // `else`, `elsif`, `rescue`, `ensure` indicate that the modifier
-            // is the body of a branching construct (if/begin), and the next
-            // branch is a right sibling in the AST → fire
-            // All other lines are also right siblings → fire
+            // `else`, `elsif`, `rescue`, `ensure` — these are only right
+            // siblings if the modifier is the sole statement in its parent body.
+            if is_branch_keyword(rest) {
+                return is_sole_body_statement(
+                    &lines,
+                    statement_start_line,
+                    is_rescue_keyword(rest),
+                );
+            }
+            // All other lines are right siblings → fire
             return true;
         }
     }
     false
+}
+
+/// Check if a line starts with a branch keyword (`else`, `elsif`, `rescue`, `ensure`).
+fn is_branch_keyword(rest: &[u8]) -> bool {
+    rest == b"else"
+        || rest.starts_with(b"else ")
+        || rest.starts_with(b"else\t")
+        || rest.starts_with(b"elsif ")
+        || rest.starts_with(b"elsif\t")
+        || rest.starts_with(b"rescue")
+            && (rest.len() == 6 || rest[6] == b' ' || rest[6] == b'\t' || rest[6] == b'\n')
+        || rest.starts_with(b"ensure")
+            && (rest.len() == 6 || rest[6] == b' ' || rest[6] == b'\t' || rest[6] == b'\n')
+}
+
+/// Check if a line starts with `rescue` or `ensure`.
+fn is_rescue_keyword(rest: &[u8]) -> bool {
+    rest.starts_with(b"rescue")
+        && (rest.len() == 6 || rest[6] == b' ' || rest[6] == b'\t' || rest[6] == b'\n')
+        || rest.starts_with(b"ensure")
+            && (rest.len() == 6 || rest[6] == b' ' || rest[6] == b'\t' || rest[6] == b'\n')
+}
+
+/// Determine if the modifier statement is the sole body statement in its
+/// enclosing scope by looking backwards from the statement start line.
+///
+/// Returns true if the modifier appears to be the only statement (right sibling
+/// exists), false if there are preceding statements (no right sibling).
+///
+/// When `following_is_rescue` is true and the enclosing scope is itself a
+/// `rescue` handler, always returns false — the next `rescue`/`ensure` is
+/// a sibling of the `resbody` node, not of the body statement.
+fn is_sole_body_statement(
+    lines: &[&[u8]],
+    statement_start_line: usize,
+    following_is_rescue: bool,
+) -> bool {
+    // Get indentation of the modifier statement
+    let stmt_line = if statement_start_line > 0 && statement_start_line <= lines.len() {
+        lines[statement_start_line - 1]
+    } else {
+        return false;
+    };
+    let stmt_indent = line_indent(stmt_line);
+
+    // Look backwards for the enclosing scope opener or a preceding statement
+    for i in (0..statement_start_line.saturating_sub(1)).rev() {
+        let line = lines[i];
+        if is_blank_or_whitespace_line(line) {
+            continue;
+        }
+        let indent = line_indent(line);
+        if indent < stmt_indent {
+            // Found the enclosing scope opener at lower indentation.
+            // Check if it's a `when` line — if so, `else` from the parent
+            // `case` is never a right sibling of content inside `when`.
+            let trimmed_pos = line.iter().position(|&b| b != b' ' && b != b'\t');
+            if let Some(pos) = trimmed_pos {
+                let rest = &line[pos..];
+                if rest.starts_with(b"when ") || rest.starts_with(b"when\t") || rest == b"when" {
+                    return false;
+                }
+                // If scope opener is a `rescue` line and the following keyword
+                // is also rescue/ensure, we're inside a rescue handler body
+                // and the next rescue is a sibling of the resbody, not our stmt.
+                if following_is_rescue
+                    && rest.starts_with(b"rescue")
+                    && (rest.len() == 6 || rest[6] == b' ' || rest[6] == b'\t' || rest[6] == b'\n')
+                {
+                    return false;
+                }
+            }
+            // Sole statement — right sibling exists
+            return true;
+        }
+        if indent == stmt_indent {
+            // Found a preceding statement at the same indentation level.
+            // Skip comment lines.
+            let trimmed_pos = line.iter().position(|&b| b != b' ' && b != b'\t');
+            if let Some(pos) = trimmed_pos {
+                if line[pos] == b'#' {
+                    continue;
+                }
+            }
+            // Multiple statements — no right sibling
+            return false;
+        }
+        // indent > stmt_indent: could be continuation of a previous statement,
+        // keep looking backwards
+    }
+    // Reached beginning of file without finding scope opener — no right sibling
+    false
+}
+
+/// Count the number of leading whitespace characters in a line.
+fn line_indent(line: &[u8]) -> usize {
+    line.iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
 }
 
 /// Check if a predicate node represents a block call where the block delimiters
