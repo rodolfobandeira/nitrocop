@@ -1,4 +1,3 @@
-use crate::cop::node_type::ARRAY_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -9,17 +8,24 @@ use ruby_prism::Visit;
 ///
 /// ## Investigation findings (2026-03-14)
 ///
-/// **FP root cause:** Prism wraps multi-assignment RHS values (`a, b = 1, 2`)
-/// in an implicit `ArrayNode` with no `opening_loc`. The cop was checking these
-/// implicit arrays as if they were array literals. Fixed by skipping arrays
-/// where `opening_loc()` is `None`. RuboCop does the same via
-/// `return if node.parent&.masgn_type?`.
+/// **FP root cause (original):** Prism wraps multi-assignment RHS values (`a, b = 1, 2`)
+/// in an implicit `ArrayNode` with no `opening_loc`. Fixed by skipping arrays inside
+/// `MultiWriteNode` parents, matching RuboCop's `return if node.parent&.masgn_type?`.
 ///
-/// **FN root cause:** RuboCop treats rescue exception lists (e.g.,
-/// `rescue ArgumentError, RuntimeError`) as arrays for alignment purposes.
-/// In Prism these are `RescueNode` with an `exceptions()` list, not `ArrayNode`.
-/// Fixed by adding `RESCUE_NODE` handling that checks alignment of exception
-/// classes spanning multiple lines.
+/// **FP root cause (2026-03-17):** Bracketed arrays inside multi-assignments
+/// (e.g., `a, b = [x, y]`) were still being checked. RuboCop skips ALL arrays
+/// whose parent is a masgn, regardless of brackets. Fixed by moving array checking
+/// to a visitor that tracks parent context via `in_multi_write` flag.
+///
+/// **FN root cause (original):** RuboCop treats rescue exception lists as arrays
+/// for alignment. In Prism these are `RescueNode` with `exceptions()` list.
+/// Fixed by adding rescue node handling.
+///
+/// **FN root cause (2026-03-17):** Trailing commas in assignments create implicit
+/// arrays (e.g., `x = val,\n  next_line`). Prism wraps these in `ArrayNode` with
+/// no `opening_loc`, same as multi-assignment RHS. The blanket skip of bracketless
+/// arrays missed these. Fixed by only skipping arrays inside `MultiWriteNode`,
+/// not all bracketless arrays.
 pub struct ArrayAlignment;
 
 /// Returns true if the byte at `offset` is the first non-whitespace character on its line.
@@ -37,24 +43,6 @@ impl Cop for ArrayAlignment {
         "Layout/ArrayAlignment"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[ARRAY_NODE]
-    }
-
-    fn check_node(
-        &self,
-        source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
-        config: &CopConfig,
-        diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
-    ) {
-        if let Some(array_node) = node.as_array_node() {
-            self.check_array(source, &array_node, config, diagnostics);
-        }
-    }
-
     fn check_source(
         &self,
         source: &SourceFile,
@@ -64,27 +52,43 @@ impl Cop for ArrayAlignment {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // RescueNode is not dispatched through visit_branch_node_enter in Prism,
-        // so we need a dedicated visitor to find rescue nodes for exception list
-        // alignment checking.
-        let mut visitor = RescueVisitor {
+        let mut visitor = AlignmentVisitor {
             cop: self,
             source,
             config,
             diagnostics,
+            in_multi_write: false,
         };
         visitor.visit(&parse_result.node());
     }
 }
 
-struct RescueVisitor<'a> {
+struct AlignmentVisitor<'a> {
     cop: &'a ArrayAlignment,
     source: &'a SourceFile,
     config: &'a CopConfig,
     diagnostics: &'a mut Vec<Diagnostic>,
+    in_multi_write: bool,
 }
 
-impl<'pr> Visit<'pr> for RescueVisitor<'_> {
+impl<'pr> Visit<'pr> for AlignmentVisitor<'_> {
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        let prev = self.in_multi_write;
+        self.in_multi_write = true;
+        ruby_prism::visit_multi_write_node(self, node);
+        self.in_multi_write = prev;
+    }
+
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        // RuboCop: `return if node.parent&.masgn_type?`
+        // Skip all arrays (bracketed or not) inside multi-assignments.
+        if !self.in_multi_write {
+            self.cop
+                .check_array(self.source, node, self.config, self.diagnostics);
+        }
+        ruby_prism::visit_array_node(self, node);
+    }
+
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         self.cop
             .check_rescue_exceptions(self.source, node, self.config, self.diagnostics);
@@ -102,13 +106,7 @@ impl ArrayAlignment {
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_element");
         let indent_width = config.get_usize("IndentationWidth", 2);
-
-        // Skip implicit arrays (no opening bracket) — these are RHS of
-        // multi-assignments like `a, b = 1, 2` where Prism wraps values in
-        // an ArrayNode with no `[`.
-        if array_node.opening_loc().is_none() {
-            return;
-        }
+        let is_bracketed = array_node.opening_loc().is_some();
 
         let elements = array_node.elements();
         if elements.len() < 2 {
@@ -121,13 +119,19 @@ impl ArrayAlignment {
         };
         let (first_line, first_col) = source.offset_to_line_col(first.location().start_offset());
 
-        // For "with_fixed_indentation", expected column is array line indent + indent_width
         let expected_col = match style {
             "with_fixed_indentation" => {
-                let open_loc = array_node.opening_loc().unwrap_or(first.location());
-                let (open_line, _) = source.offset_to_line_col(open_loc.start_offset());
-                let open_line_bytes = source.lines().nth(open_line - 1).unwrap_or(b"");
-                crate::cop::util::indentation_of(open_line_bytes) + indent_width
+                if is_bracketed {
+                    let open_loc = array_node.opening_loc().unwrap();
+                    let (open_line, _) = source.offset_to_line_col(open_loc.start_offset());
+                    let open_line_bytes = source.lines().nth(open_line - 1).unwrap_or(b"");
+                    crate::cop::util::indentation_of(open_line_bytes) + indent_width
+                } else {
+                    // For bracketless arrays (trailing comma), use first element's
+                    // line indentation + indent_width
+                    let first_line_bytes = source.lines().nth(first_line - 1).unwrap_or(b"");
+                    crate::cop::util::indentation_of(first_line_bytes) + indent_width
+                }
             }
             _ => first_col, // "with_first_element" (default)
         };

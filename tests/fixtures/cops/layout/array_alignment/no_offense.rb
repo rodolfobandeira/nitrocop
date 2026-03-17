@@ -39,6 +39,10 @@ create(:enterprise)
 vetho, vethi = [local_ip.network.to_s,
                 local_ip.next_sib.network.to_s]
 
+# Multi-assignment with misaligned array literal — RuboCop skips (masgn parent)
+vetho, vethi = [local_ip.network.to_s,
+  local_ip.next_sib.network.to_s]
+
 # Rescue exception list aligned with first exception
 begin
   foo

@@ -12,6 +12,21 @@ z = ["x",
          "y"]
          ^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
 
+# Trailing comma creates implicit array — misaligned elements
+config[:expiration] = valid_date,
+config[:key_name] = key_name
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+
+t[:push] = "Commit changes",
+t[:pull] = "Update working copy",
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+t[:switch] = "Open branch"
+^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+
+MAX_LENGTH = "x-max-length",
+QUEUE_TYPE = "x-queue-type"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+
 # Rescue exception list misaligned
 begin
   foo
