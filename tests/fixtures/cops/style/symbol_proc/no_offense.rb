@@ -27,3 +27,25 @@ something { |x| y.method }
 something { |*x| x.first }
 # Block argument
 something { |&x| x.call }
+# Ruby 3.4 it-block: safe navigation can't be converted
+items.map { it&.name }
+# Ruby 3.4 it-block: method has arguments
+items.map { it.to_s(16) }
+# Ruby 3.4 it-block: hash literal receiver
+{foo: 42}.select { it.bar }
+{foo: 42}.reject { it.bar }
+# Ruby 3.4 it-block: array literal receiver with min/max
+[1, 2, 3].min { it.foo }
+[1, 2, 3].max { it.foo }
+# Numbered param _1: safe navigation
+items.map { _1&.name }
+# Numbered param _1: method has arguments
+items.map { _1.to_s(16) }
+# Numbered param _1: hash literal receiver
+{foo: 42}.select { _1.bar }
+{foo: 42}.reject { _1.bar }
+# Numbered param _1: array literal receiver with min/max
+[1, 2, 3].min { _1.foo }
+[1, 2, 3].max { _1.foo }
+# Numbered param _2 (only _1 maps to single param)
+something { _2.first }

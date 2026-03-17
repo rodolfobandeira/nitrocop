@@ -485,4 +485,68 @@ mod tests {
         let diags = run_cop_full_with_config(&SymbolProc, source, config);
         assert_eq!(diags.len(), 1);
     }
+
+    #[test]
+    fn it_block_fires() {
+        let source = b"items.map { it.to_s }\n";
+        let diags = run_cop_full_with_config(&SymbolProc, source, CopConfig::default());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn numbered_param_fires() {
+        let source = b"items.map { _1.to_s }\n";
+        let diags = run_cop_full_with_config(&SymbolProc, source, CopConfig::default());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn numbered_param_2_no_offense() {
+        let source = b"something { _2.first }\n";
+        let diags = run_cop_full_with_config(&SymbolProc, source, CopConfig::default());
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn active_support_skips_proc_it_block() {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "ActiveSupportExtensionsEnabled".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        let source = b"proc { it.method }\n";
+        assert_cop_no_offenses_full_with_config(&SymbolProc, source, config);
+    }
+
+    #[test]
+    fn active_support_skips_proc_numbered_param() {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "ActiveSupportExtensionsEnabled".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        let source = b"proc { _1.method }\n";
+        assert_cop_no_offenses_full_with_config(&SymbolProc, source, config);
+    }
+
+    #[test]
+    fn it_block_safe_nav_no_offense() {
+        let source = b"items.map { it&.name }\n";
+        let diags = run_cop_full_with_config(&SymbolProc, source, CopConfig::default());
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn it_block_with_inner_args_no_offense() {
+        let source = b"items.map { it.to_s(16) }\n";
+        let diags = run_cop_full_with_config(&SymbolProc, source, CopConfig::default());
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn it_block_hash_select_no_offense() {
+        let source = b"{foo: 42}.select { it.bar }\n";
+        let diags = run_cop_full_with_config(&SymbolProc, source, CopConfig::default());
+        assert_eq!(diags.len(), 0);
+    }
 }
