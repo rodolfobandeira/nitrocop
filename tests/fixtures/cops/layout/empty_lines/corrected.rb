@@ -13,10 +13,7 @@ b = 2
 
 # another comment
 
-# Consecutive blank lines inside =begin/=end block comments ARE offenses.
-# RuboCop's tokens include embdoc tokens for =begin/=end content lines.
-=begin
-some documentation
+# Consecutive blank lines in a comment-only file
+# frozen_string_literal: true
 
-more documentation
-=end
+# Another comment

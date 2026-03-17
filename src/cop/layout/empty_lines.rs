@@ -65,6 +65,17 @@ use crate::parse::source::SourceFile;
 /// strings/heredocs/regexes/symbols but NOT comments (including `=begin`/`=end`).
 /// This preserves heredoc/string skipping while allowing `=begin`/`=end`
 /// blank line detection.
+///
+/// ## Corpus investigation (2026-03-17, FP=132)
+///
+/// 132 FPs from blank lines inside `=begin`/`=end` blocks. The previous fix
+/// (switching to `is_not_string()`) was incorrect — RuboCop does NOT flag
+/// consecutive blank lines inside `=begin`/`=end` blocks. Verified empirically:
+/// a file with `=begin\n\n\n=end` produces 0 offenses from RuboCop.
+/// Fix: track `=begin`/`=end` ranges during line iteration. When a line starts
+/// with `=begin` (at column 0), enter embdoc mode. When a line starts with
+/// `=end` (at column 0) while in embdoc mode, exit it. Skip all lines
+/// (including blank lines) while in embdoc mode.
 pub struct EmptyLines;
 
 impl Cop for EmptyLines {
@@ -131,10 +142,38 @@ impl Cop for EmptyLines {
         let lines: Vec<&[u8]> = source.lines().collect();
         let total_lines = lines.len();
         let mut seen_non_blank = false;
+        let mut in_embdoc = false;
 
         for (i, line) in lines.iter().enumerate() {
             let line_len = line.len() + 1; // +1 for newline
             let current_line = i + 1; // 1-indexed
+
+            // Track =begin/=end block boundaries. These must start at
+            // column 0 (Ruby syntax requirement).
+            if line.starts_with(b"=begin")
+                && (line.len() == 6 || line[6] == b' ' || line[6] == b'\t')
+            {
+                in_embdoc = true;
+                byte_offset += line_len;
+                consecutive_blanks = 0;
+                seen_non_blank = true;
+                continue;
+            }
+            if in_embdoc
+                && line.starts_with(b"=end")
+                && (line.len() == 4 || line[4] == b' ' || line[4] == b'\t')
+            {
+                in_embdoc = false;
+                byte_offset += line_len;
+                consecutive_blanks = 0;
+                continue;
+            }
+            // Skip all lines inside =begin/=end blocks.
+            if in_embdoc {
+                byte_offset += line_len;
+                consecutive_blanks = 0;
+                continue;
+            }
 
             if line.is_empty() {
                 // Skip the trailing empty element from split() — RuboCop's
@@ -151,12 +190,10 @@ impl Cop for EmptyLines {
                     consecutive_blanks = 0;
                     continue;
                 }
-                // Skip blank lines inside string/heredoc/regex literals, but NOT
-                // inside =begin/=end block comments. RuboCop's token-based approach
-                // includes embdoc tokens for =begin/=end content, so consecutive
-                // blank lines inside those blocks are still flagged.
+                // Skip blank lines inside string/heredoc/regex literals.
+                // =begin/=end blocks are already handled above (in_embdoc).
                 // is_not_string() returns false for strings/heredocs/regexes/symbols
-                // but true for comments (including =begin/=end blocks) and code.
+                // but true for comments and code.
                 if !code_map.is_not_string(byte_offset) {
                     byte_offset += line_len;
                     consecutive_blanks = 0;
@@ -365,26 +402,51 @@ mod tests {
     }
 
     #[test]
-    fn fire_blanks_in_begin_end_block() {
-        // RuboCop's tokens include embdoc tokens for =begin/=end content,
-        // so consecutive blank lines inside them are flagged.
+    fn skip_blanks_in_begin_end_block() {
+        // RuboCop does NOT flag consecutive blank lines inside =begin/=end
+        // blocks. Despite embdoc tokens existing in processed_source.tokens,
+        // the token-gap logic does not flag blank lines within them.
         let source = b"=begin\nsome docs\n\n\nmore docs\n=end\nx = 1\n";
         let diags = run_cop_full(&EmptyLines, source);
         assert!(
-            !diags.is_empty(),
-            "Should fire on consecutive blank lines inside =begin/=end"
+            diags.is_empty(),
+            "Should not fire on consecutive blank lines inside =begin/=end: {:?}",
+            diags
         );
     }
 
     #[test]
     fn skip_single_blank_in_begin_end_block() {
-        // Single blank line inside =begin/=end is fine (same as regular code).
+        // Single blank line inside =begin/=end is fine.
         let source = b"=begin\nsome docs\n\nmore docs\n=end\nx = 1\n";
         let diags = run_cop_full(&EmptyLines, source);
         assert!(
             diags.is_empty(),
             "Should not fire on single blank line inside =begin/=end: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn skip_many_blanks_in_begin_end_block() {
+        // Even many consecutive blank lines inside =begin/=end are not flagged.
+        let source = b"=begin\n\n\n\n\n=end\nx = 1\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            diags.is_empty(),
+            "Should not fire on many blank lines inside =begin/=end: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn fire_blanks_outside_begin_end_block() {
+        // Blank lines OUTSIDE =begin/=end should still be flagged.
+        let source = b"=begin\ndocs\n=end\n\n\nx = 1\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert!(
+            !diags.is_empty(),
+            "Should fire on consecutive blank lines outside =begin/=end"
         );
     }
 }
