@@ -62,6 +62,26 @@ use crate::parse::source::SourceFile;
 /// Fix: bail out of `check_source` when Prism reported parse errors, matching
 /// RuboCop's valid-syntax gate for this cop. A broader shared parse-error
 /// policy cleanup may still be needed separately.
+///
+/// ## Corpus investigation (2026-03-16)
+///
+/// CI reports FP=0, FN=29. 28 FNs in rufo `.rb.spec` files containing
+/// `#~# ORIGINAL` / `#~# EXPECTED` comment markers alongside `break`, `next`,
+/// `redo`, or `yield` outside their valid context. 1 FN in bridgetown for
+/// `###ruby` (likely a file-discovery or config-level issue, not cop logic).
+///
+/// Root cause: the previous fix (2026-03-15) bailed out on ANY Prism parse
+/// error. But Prism reports `break`/`next`/`redo` outside loops and `yield`
+/// outside methods as errors (`invalid_block_exit`, `invalid_yield`), while
+/// RuboCop's parser gem considers these valid syntax (`valid_syntax? = true`).
+/// The blanket bail-out was too aggressive for these "semantic" errors.
+///
+/// Fix: replaced the blanket `parse_result.errors().next().is_some()` bail-out
+/// with a check that only bails on "structural" errors — those that RuboCop's
+/// parser also considers invalid. `break`/`next`/`redo`/`yield` errors are now
+/// allowed through, matching the linter's `is_semantic_parse_error()` approach.
+/// `retry` outside rescue and `return in class/module body` remain as bail-out
+/// triggers since RuboCop's `valid_syntax?` returns false for those.
 pub struct LeadingCommentSpace;
 
 impl Cop for LeadingCommentSpace {
@@ -88,7 +108,15 @@ impl Cop for LeadingCommentSpace {
         let _allow_steep = config.get_bool("AllowSteepAnnotation", false);
         let bytes = source.as_bytes();
 
-        if parse_result.errors().next().is_some() {
+        // Only bail out on "structural" parse errors — those that RuboCop's
+        // parser gem also considers syntax errors (valid_syntax? = false).
+        // Prism reports `break`/`next`/`redo` outside loops and `yield`
+        // outside methods as errors, but the parser gem accepts them
+        // (valid_syntax? = true), so we must NOT skip those files.
+        let has_structural_errors = parse_result
+            .errors()
+            .any(|err| !is_rubocop_valid_error(err.message()));
+        if has_structural_errors {
             return;
         }
 
@@ -135,6 +163,18 @@ impl Cop for LeadingCommentSpace {
 fn is_config_ru(source: &SourceFile) -> bool {
     let path = std::path::Path::new(source.path_str());
     path.file_name().and_then(|n| n.to_str()) == Some("config.ru")
+}
+
+/// Returns true if a Prism error is one that RuboCop's parser gem considers
+/// valid syntax (valid_syntax? = true). These are "semantic" errors that don't
+/// affect the AST structure: `break`/`next`/`redo` outside loops and `yield`
+/// outside methods. Note: `retry` outside rescue and `return` in class/module
+/// body are NOT included — RuboCop considers those real syntax errors.
+fn is_rubocop_valid_error(message: &str) -> bool {
+    message.starts_with("Invalid break")
+        || message.starts_with("Invalid next")
+        || message.starts_with("Invalid redo")
+        || message == "Invalid yield"
 }
 
 fn missing_space_after_hash(text: &[u8]) -> bool {
@@ -226,6 +266,37 @@ mod tests {
             b"##!/usr/bin/env ruby\nputs 'hello'\n",
         );
         assert_eq!(diags.len(), 1, "should flag ##!/usr/bin/env ruby on line 1");
+    }
+
+    #[test]
+    fn flags_comments_in_files_with_break_outside_loop() {
+        // Prism reports `invalid_block_exit` for `break` outside loops, but
+        // RuboCop's parser gem considers this valid syntax (valid_syntax? = true).
+        // The cop should NOT bail out on these "semantic-only" parse errors.
+        let diags = crate::testutil::run_cop_full(
+            &LeadingCommentSpace,
+            b"#~# ORIGINAL break\n\nbreak\n\n#~# EXPECTED\nbreak\n",
+        );
+        assert_eq!(
+            diags.len(),
+            2,
+            "should flag both #~# comments in files with break outside loop"
+        );
+    }
+
+    #[test]
+    fn still_skips_files_with_retry_outside_rescue() {
+        // `retry` outside rescue is a real syntax error for both Prism and
+        // RuboCop (valid_syntax? = false). The cop should bail out.
+        let diags = crate::testutil::run_cop_full(
+            &LeadingCommentSpace,
+            b"#~# ORIGINAL retry\n\nretry\n\n#~# EXPECTED\nretry\n",
+        );
+        assert_eq!(
+            diags.len(),
+            0,
+            "should skip files with retry outside rescue (real syntax error)"
+        );
     }
 
     #[test]
