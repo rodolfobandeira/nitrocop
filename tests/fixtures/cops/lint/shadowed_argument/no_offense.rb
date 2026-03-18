@@ -125,3 +125,9 @@ end
 def ignore_multi(location)
   location, line = get_location
 end
+
+# Multi-write from bare super should not be flagged (super implicitly forwards args)
+def add_index_options(table_name, column_name, name: nil, enabled: false, **options)
+  result, status, enabled = super
+  [result, status, enabled]
+end

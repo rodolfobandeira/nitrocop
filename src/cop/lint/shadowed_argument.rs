@@ -29,6 +29,13 @@
 /// because `visit_def_node`/`visit_block_node`/`visit_lambda_node` did not recurse
 /// into their bodies. Added explicit recursion after checking parameters.
 ///
+/// FP fix: multi-write `a, b, arg = super` was flagged because
+/// `node_references_local_explicit` (used for RHS checks) does not count
+/// `ForwardingSuperNode` as a reference. But bare `super` implicitly forwards
+/// ALL method arguments, so the param IS used on the RHS. Fixed by checking
+/// `node.value().as_forwarding_super_node().is_some()` in `visit_multi_write_node`
+/// before falling through to `node_references_local_explicit`.
+///
 /// Additional FN (5 corpus): Three root causes:
 /// 1. `collect_param_names`/`find_param_offset` did not handle `BlockParameterNode`
 ///    (`&block` params), causing block-pass args to be invisible to the cop entirely.
@@ -215,8 +222,11 @@ impl<'pr> Visit<'pr> for AssignmentCollector {
     }
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
-        // Check if any LHS target matches the param name
-        let rhs_uses_param = node_references_local_explicit(&node.value(), &self.param_name);
+        // Check if any LHS target matches the param name.
+        // Bare `super` (ForwardingSuperNode) implicitly forwards all arguments,
+        // so treat it as referencing the param to avoid FP on `a, b, arg = super`.
+        let rhs_uses_param = node.value().as_forwarding_super_node().is_some()
+            || node_references_local_explicit(&node.value(), &self.param_name);
         for target in node.lefts().iter() {
             if let Some(local) = target.as_local_variable_target_node() {
                 if local.name().as_slice() == self.param_name.as_slice() {
