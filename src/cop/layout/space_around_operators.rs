@@ -451,6 +451,55 @@ fn check_text_scanner_extra_space(
 /// 1. Same operator at same byte column
 /// 2. Word/space boundary at same column (aligned_words in RuboCop)
 /// 3. Cross-operator alignment (operators ending at same column)
+/// Count UTF-8 codepoints from the start of `line` up to `byte_col` bytes.
+/// For ASCII-only lines this equals `byte_col`; for lines with multi-byte chars
+/// (e.g. curly quotes `'`/`'`) it returns the visual character column.
+fn bytes_to_char_col(line: &[u8], byte_col: usize) -> usize {
+    let capped = byte_col.min(line.len());
+    let mut chars = 0usize;
+    let mut i = 0usize;
+    while i < capped {
+        let b = line[i];
+        let width = if b < 0x80 {
+            1
+        } else if b & 0xE0 == 0xC0 {
+            2
+        } else if b & 0xF0 == 0xE0 {
+            3
+        } else {
+            4
+        };
+        i += width;
+        chars += 1;
+    }
+    chars
+}
+
+/// Return the byte offset within `line` that starts character column `char_col`.
+/// Returns `None` if the line is shorter than `char_col` characters.
+fn char_col_to_bytes(line: &[u8], char_col: usize) -> Option<usize> {
+    let mut chars = 0usize;
+    let mut i = 0usize;
+    while i < line.len() {
+        if chars == char_col {
+            return Some(i);
+        }
+        let b = line[i];
+        let width = if b < 0x80 {
+            1
+        } else if b & 0xE0 == 0xC0 {
+            2
+        } else if b & 0xF0 == 0xE0 {
+            3
+        } else {
+            4
+        };
+        i += width;
+        chars += 1;
+    }
+    if chars == char_col { Some(i) } else { None }
+}
+
 fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
@@ -458,12 +507,16 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
         ls -= 1;
     }
     let byte_col = start - ls;
-    let op_end_col = byte_col + op_bytes.len();
     let lines: Vec<&[u8]> = source.lines().collect();
     let (line, _) = source.offset_to_line_col(start);
     let line_idx = line - 1;
+    // Use character column so that multi-byte UTF-8 chars (e.g. curly quotes)
+    // before the operator don't break alignment detection on adjacent ASCII lines.
+    let char_col = bytes_to_char_col(lines[line_idx], byte_col);
+    // All alignment operators are ASCII, so char length == byte length.
+    let char_end_col = char_col + op_bytes.len();
     // Pass 1: closest non-blank, non-comment line (no indentation filter)
-    if check_alignment_standalone(&lines, line_idx, byte_col, op_end_col, op_bytes, None) {
+    if check_alignment_standalone(&lines, line_idx, char_col, char_end_col, op_bytes, None) {
         return true;
     }
     // Pass 2: search for same-indentation lines further out
@@ -474,8 +527,8 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
     check_alignment_standalone(
         &lines,
         line_idx,
-        byte_col,
-        op_end_col,
+        char_col,
+        char_end_col,
         op_bytes,
         Some(my_indent),
     )
@@ -484,8 +537,8 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
 fn check_alignment_standalone(
     lines: &[&[u8]],
     line_idx: usize,
-    byte_col: usize,
-    op_end_col: usize,
+    char_col: usize,
+    char_end_col: usize,
     op_bytes: &[u8],
     indent_filter: Option<usize>,
 ) -> bool {
@@ -521,23 +574,29 @@ fn check_alignment_standalone(
                             continue;
                         }
                     }
-                    // Check 1: same operator at same byte column
-                    if byte_col + op_bytes.len() <= line_bytes.len()
-                        && &line_bytes[byte_col..byte_col + op_bytes.len()] == op_bytes
-                    {
-                        return true;
+                    // Convert char_col back to byte offset for this specific line.
+                    // This handles lines where multi-byte chars (e.g. curly-quote string
+                    // keys) appear before the operator, shifting the byte offset.
+                    if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
+                        // Check 1: same operator at same char column
+                        if byte_col + op_bytes.len() <= line_bytes.len()
+                            && &line_bytes[byte_col..byte_col + op_bytes.len()] == op_bytes
+                        {
+                            return true;
+                        }
+                        // Check 2: word/space boundary at same column (aligned_words)
+                        if byte_col > 0
+                            && byte_col < line_bytes.len()
+                            && (line_bytes[byte_col - 1] == b' '
+                                || line_bytes[byte_col - 1] == b'\t')
+                            && line_bytes[byte_col] != b' '
+                            && line_bytes[byte_col] != b'\t'
+                        {
+                            return true;
+                        }
                     }
-                    // Check 2: word/space boundary at same column (aligned_words)
-                    if byte_col > 0
-                        && byte_col < line_bytes.len()
-                        && (line_bytes[byte_col - 1] == b' ' || line_bytes[byte_col - 1] == b'\t')
-                        && line_bytes[byte_col] != b' '
-                        && line_bytes[byte_col] != b'\t'
-                    {
-                        return true;
-                    }
-                    // Check 3: cross-operator alignment (operators ending at same column)
-                    if line_has_operator_ending_at_col(line_bytes, op_end_col) {
+                    // Check 3: cross-operator alignment (operators ending at same char column)
+                    if line_has_operator_ending_at_char_col(line_bytes, char_end_col) {
                         return true;
                     }
                     break;
@@ -556,8 +615,18 @@ fn check_alignment_standalone(
     false
 }
 
-/// Check if a line has an assignment/comparison operator ending at the given column.
-/// This enables cross-operator alignment detection, e.g., `=` aligned with `||=`.
+/// Check if a line has an assignment/comparison operator ending at the given
+/// *character* column (codepoint index, not byte index).
+fn line_has_operator_ending_at_char_col(line: &[u8], target_char_end_col: usize) -> bool {
+    let Some(target_end_col) = char_col_to_bytes(line, target_char_end_col) else {
+        return false;
+    };
+    line_has_operator_ending_at_col(line, target_end_col)
+}
+
+/// Check if a line has an assignment/comparison operator ending at the given
+/// *byte* column. This enables cross-operator alignment detection,
+/// e.g., `=` aligned with `||=`.
 fn line_has_operator_ending_at_col(line: &[u8], target_end_col: usize) -> bool {
     if target_end_col == 0 || target_end_col > line.len() {
         return false;
