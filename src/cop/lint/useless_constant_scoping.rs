@@ -6,6 +6,12 @@ use crate::parse::source::SourceFile;
 
 /// Checks for useless constant scoping under `private` access modifier.
 /// Private constants must be defined using `private_constant`, not `private`.
+///
+/// ## Corpus investigation (FN=41, FP=0)
+/// Root cause: only handled `ConstantWriteNode` (e.g., `CONST = value`), missed
+/// `ConstantPathWriteNode` for qualified assignments like `self::CONST = value`.
+/// In Prism, `self::DPKG_QUERY = "..."` parses as `ConstantPathWriteNode`.
+/// Fix: added `as_constant_path_write_node()` handling alongside `as_constant_write_node()`.
 pub struct UselessConstantScoping;
 
 impl Cop for UselessConstantScoping {
@@ -107,6 +113,24 @@ impl ConstScopingVisitor<'_, '_> {
                         .any(|n| n.as_slice() == const_name)
                     {
                         let loc = casgn.location();
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        self.diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Useless `private` access modifier for constant scope.".to_string(),
+                        ));
+                    }
+                }
+
+                // Handle qualified constant assignments like `self::CONST = value`
+                if let Some(cpw) = node.as_constant_path_write_node() {
+                    let const_name = cpw.target().name().map(|n| n.as_slice()).unwrap_or(b"");
+                    if !private_constant_names
+                        .iter()
+                        .any(|n| n.as_slice() == const_name)
+                    {
+                        let loc = cpw.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
