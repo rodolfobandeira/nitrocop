@@ -27,6 +27,25 @@ use crate::parse::source::SourceFile;
 ///    pattern never matched.
 ///
 /// Fix: removed `default_include` override. Commit 2026-03-17.
+///
+/// ## Corpus investigation (2026-03-18) — FP=100 across 23 repos
+///
+/// Root cause: Sequel ORM migrations use `add_column :col, Type` inside
+/// `alter_table` blocks. This call has a nil receiver (like ActiveRecord's
+/// `add_column`), so it was incorrectly flagged. The key difference is the
+/// argument count: ActiveRecord's `add_column` requires 3 positional args
+/// (`table, column, type`), while Sequel's takes only 2 (`column, type`).
+///
+/// RuboCop's cop uses the node-pattern `(send nil? :add_column _table _column
+/// _type _?)` which inherently requires 3+ positional args. nitrocop's check
+/// lacked this constraint.
+///
+/// Fix: skip `add_column` calls with fewer than 3 positional arguments.
+/// This correctly excludes Sequel's `add_column :col, Type` (2 args) while
+/// still flagging ActiveRecord's `add_column :table, :col, :type` (3 args).
+///
+/// Other FP sources (state_machine gem, 9 FPs from pluginaweek/state_machine)
+/// may use similar 2-arg patterns and should be covered by the same fix.
 pub struct SchemaComment;
 
 const TABLE_MSG: &str = "New database table without `comment`.";
@@ -100,6 +119,17 @@ const CREATE_TABLE_COLUMN_METHODS: &[&[u8]] = &[
     b"unsigned_float",
     b"unsigned_decimal",
 ];
+
+/// Count the positional (non-keyword) arguments in a call node.
+fn positional_arg_count(call: &ruby_prism::CallNode<'_>) -> usize {
+    let Some(args) = call.arguments() else {
+        return 0;
+    };
+    args.arguments()
+        .iter()
+        .filter(|arg| arg.as_keyword_hash_node().is_none())
+        .count()
+}
 
 /// Check whether a call node has a `comment` keyword arg with a non-nil,
 /// non-empty-string value. Returns `true` if the comment is present and valid.
@@ -180,6 +210,15 @@ impl Cop for SchemaComment {
             }
             b"add_column" => {
                 if call.receiver().is_some() {
+                    return;
+                }
+                // ActiveRecord's add_column requires 3 positional args:
+                // add_column :table, :column, :type [, opts]
+                // Sequel's add_column (inside alter_table) takes only 2:
+                // add_column :column_name, Type [, opts]
+                // Skip calls with fewer than 3 positional args — they are not
+                // ActiveRecord migrations and must not be flagged.
+                if positional_arg_count(&call) < 3 {
                     return;
                 }
                 if !has_valid_comment(&call) {

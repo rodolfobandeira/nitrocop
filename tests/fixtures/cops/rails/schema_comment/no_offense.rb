@@ -27,3 +27,23 @@ create_table :invoices, comment: 'Invoices' do |t|
   desc = 'A description'
   t.string :number, comment: desc
 end
+
+# Sequel ORM migrations — add_column inside alter_table only takes 2 positional
+# args (column_name, type), not 3 like ActiveRecord (table, column, type).
+# These must NOT be flagged.
+Sequel.migration do
+  alter_table(:users) do
+    add_column :name, String
+    add_column :age, Integer
+    add_column :status, String, null: false
+  end
+end
+
+# Sequel change block
+Sequel.migration do
+  change do
+    alter_table(:records) do
+      add_column :payload, :text
+    end
+  end
+end
