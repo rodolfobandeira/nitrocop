@@ -5,6 +5,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation: the single FP+FN pair was at the same location in
+/// geocoder — a 3-level `.fetch('a', {}).fetch('b', {}).fetch('c', nil)` chain.
+/// The cop only handled 2-level chains, reporting on the middle `.fetch` instead
+/// of the outermost one. Fixed by walking up the receiver chain from the terminal
+/// `fetch(key, nil)` to collect all chained fetch keys, then reporting on the
+/// outermost fetch with the full `dig(a, b, c)` suggestion.
 pub struct HashFetchChain;
 
 impl HashFetchChain {
@@ -87,62 +93,82 @@ impl Cop for HashFetchChain {
             return;
         }
 
-        // The last fetch's default must be nil
+        // The terminal fetch's default must be nil
         if arg_list[1].as_nil_node().is_none() {
             return;
         }
 
-        // The receiver must also be a fetch call with nil/{}/Hash.new default
-        let receiver = match call.receiver() {
-            Some(r) => r,
-            None => return,
-        };
-
-        let recv_call = match receiver.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        if recv_call.name().as_slice() != b"fetch" {
-            return;
-        }
-
-        let recv_args = match recv_call.arguments() {
-            Some(a) => a,
-            None => return,
-        };
-        let recv_arg_list: Vec<_> = recv_args.arguments().iter().collect();
-        if recv_arg_list.len() != 2 {
-            return;
-        }
-
-        if !Self::is_nil_or_empty_hash(&recv_arg_list[1]) {
-            return;
-        }
-
         // Must not have a block
-        if call.block().is_some() || recv_call.block().is_some() {
+        if call.block().is_some() {
             return;
         }
 
-        // Build dig arguments
-        let first_key_src = &source.as_bytes()
-            [recv_arg_list[0].location().start_offset()..recv_arg_list[0].location().end_offset()];
-        let second_key_src = &source.as_bytes()
-            [arg_list[0].location().start_offset()..arg_list[0].location().end_offset()];
-        let first_key = String::from_utf8_lossy(first_key_src);
-        let second_key = String::from_utf8_lossy(second_key_src);
+        // Walk up the receiver chain collecting fetch(key, {}/nil/Hash.new) calls.
+        // key_ranges stores (start_offset, end_offset) of each key arg, innermost first.
+        // outermost_msg_offset tracks the message_loc of the outermost fetch.
+        let key_loc = arg_list[0].location();
+        let mut key_ranges = vec![(key_loc.start_offset(), key_loc.end_offset())];
+        let mut outermost_msg_offset: Option<usize> = None;
+        let mut current_receiver = call.receiver();
 
-        let msg_loc = recv_call
-            .message_loc()
-            .unwrap_or_else(|| recv_call.location());
-        let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
+        while let Some(recv) = current_receiver {
+            let recv_call = match recv.as_call_node() {
+                Some(c) => c,
+                None => break,
+            };
+
+            if recv_call.name().as_slice() != b"fetch" {
+                break;
+            }
+
+            let recv_args = match recv_call.arguments() {
+                Some(a) => a,
+                None => break,
+            };
+            let recv_arg_list: Vec<_> = recv_args.arguments().iter().collect();
+            if recv_arg_list.len() != 2 {
+                break;
+            }
+
+            if !Self::is_nil_or_empty_hash(&recv_arg_list[1]) {
+                break;
+            }
+
+            if recv_call.block().is_some() {
+                break;
+            }
+
+            let k = recv_arg_list[0].location();
+            key_ranges.push((k.start_offset(), k.end_offset()));
+            let msg_loc = recv_call
+                .message_loc()
+                .unwrap_or_else(|| recv_call.location());
+            outermost_msg_offset = Some(msg_loc.start_offset());
+            current_receiver = recv_call.receiver();
+        }
+
+        let msg_offset = match outermost_msg_offset {
+            Some(o) => o,
+            None => return, // no chain found (need at least 2 levels)
+        };
+
+        // key_ranges were collected innermost-first; reverse to get outermost-first order
+        key_ranges.reverse();
+
+        // Build dig arguments string
+        let src_bytes = source.as_bytes();
+        let dig_args: Vec<&str> = key_ranges
+            .iter()
+            .map(|&(start, end)| std::str::from_utf8(&src_bytes[start..end]).unwrap_or("?"))
+            .collect();
+
+        let (line, column) = source.offset_to_line_col(msg_offset);
 
         diagnostics.push(self.diagnostic(
             source,
             line,
             column,
-            format!("Use `dig({}, {})` instead.", first_key, second_key),
+            format!("Use `dig({})` instead.", dig_args.join(", ")),
         ));
     }
 }
