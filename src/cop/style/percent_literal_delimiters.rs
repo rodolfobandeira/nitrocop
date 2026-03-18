@@ -8,6 +8,15 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use std::collections::HashMap;
 
+/// Style/PercentLiteralDelimiters enforces consistent %-literal delimiters.
+///
+/// ## Investigation findings (2026-03-18)
+///
+/// ### FP root cause fixed:
+/// - `%w` and `%i` literals using non-preferred delimiters where the content
+///   contains the same characters as the used delimiter's matchpair (e.g.,
+///   `%w(foo( bar))`) — changing delimiters would require escaping. Added
+///   `include_same_character_as_used_for_delimiter?` check matching RuboCop.
 pub struct PercentLiteralDelimiters;
 
 impl PercentLiteralDelimiters {
@@ -173,15 +182,26 @@ impl Cop for PercentLiteralDelimiters {
         };
 
         if actual_delim != expected_open {
-            // Check if the content contains the preferred delimiters.
-            // If so, skip — can't use preferred delimiters when content contains them.
             let node_loc = node.location();
             let content_start = opening.end_offset();
             let content_end = node_loc.end_offset().saturating_sub(1); // skip closing delimiter
             if content_end > content_start {
                 let content = &source.as_bytes()[content_start..content_end];
+
+                // Check if the content contains the preferred delimiters.
+                // If so, skip — can't use preferred delimiters when content contains them.
                 if content.contains(&expected_open) || content.contains(&expected_close) {
                     return;
+                }
+
+                // For %w and %i literals, also check if content contains the same
+                // characters as the currently-used delimiters (matchpairs).
+                // RuboCop's include_same_character_as_used_for_delimiter? check.
+                if literal_type == "%w" || literal_type == "%i" {
+                    let (used_open, used_close) = matchpair(actual_delim);
+                    if content.contains(&used_open) || content.contains(&used_close) {
+                        return;
+                    }
                 }
             }
 
@@ -197,6 +217,17 @@ impl Cop for PercentLiteralDelimiters {
                 ),
             ));
         }
+    }
+}
+
+/// Return the open/close matchpair for a delimiter character.
+fn matchpair(delim: u8) -> (u8, u8) {
+    match delim {
+        b'(' => (b'(', b')'),
+        b'[' => (b'[', b']'),
+        b'{' => (b'{', b'}'),
+        b'<' => (b'<', b'>'),
+        _ => (delim, delim),
     }
 }
 
