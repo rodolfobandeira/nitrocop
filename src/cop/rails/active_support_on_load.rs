@@ -297,4 +297,22 @@ mod tests {
             "Expected 0 offenses for RAILS_5_2 hooks with version < 5.2"
         );
     }
+
+    /// SQLite3Adapter.prepend inside an on_load block should still be flagged.
+    /// This is the FN pattern reported in the corpus.
+    #[test]
+    fn sqlite3_inside_on_load_block_is_flagged() {
+        let source = b"ActiveSupport.on_load(:active_record_sqlite3adapter) do\n  \
+ActiveRecord::ConnectionAdapters::SQLite3Adapter.prepend(SqliteUuidAdapter)\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ActiveSupportOnLoad,
+            source,
+            rails_config(7.0),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for SQLite3Adapter.prepend inside on_load block"
+        );
+    }
 }
