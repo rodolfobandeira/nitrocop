@@ -27,6 +27,22 @@ MAX_LENGTH = "x-max-length",
 QUEUE_TYPE = "x-queue-type"
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
 
+# Array inside if/else within multi-assignment — arrays nested in
+# control flow are NOT direct children of masgn, so should be checked
+name, size = if condition
+  ["first",
+    target_size,
+    ^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+    target_storage]
+    ^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+else
+  ["second",
+    other_size,
+    ^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+    other_storage]
+    ^ Layout/ArrayAlignment: Align the elements of an array literal if they span more than one line.
+end
+
 # Rescue exception list misaligned
 begin
   foo

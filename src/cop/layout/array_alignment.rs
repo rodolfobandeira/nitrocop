@@ -26,6 +26,13 @@ use ruby_prism::Visit;
 /// no `opening_loc`, same as multi-assignment RHS. The blanket skip of bracketless
 /// arrays missed these. Fixed by only skipping arrays inside `MultiWriteNode`,
 /// not all bracketless arrays.
+///
+/// **FN root cause (2026-03-18):** Arrays inside if/else bodies within
+/// multi-assignments (`a, b = if cond; [x, y]; end`) were skipped because
+/// `in_multi_write` propagated through the entire MultiWriteNode subtree.
+/// RuboCop only skips arrays whose immediate parent is the masgn. Fixed by
+/// manually visiting MultiWriteNode children and only setting `in_multi_write`
+/// when the direct value is an ArrayNode, not for non-array values like IfNode.
 pub struct ArrayAlignment;
 
 /// Returns true if the byte at `offset` is the first non-whitespace character on its line.
@@ -73,10 +80,32 @@ struct AlignmentVisitor<'a> {
 
 impl<'pr> Visit<'pr> for AlignmentVisitor<'_> {
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
-        let prev = self.in_multi_write;
-        self.in_multi_write = true;
-        ruby_prism::visit_multi_write_node(self, node);
-        self.in_multi_write = prev;
+        // RuboCop: `return if node.parent&.masgn_type?` — only skips arrays
+        // whose IMMEDIATE parent is the multi-write node. We replicate the
+        // default visitor manually and set `in_multi_write` only when the
+        // direct `value()` is itself an ArrayNode (implicit or bracketed).
+        // If the value is something else (e.g., IfNode), we visit it normally
+        // so arrays nested deeper (inside if/else bodies) are still checked.
+        for child in &node.lefts() {
+            self.visit(&child);
+        }
+        if let Some(rest) = node.rest() {
+            self.visit(&rest);
+        }
+        for child in &node.rights() {
+            self.visit(&child);
+        }
+        let value = node.value();
+        if value.as_array_node().is_some() {
+            // Direct array child of multi-write — skip alignment check
+            let prev = self.in_multi_write;
+            self.in_multi_write = true;
+            self.visit(&value);
+            self.in_multi_write = prev;
+        } else {
+            // Non-array value (e.g., IfNode, MethodCall) — visit normally
+            self.visit(&value);
+        }
     }
 
     fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
