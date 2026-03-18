@@ -1,5 +1,8 @@
-ENV.fetch('SECRET_KEY')
-ENV.fetch('DATABASE_URL', 'default')
+Rails.application.config.foo
+Rails.application.config.x.foo.bar
+Rails.application.secrets.foo
+Rails.application.config.foo = 'bar'
 config['KEY']
-ENV.fetch('REDIS_URL', nil)
 hash['KEY']
+Foo::ENV.fetch('BAR')
+other_hash['KEY'] = 'val'

@@ -1,9 +1,35 @@
-use crate::cop::node_type::{CALL_NODE, STRING_NODE};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/EnvironmentVariableAccess — flags direct ENV reads and writes post initialization.
+///
+/// ## Root cause of 2,587 FNs (2026-03-18)
+///
+/// The previous implementation had an early-return guard `if method != b"[]" { return; }`
+/// that silently skipped ALL non-read accesses. This meant:
+/// - `ENV['FOO'] = 'bar'` (CallNode with method `[]=`) → was skipped → FN (WRITE_MSG)
+/// - `ENV.fetch('FOO')` (CallNode with method `fetch`) → was skipped → FN (READ_MSG)
+/// - `ENV.store('KEY', 'v')`, `ENV.delete('KEY')` → were skipped → FN (READ_MSG)
+/// - `::ENV['FOO'] = 'bar'` → was skipped → FN (WRITE_MSG)
+///
+/// ## Fix
+///
+/// Rewrote the check to match RuboCop's behavior:
+/// - Any CallNode with receiver ENV and method NOT `[]=` → READ_MSG (unless AllowReads)
+/// - Any CallNode with receiver ENV and method `[]=` → WRITE_MSG (unless AllowWrites)
+///
+/// RuboCop flags the `const` (ENV) node, not the call node. We flag the call node
+/// to get the full expression span, matching RuboCop's location behavior.
+///
+/// Note: `env_read?` in RuboCop's NodePattern matches `!:[]=` — any method except `[]=`.
+/// This includes `[]`, `fetch`, `store`, `delete`, `merge`, etc. We replicate this.
+///
+/// Note: Prism parses `ENV['FOO'] = 'bar'` as a `CallNode` with method `[]=`, not as
+/// an `IndexAndWriteNode`. The `IndexAndWriteNode` is only used for `ENV['FOO'] += val`
+/// style compound assignments.
 pub struct EnvironmentVariableAccess;
 
 impl Cop for EnvironmentVariableAccess {
@@ -20,7 +46,7 @@ impl Cop for EnvironmentVariableAccess {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, STRING_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -40,57 +66,52 @@ impl Cop for EnvironmentVariableAccess {
             None => return,
         };
 
-        let method = call.name().as_slice();
-
-        // AllowWrites: skip ENV[]= assignments
-        if allow_writes && method == b"[]=" {
-            return;
-        }
-
-        // AllowReads: skip ENV[] reads
-        if allow_reads && method == b"[]" {
-            return;
-        }
-
-        if method != b"[]" {
-            return;
-        }
-
         let recv = match call.receiver() {
             Some(r) => r,
             None => return,
         };
 
-        // Handle both ConstantReadNode (ENV) and ConstantPathNode (::ENV)
-        if util::constant_name(&recv) != Some(b"ENV") {
-            return;
-        }
-
-        // Get the key string for the message
-        let args = match call.arguments() {
-            Some(a) => a,
-            None => return,
-        };
-
-        let arg_list: Vec<_> = args.arguments().iter().collect();
-        if arg_list.len() != 1 {
-            return;
-        }
-
-        let key = if let Some(s) = arg_list[0].as_string_node() {
-            String::from_utf8_lossy(s.unescaped()).to_string()
+        // Receiver must be ENV or ::ENV (not Foo::ENV)
+        // util::constant_name returns the last segment, so we also need to ensure
+        // that for ConstantPathNode, the parent is nil (i.e. ::ENV not Foo::ENV).
+        let is_env = if let Some(cr) = recv.as_constant_read_node() {
+            cr.name().as_slice() == b"ENV"
+        } else if let Some(cp) = recv.as_constant_path_node() {
+            // ::ENV has no parent; Foo::ENV has a parent
+            cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"ENV")
         } else {
-            return;
+            false
         };
 
-        let loc = node.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            format!("Use `ENV.fetch('{key}')` instead of `ENV['{key}']` for safer access."),
-        ));
+        if !is_env {
+            return;
+        }
+
+        let method = call.name();
+        let method_bytes = method.as_slice();
+
+        // `[]=` is a write; everything else is a read
+        if method_bytes == b"[]=" {
+            if !allow_writes {
+                let loc = recv.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    "Do not write to `ENV` directly post initialization.".to_string(),
+                ));
+            }
+        } else if !allow_reads {
+            let loc = recv.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Do not read from `ENV` directly post initialization.".to_string(),
+            ));
+        }
     }
 }
 
