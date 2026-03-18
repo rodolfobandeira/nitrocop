@@ -186,12 +186,14 @@ fn is_index_by_block_it(block_node: &ruby_prism::BlockNode<'_>) -> bool {
         return false;
     }
 
-    // Second element must be `it` (LocalVariableReadNode named `it`)
-    let second = match elements[1].as_local_variable_read_node() {
-        Some(lv) => lv,
-        None => return false,
-    };
-    second.name().as_slice() == b"it"
+    // Second element must be `it` — either an ItLocalVariableReadNode (Prism 1.9+)
+    // or a LocalVariableReadNode named `it` (older Prism versions).
+    // Prism represents the `it` implicit parameter body usage as ItLocalVariableReadNode.
+    let is_it = elements[1].as_it_local_variable_read_node().is_some()
+        || elements[1]
+            .as_local_variable_read_node()
+            .is_some_and(|lv| lv.name().as_slice() == b"it");
+    is_it
     // Note: RuboCop allows `[y.to_sym, it]` — any key is fine as long as value is `it`
 }
 
@@ -501,5 +503,73 @@ mod tests {
         let source = b"Hash[items.map { |e| [e.id, e] }]\n";
         let diags = run_cop_full(&IndexBy, source);
         assert_eq!(diags.len(), 1, "method-key Hash[map] should be flagged");
+    }
+
+    #[test]
+    fn it_param_bracket_access_to_h_flagged() {
+        // to_h { [it["name"], it] } — `it` param with bracket-access key
+        // Matches pattern from ubicloud/ubicloud corpus FNs
+        let source = b"labels.to_h { [it[\"name\"], it] }\n";
+        let diags = run_cop_full(&IndexBy, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "to_h {{ [it[key], it] }} should be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn debug_it_params() {
+        // Debug test to understand how Prism parses { [it["name"], it] }
+        use ruby_prism::Visit;
+        struct Dbg {
+            has_it_params: bool,
+            second_is_it_local_node: bool,
+            second_elem_is_lvar_it: bool,
+            second_elem_is_call_it: bool,
+        }
+        impl<'pr> Visit<'pr> for Dbg {
+            fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+                let params = node.parameters();
+                if let Some(p) = params {
+                    self.has_it_params = p.as_it_parameters_node().is_some();
+                }
+                if let Some(body) = node.body() {
+                    if let Some(stmts) = body.as_statements_node() {
+                        for stmt in stmts.body().iter() {
+                            if let Some(arr) = stmt.as_array_node() {
+                                let elems: Vec<_> = arr.elements().iter().collect();
+                                if elems.len() == 2 {
+                                    let second = &elems[1];
+                                    if let Some(lv) = second.as_local_variable_read_node() {
+                                        self.second_elem_is_lvar_it = lv.name().as_slice() == b"it";
+                                    }
+                                    if let Some(c) = second.as_call_node() {
+                                        self.second_elem_is_call_it = c.name().as_slice() == b"it";
+                                    }
+                                    // Check for ItLocalVariableReadNode
+                                    self.second_is_it_local_node = second.as_it_local_variable_read_node().is_some();
+                                }
+                            }
+                        }
+                    }
+                }
+                ruby_prism::visit_block_node(self, node);
+            }
+        }
+        let source = b"labels.to_h { [it[\"name\"], it] }\n";
+        let pr = ruby_prism::parse(source);
+        let mut dbg = Dbg {
+            has_it_params: false,
+            second_is_it_local_node: false,
+            second_elem_is_lvar_it: false,
+            second_elem_is_call_it: false,
+        };
+        dbg.visit(&pr.node());
+
+        // Print Prism parse structure for debugging
+        println!("has_it_params={}, second_is_it_local_node={}, second_elem_is_lvar_it={}, second_elem_is_call_it={}",
+            dbg.has_it_params, dbg.second_is_it_local_node, dbg.second_elem_is_lvar_it, dbg.second_elem_is_call_it);
     }
 }
