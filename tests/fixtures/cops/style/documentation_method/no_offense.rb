@@ -207,23 +207,6 @@ class Webfinger
   end
 end
 
-# Heredoc content with 'end' at col 0 should not reset private state
-class HeredocEnd
-  private
-
-  def generate_code
-    buf = StringIO.new
-    buf.puts(<<-RUBY)
-end
-    RUBY
-    buf.string
-  end
-
-  def another_private
-    42
-  end
-end
-
 # Migration-style: single-line class + private section
 class BackfillMigration
   class Account < ActiveRecord::Base; end

@@ -1558,7 +1558,6 @@ pub fn is_private_or_protected(source: &SourceFile, def_offset: usize) -> bool {
     let lines: Vec<&[u8]> = source.lines().collect();
     let mut in_private = false;
     let mut peer_scope_depth = 0usize;
-    let mut heredoc_end_marker: Option<Vec<u8>> = None;
     for line in &lines[..def_line] {
         let indent = line
             .iter()
@@ -1574,23 +1573,12 @@ pub fn is_private_or_protected(source: &SourceFile, def_offset: usize) -> bool {
             .map_or(0, |p| p + 1);
         let trimmed: &[u8] = &raw_trimmed[..end_pos];
 
-        // Skip lines inside heredocs. Heredoc content can contain `end`, `class`,
-        // `private` etc. at any indent level — these are string content, not Ruby
-        // structural keywords.
-        if let Some(ref marker) = heredoc_end_marker {
-            if trimmed == marker.as_slice() {
-                heredoc_end_marker = None;
-            }
-            continue;
-        }
-
-        // Detect heredoc start: <<-WORD, <<~WORD, <<WORD, <<-'WORD', <<~"WORD"
-        // Skip comment lines entirely — they can mention heredoc syntax without being one.
-        if !trimmed.starts_with(b"#") {
-            if let Some(pos) = find_heredoc_start(trimmed) {
-                heredoc_end_marker = Some(pos);
-            }
-        }
+        // NOTE: Heredoc tracking was attempted here (commit 89035db5, reverted)
+        // to skip `end`/`private` inside heredoc content. While conceptually
+        // correct, it caused a 20,000+ offense regression: the line-based scanner
+        // incidentally processes heredoc content, and `private`/`end` keywords
+        // inside heredocs happen to produce correct visibility results more often
+        // than skipping them. A proper fix requires AST-based visibility tracking.
 
         // Track peer scope depth for class/module/class<< bodies at indent == def_col.
         // These are sibling scopes — their internal `private` doesn't affect our def.

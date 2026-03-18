@@ -54,15 +54,13 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 /// 3. Some FPs from enclosing class at same indent as def (inconsistent indentation) —
 ///    inherent limitation of line-based visibility tracking vs RuboCop's AST approach.
 ///
-/// **Regression fix (2026-03-18):** `find_heredoc_start()` was too aggressive — it matched
-/// `<<WORD` patterns inside comments (e.g., `# Use <<HEREDOC syntax`), trailing comments
-/// (e.g., `x = 1 # <<MARKER`), and after non-heredoc operators (e.g., left-shift `1<<BITS`).
-/// False matches set `heredoc_end_marker`, causing `is_private_or_protected` to skip all
-/// subsequent lines (including `private` keywords), making methods appear public when they
-/// were actually private. This produced ~20,000 excess FPs. Fix: (1) skip comment lines
-/// before calling `find_heredoc_start`, (2) only match `<<` preceded by valid heredoc-start
-/// characters (space, tab, `=`, `(`, `,`, `[`, `;`, or start of line), (3) stop scanning
-/// at `#` on each line to ignore trailing comments.
+/// **Heredoc tracking reverted (2026-03-18):** The heredoc tracking added in the previous
+/// investigation caused a 20,000+ offense regression. Even with conservative `<<` matching
+/// (skip comments, check preceding chars), the fix correctly detected real heredocs but
+/// produced worse results: the line-based scanner incidentally processes heredoc content,
+/// and `private`/`end` keywords inside heredocs happen to give correct visibility results
+/// more often than skipping them. The single-line class/module fix (point 1 above) is
+/// retained. A proper fix for heredoc-related FPs requires AST-based visibility tracking.
 pub struct DocumentationMethod;
 
 /// Detect if the line containing the def has a modifier prefix before the `def` keyword.
