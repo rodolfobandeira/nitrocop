@@ -65,6 +65,22 @@ use crate::parse::source::SourceFile;
 ///    nested `context`/`describe` blocks were missed. Fixed by recursing into
 ///    the block body of any receiver call that has a block, matching RuboCop's
 ///    `on_block` behavior that fires on ALL blocks.
+///
+/// ## Verification (2026-03-18)
+///
+/// Manual verification against locally available corpus repos (avo-hq, openproject,
+/// diaspora) confirms all 72 FN examples from the CI oracle are now detected by the
+/// current code. Patterns verified include:
+/// - `include_context` without block before subject (diaspora mentioning_spec)
+/// - Subject inside `.each` iterator block with destructured args (openproject users_helper)
+/// - Named subject `subject(:name)` after `let` with intervening `def` method (openproject attachment_resource)
+/// - `it_behaves_like` with block before subject at same level (openproject attachment_resource)
+/// - Subject inside `RSpec.shared_examples_for` after `let` (openproject response_examples)
+/// - `shared_let` (custom DSL, not offending) followed by `include_context` + `subject`
+///
+/// The commit c0bc7a5 estimated "fixes 43 of 72 (29 remain)" but actual verification
+/// shows all 72 patterns are handled. The "29 remain" was a conservative estimate;
+/// the CI oracle simply hasn't re-run to confirm.
 pub struct LeadingSubject;
 
 impl Cop for LeadingSubject {

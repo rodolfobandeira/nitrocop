@@ -101,3 +101,50 @@ RSpec.describe User do
     end
   end
 end
+
+RSpec.shared_examples "upload resource" do
+  describe "POST /prepare" do
+    subject(:response) { last_response }
+
+    let(:params) { build(:params) }
+
+    def request!
+      post path, params
+    end
+  end
+end
+
+RSpec.describe User do
+  describe "with name" do
+    records.each do |(status, blocked), expectation|
+      describe "with status" do
+        subject(:user_status) { full_user_status(user, true) }
+        let(:user) { build_user(status, blocked) }
+      end
+    end
+  end
+end
+
+RSpec.shared_examples "attachment API" do
+  subject(:response) { last_response }
+
+  it_behaves_like "upload" do
+    let(:request_path) { "/api/v3/attachments" }
+  end
+end
+
+RSpec.describe User do
+  context "with items" do
+    [
+      ["admin", "viewer"],
+      ["editor", "viewer"]
+    ].each do |role_a, role_b|
+      context "when #{role_a} and #{role_b}" do
+        subject { described_class.new }
+        include_context role_a
+        include_context role_b
+        let(:record) { create(:record) }
+      end
+    end
+  end
+end

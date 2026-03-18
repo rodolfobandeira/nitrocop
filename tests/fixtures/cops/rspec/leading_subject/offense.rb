@@ -146,3 +146,64 @@ RSpec.describe User do
   subject { described_class.new }
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `it_behaves_like` declarations.
 end
+
+RSpec.describe User do
+  context "with items" do
+    [
+      ["admin", "viewer"],
+      ["editor", "viewer"]
+    ].each do |role_a, role_b|
+      context "when #{role_a} and #{role_b}" do
+        include_context role_a
+        include_context role_b
+
+        let(:record) { create(:record) }
+
+        subject { described_class.new }
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `include_context` declarations.
+      end
+    end
+  end
+end
+
+RSpec.describe User do
+  describe "with name" do
+    records.each do |(status, blocked), expectation|
+      describe "with status" do
+        let(:user) { build_user(status, blocked) }
+
+        subject(:user_status) { full_user_status(user, true) }
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+      end
+    end
+  end
+end
+
+RSpec.shared_examples "upload resource" do
+  describe "POST /prepare" do
+    let(:params) { build(:params) }
+
+    def request!
+      post path, params
+    end
+
+    subject(:response) { last_response }
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+  end
+end
+
+RSpec.shared_examples "attachment API" do
+  it_behaves_like "upload" do
+    let(:request_path) { "/api/v3/attachments" }
+  end
+
+  subject(:response) { last_response }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `it_behaves_like` declarations.
+end
+
+RSpec.shared_examples_for "multiple errors" do
+  let(:errors) { JSON.parse(last_response.body) }
+
+  subject { errors.inject({}) { |h, d| h.merge(d) } }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+end
