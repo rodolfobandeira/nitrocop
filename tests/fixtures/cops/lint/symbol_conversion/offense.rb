@@ -138,3 +138,11 @@ instance_variable_get :"@ivar"
 # Percent-string notation with interpolation and .intern
 %(prefix_#{name}).intern
 ^^^^^^^^^^^^^^^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:"prefix_#{name}"` instead.
+
+# Non-ASCII standalone symbol that can be unquoted (multiplication sign)
+:"×"
+^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:×` instead.
+
+# Special global variable $$ (process ID)
+:"$$"
+^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:$$` instead.

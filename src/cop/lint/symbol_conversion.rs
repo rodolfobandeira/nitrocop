@@ -140,6 +140,33 @@ use crate::parse::source::SourceFile;
 /// but `%(...)` notation starts with `%(` and ends with `)`.
 /// Fix: extended the inner-content extraction to also handle `%(` prefix and `)`
 /// suffix, constructing the correction as `:"inner_content"`.
+///
+/// ## FP+FN fix (2026-03-18, second pass)
+///
+/// Corpus oracle reported FP=8, FN=7.
+///
+/// FP=8: Non-ASCII characters as colon-style hash keys (e.g., `'æ': 'ae'`,
+/// `"а": "a"`, `"Ãa1": "true"`) from travis-ci/dpl (6), danbooru (1), jruby (1).
+/// RuboCop's `correct_hash_key` only converts keys starting with `/\A[a-z0-9_]/i`
+/// (ASCII-only). Non-ASCII-start keys are skipped.
+/// Fix: added ASCII-start check to `is_hash_label_symbol` — the first byte must
+/// be ASCII alphanumeric or underscore for colon-style label conversion.
+///
+/// FN=5: Standalone quoted symbols with non-ASCII chars like `:"×"` (U+00D7,
+/// multiplication sign) in jruby. Ruby's lexer accepts ALL non-ASCII multibyte
+/// characters as identifier characters (via `is_identchar` macro: `!ISASCII(*p)`).
+/// The previous `char::is_alphabetic()` check was too restrictive — it rejected
+/// characters like `×` (Unicode category `Sm`, not `Alphabetic`).
+/// Fix: reverted `is_char_identifier_start`/`is_char_identifier_continue` to
+/// accept all non-ASCII characters (`!ch.is_ascii()`), matching Ruby's behavior.
+/// Emoji hash keys remain protected by the separate ASCII-start check in
+/// `is_hash_label_symbol` and `value_starts_with_identifier`.
+///
+/// FN=1: `:"$$"` from pdf-reader — `$$` (process ID) is a valid special global
+/// variable. Fix: added `$` to `SPECIAL_GLOBAL_CHARS`.
+///
+/// FN=1: `%s"..."` literal from rouge — `%s` percent-literal symbols are not yet
+/// handled. Remaining gap.
 pub struct SymbolConversion;
 
 const BARE_OPERATOR_SYMBOLS: &[&[u8]] = &[
@@ -148,17 +175,16 @@ const BARE_OPERATOR_SYMBOLS: &[&[u8]] = &[
 ];
 
 /// Check if a character is a valid Ruby identifier start character.
-/// Ruby allows ASCII letters, underscore, and Unicode letters (but NOT emoji/symbols).
+/// Ruby allows ASCII letters, underscore, and ALL non-ASCII characters
+/// (Ruby's lexer treats any multibyte character as identifier-valid).
 fn is_char_identifier_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic() || (!ch.is_ascii() && ch.is_alphabetic())
+    ch == '_' || ch.is_ascii_alphabetic() || !ch.is_ascii()
 }
 
 /// Check if a character is a valid Ruby identifier continuation character.
-/// Ruby allows ASCII alphanumerics, underscore, and Unicode letters/digits (but NOT emoji/symbols).
+/// Ruby allows ASCII alphanumerics, underscore, and ALL non-ASCII characters.
 fn is_char_identifier_continue(ch: char) -> bool {
-    ch == '_'
-        || ch.is_ascii_alphanumeric()
-        || (!ch.is_ascii() && (ch.is_alphabetic() || ch.is_numeric()))
+    ch == '_' || ch.is_ascii_alphanumeric() || !ch.is_ascii()
 }
 
 /// Check if a byte is a valid identifier continuation at the byte level.
@@ -201,6 +227,15 @@ fn is_hash_label_symbol(value: &[u8]) -> bool {
         return false;
     }
 
+    // RuboCop's correct_hash_key checks /\A[a-z0-9_]/i — ASCII only.
+    // Non-ASCII-start keys (æ, Cyrillic а, etc.) are not converted to bare labels.
+    if !value
+        .first()
+        .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return false;
+    }
+
     let main = if let Some(&last) = value.last() {
         if last == b'!' || last == b'?' {
             &value[..value.len() - 1]
@@ -224,8 +259,8 @@ fn is_class_variable_symbol(value: &[u8]) -> bool {
 
 /// Characters recognized by Ruby as single-char special global variables
 /// (e.g., `$?`, `$!`, `$~`, `$@`, `$;`, `$,`, `$/`, `$\`, `$=`, `$<`, `$>`,
-/// `$.`, `$*`, `$:`, `$+`, `$&`, `` $` ``, `$'`, `$"`, `$0`).
-const SPECIAL_GLOBAL_CHARS: &[u8] = b"?!~@;,/\\=<>.*:+&`'\"0";
+/// `$.`, `$*`, `$:`, `$+`, `$&`, `` $` ``, `$'`, `$"`, `$0`, `$$`).
+const SPECIAL_GLOBAL_CHARS: &[u8] = b"?!~@;,/\\=<>.*:+&`'\"0$";
 
 fn is_global_variable_symbol(value: &[u8]) -> bool {
     if value.len() < 2 || value[0] != b'$' {
@@ -1082,14 +1117,12 @@ mod tests {
     #[test]
     fn emoji_hash_keys_not_flagged() {
         let cop = SymbolConversion;
-        // Emoji characters are NOT valid Ruby identifiers — `:🇺🇸` is a syntax error.
-        // These should NOT be flagged.
+        // Emoji hash keys are not flagged because RuboCop's correct_hash_key
+        // only converts keys starting with /\A[a-z0-9_]/i (ASCII only).
         let no_offense_cases = [
             "{ \"\u{1F1FA}\u{1F1F8}\": \"hello\" }", // 🇺🇸
             "{ \"\u{1F3E0}\": \"house\" }",          // 🏠
             "{ \"\u{1F389}\": \"party\" }",          // 🎉
-            ":\"🎉\"",                               // standalone emoji symbol
-            ":'🏠'",                                 // single-quoted emoji symbol
         ];
         for source in &no_offense_cases {
             let diags = crate::testutil::run_cop_full(&cop, source.as_bytes());

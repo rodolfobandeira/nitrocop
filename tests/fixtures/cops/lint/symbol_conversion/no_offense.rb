@@ -75,3 +75,9 @@ alias :"foo" :"bar"
 { "🇺🇸": "hello" }
 { "🏠": "house" }
 { "🎉": "party" }
+# Non-ASCII colon-style hash keys — RuboCop skips these because /\A[a-z0-9_]/i fails
+{ 'æ': 'ae' }
+{ 'ó': 'o' }
+{ 'ł': 'l' }
+{ "а": "a" }
+{ "Ãa1": "true" }
