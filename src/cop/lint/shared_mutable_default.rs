@@ -12,6 +12,12 @@ use crate::parse::source::SourceFile;
 /// a `KeywordHashNode` in Prism (not `HashNode`). Added detection for keyword
 /// hash args as mutable defaults. Also added exclusion for `Hash.new(capacity: N)`
 /// which is a legitimate non-mutable argument per RuboCop's pattern.
+///
+/// Corpus FN=4 fix: `Hash.new(unknown: true) { 0 }` was missed because the
+/// block early-return skipped argument analysis. RuboCop's pattern does not
+/// exclude calls with blocks — it flags mutable arguments regardless. Removed
+/// the block early-return; `Hash.new { ... }` with no mutable argument still
+/// passes because `call.arguments()` is None.
 pub struct SharedMutableDefault;
 
 impl Cop for SharedMutableDefault {
@@ -49,11 +55,6 @@ impl Cop for SharedMutableDefault {
         };
 
         if call.name().as_slice() != b"new" {
-            return;
-        }
-
-        // Must not have a block (Hash.new { ... } is fine)
-        if call.block().is_some() {
             return;
         }
 
