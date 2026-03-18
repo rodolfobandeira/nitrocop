@@ -54,3 +54,29 @@ end
 def initialize(a)
   super(a, b)
 end
+
+# super with a block (do...end) — not redundant, block adds behavior
+def initialize(base, target, association)
+  super do
+    bind_one
+  end
+end
+
+# super with a block (curly braces) — not redundant
+def initialize
+  super() { |h, k| h[k] = [] }
+end
+
+# bare super with a block — not redundant
+def initialize
+  super do
+    1
+  end
+end
+
+# super(args) with a block — not redundant
+def initialize(version)
+  super(version) do
+    setup
+  end
+end

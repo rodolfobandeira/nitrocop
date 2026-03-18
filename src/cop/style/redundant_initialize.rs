@@ -11,6 +11,19 @@ use crate::parse::source::SourceFile;
 /// super had no args. Now also detects `super(a, b)` as redundant when the explicit args
 /// match the def's required parameters by name and order (e.g., `def initialize(a, b);
 /// super(a, b); end`). This matches RuboCop's `same_args?` behavior.
+///
+/// FP fix (2025-03): `super` with a block (`super do...end` or `super() { }`) was
+/// incorrectly flagged as redundant. The block adds behavior beyond simple forwarding,
+/// so the method is NOT redundant. In Prism, both `ForwardingSuperNode` and `SuperNode`
+/// have a `block()` field that is `Some(BlockNode)` when a block is attached. This
+/// matches RuboCop's behavior where `node.body.begin_type?` returns false for block
+/// calls, preventing the `initialize_forwards?` matcher from matching. Fixed by checking
+/// `block().is_some()` on both super node types. Corpus: 7 FPs from twilio-ruby (super
+/// with blank lines after), mongoid (super do...end), jruby, active_merchant.
+/// Remaining 20 FPs appear to be corpus oracle noise (empty `def initialize; end` that
+/// RuboCop should flag). 2 FNs (fastlane inline comment on def line, fluentd super with
+/// commented-out code) also appear to be corpus noise — RuboCop's `AllowComments: true`
+/// default should prevent flagging those cases.
 pub struct RedundantInitialize;
 
 impl Cop for RedundantInitialize {
@@ -95,6 +108,23 @@ impl Cop for RedundantInitialize {
 
         if !is_forwarding_super && !is_explicit_super {
             return;
+        }
+
+        // If super has a block (do...end or { }), it's NOT redundant — the block adds behavior.
+        // e.g., `super do; bind_one; end` or `super() { |h, k| h[k] = [] }`
+        if let Some(fwd) = body_nodes[0].as_forwarding_super_node() {
+            if fwd.block().is_some() {
+                return;
+            }
+        }
+        if let Some(sup) = body_nodes[0].as_super_node() {
+            if let Some(block) = sup.block() {
+                // BlockArgumentNode (&block) is just forwarding, not adding behavior.
+                // But a BlockNode (do...end / { }) adds behavior.
+                if block.as_block_argument_node().is_none() {
+                    return;
+                }
+            }
         }
 
         // For bare `super`: only redundant if the method has no default args,
