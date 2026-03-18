@@ -141,3 +141,27 @@ module Document
     self.class.aliases
   end
 end
+
+# Private inside a sibling module at the same indent level should NOT suppress
+# instance methods outside that module. Pattern from mongomapper: module ClassMethods
+# declares `private` at the same indent as the enclosing module's instance methods.
+module Plugins
+  module Associations
+    module ClassMethods
+    private
+      def create_association(assoc)
+        assoc.setup(self)
+      end
+    end
+
+    def associations
+    ^^^ Rails/Delegate: Use `delegate` to define delegations.
+      self.class.associations
+    end
+
+    def embedded_associations
+    ^^^ Rails/Delegate: Use `delegate` to define delegations.
+      self.class.embedded_associations
+    end
+  end
+end

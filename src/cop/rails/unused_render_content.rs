@@ -109,17 +109,20 @@ impl Cop for UnusedRenderContent {
         // e.g., `render 'foo', status: :continue` or `render :action, status: :no_content`
         // The first positional arg is a Str or Symbol (not a keyword hash) → offense at that arg
         for arg in &arg_list {
-            let is_positional_content = arg.as_string_node().is_some() || arg.as_symbol_node().is_some();
+            let is_positional_content =
+                arg.as_string_node().is_some() || arg.as_symbol_node().is_some();
             if is_positional_content {
                 let loc = arg.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Do not specify body content for a response with a non-content status code"
-                        .to_string(),
-                ));
+                diagnostics.push(
+                    self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Do not specify body content for a response with a non-content status code"
+                            .to_string(),
+                    ),
+                );
                 return;
             }
         }
@@ -211,9 +214,16 @@ mod tests {
         // render 'foo', status: :continue -- offense at 'foo'
         let source = b"render 'foo', status: :continue\n";
         let diags = run_cop_full(&UnusedRenderContent, source);
-        assert_eq!(diags.len(), 1, "Expected offense for positional string with non-content status");
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected offense for positional string with non-content status"
+        );
         // Column should be at 'foo', not at render
-        assert_eq!(diags[0].location.column, 7, "Offense should be at 'foo' (col 7)");
+        assert_eq!(
+            diags[0].location.column, 7,
+            "Offense should be at 'foo' (col 7)"
+        );
     }
 
     #[test]
@@ -221,7 +231,14 @@ mod tests {
         // render :action_name, status: :no_content -- offense at :action_name
         let source = b"render :action_name, status: :no_content\n";
         let diags = run_cop_full(&UnusedRenderContent, source);
-        assert_eq!(diags.len(), 1, "Expected offense for positional symbol with non-content status");
-        assert_eq!(diags[0].location.column, 7, "Offense should be at :action_name (col 7)");
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected offense for positional symbol with non-content status"
+        );
+        assert_eq!(
+            diags[0].location.column, 7,
+            "Offense should be at :action_name (col 7)"
+        );
     }
 }
