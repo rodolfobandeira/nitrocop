@@ -15,7 +15,7 @@ a = <<-RUBY
 RUBY
 
 b = <<PLAIN
-no indentation expected
+  indented body in bare heredoc is fine
 PLAIN
 
 # <<~ with correct indentation (2 spaces from base)
@@ -53,3 +53,17 @@ def test_multiple
     more second
   SECOND
 end
+
+# <<- heredoc with tab-indented body lines should NOT be flagged
+# (body is indented, just using tabs instead of spaces)
+x = <<-SQL
+	SELECT * FROM users
+	WHERE id = 1
+SQL
+
+# <<- heredoc with mixed tab and space indentation should NOT be flagged
+y = <<-RUBY
+      class Foo
+	def self.bar; end
+      end
+RUBY

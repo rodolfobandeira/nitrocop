@@ -121,8 +121,8 @@ impl Cop for HeredocIndentation {
         } else if after_arrows.starts_with(b"-") {
             '-'
         } else {
-            // Simple heredoc (<<FOO) — no indentation control expected
-            return;
+            // Bare heredoc (<<FOO) — treated like <<- for indentation checks
+            ' '
         };
 
         // Get heredoc body content
@@ -163,11 +163,13 @@ impl Cop for HeredocIndentation {
             ));
         }
 
-        // For <<- heredocs:
+        // For <<- and bare << heredocs:
         // 1. If body is at column 0 → always flag
         // 2. If the heredoc has .squish/.squish! called on it → flag
         //    (matches RuboCop's heredoc_squish? when ActiveSupportExtensionsEnabled)
         // 3. Otherwise (body is indented, no squish) → no offense
+        let indent_type_str = if heredoc_type == ' ' { "<<" } else { "<<-" };
+
         if body_indent == 0 {
             let (line, col) = source.offset_to_line_col(content_start);
             diagnostics.push(self.diagnostic(
@@ -175,8 +177,8 @@ impl Cop for HeredocIndentation {
                 line,
                 col,
                 format!(
-                    "Use {} spaces for indentation in a heredoc by using `<<~` instead of `<<-`.",
-                    indentation_width,
+                    "Use {} spaces for indentation in a heredoc by using `<<~` instead of `{}`.",
+                    indentation_width, indent_type_str,
                 ),
             ));
         }
@@ -194,8 +196,8 @@ impl Cop for HeredocIndentation {
                     line,
                     col,
                     format!(
-                        "Use {} spaces for indentation in a heredoc by using `<<~` instead of `<<-`.",
-                        indentation_width,
+                        "Use {} spaces for indentation in a heredoc by using `<<~` instead of `{}`.",
+                        indentation_width, indent_type_str,
                     ),
                 ));
             }
@@ -245,13 +247,18 @@ fn line_too_long_after_adjust(
 }
 
 /// Get the minimum indentation level of non-blank body lines.
+/// Counts both spaces and tabs as indentation characters (matching RuboCop's
+/// `indent_level` which uses `\s*`).
 fn body_indent_level(body: &[u8]) -> usize {
     let mut min_indent = usize::MAX;
     for line in body.split(|&b| b == b'\n') {
         if line.iter().all(|&b| b == b' ' || b == b'\t' || b == b'\r') {
             continue; // Skip blank lines
         }
-        let indent = line.iter().take_while(|&&b| b == b' ').count();
+        let indent = line
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count();
         min_indent = min_indent.min(indent);
     }
     if min_indent == usize::MAX {
@@ -264,6 +271,44 @@ fn body_indent_level(body: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(HeredocIndentation, "cops/layout/heredoc_indentation");
+
+    #[test]
+    fn bare_heredoc_body_at_zero_is_offense() {
+        let source = b"x = <<SQL\nSELECT * FROM users\nSQL\n";
+        let diags = run_cop_full(&HeredocIndentation, source);
+        assert!(
+            !diags.is_empty(),
+            "Expected offense for bare <<SQL with body at column 0"
+        );
+        assert!(
+            diags[0].message.contains("instead of `<<`"),
+            "Expected message to mention <<, got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn bare_heredoc_indented_body_no_offense() {
+        let source = b"x = <<SQL\n  SELECT * FROM users\nSQL\n";
+        let diags = run_cop_full(&HeredocIndentation, source);
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for bare <<SQL with indented body, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dash_heredoc_tab_indented_no_offense() {
+        let source = b"x = <<-SQL\n\tSELECT * FROM users\nSQL\n";
+        let diags = run_cop_full(&HeredocIndentation, source);
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for <<- with tab-indented body, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
 }

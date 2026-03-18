@@ -33,3 +33,19 @@ Status.find_by_sql(<<-SQL.squish)
       )
       SELECT id FROM search_tree
 SQL
+
+# Bare <<WORD heredocs with body at column 0 should be flagged
+a = <<RUBY
+something
+^^^^^^^^^ Layout/HeredocIndentation: Use 2 spaces for indentation in a heredoc by using `<<~` instead of `<<`.
+RUBY
+
+b = <<TEXT
+hello world
+^^^^^^^^^^^ Layout/HeredocIndentation: Use 2 spaces for indentation in a heredoc by using `<<~` instead of `<<`.
+TEXT
+
+c = <<SQL
+SELECT * FROM users
+^^^^^^^^^^^^^^^^^^^ Layout/HeredocIndentation: Use 2 spaces for indentation in a heredoc by using `<<~` instead of `<<`.
+SQL
