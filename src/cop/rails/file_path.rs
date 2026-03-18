@@ -86,10 +86,26 @@ fn is_rails_root_join(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Recursively check if a node is or contains Rails.root.
+/// Recursively check if a node is or contains Rails.root (deep tree search).
+/// This matches RuboCop's `rails_root_nodes?` node search which traverses the full subtree.
+/// For example, `Rails.root.to_s` and `File.expand_path(Rails.root)` both contain Rails.root.
 fn contains_rails_root(node: &ruby_prism::Node<'_>) -> bool {
     if is_rails_root(node) {
         return true;
+    }
+    // Check call receiver chain: Rails.root.to_s, Rails.root.join(...), etc.
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            if contains_rails_root(&recv) {
+                return true;
+            }
+        }
+        // Check call arguments: File.expand_path(Rails.root)
+        if let Some(args) = call.arguments() {
+            if args.arguments().iter().any(|a| contains_rails_root(&a)) {
+                return true;
+            }
+        }
     }
     // Check array arguments: [Rails.root, ...]
     if let Some(arr) = node.as_array_node() {
@@ -414,13 +430,16 @@ fn dstr_separated_by_colon(parts: &[ruby_prism::Node<'_>], rails_root_index: usi
 }
 
 /// Check if a node is a file extension pattern (e.g. ".png", ".jpg").
+/// Requires at least one letter after the dot to avoid matching a bare "." sentence separator.
 fn is_extension_node(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     if let Some(s) = node.as_string_node() {
         let loc = s.location();
         let src_bytes = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
-        // Check source text starts with a dot followed by letters (e.g. ".png")
+        // Check source text starts with a dot followed by at least one letter (e.g. ".png")
+        // A bare "." (sentence separator) must NOT match — require non-empty alpha suffix.
         if src_bytes.first() == Some(&b'.') {
-            return src_bytes[1..].iter().all(|&b| b.is_ascii_alphabetic());
+            let suffix = &src_bytes[1..];
+            return !suffix.is_empty() && suffix.iter().all(|&b| b.is_ascii_alphabetic());
         }
     }
     false

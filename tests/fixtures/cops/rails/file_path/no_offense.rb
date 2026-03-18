@@ -21,3 +21,6 @@ Rails.root.join("tmp", "data", index/3, "data.csv")
 SomeModule::Rails.root.join("app", "models")
 SomeModule::File.join(Rails.root, "app", "models")
 "#{SomeModule::Rails.root}/path"
+# FP fix: Rails.root.join inside string interpolation with only a period after (not an extension)
+"Plugin not found. The directory should be #{Rails.root.join('test/fixtures/plugins/bar_plugin')}."
+assert_equal "Some message #{Rails.root.join('vendor/plugins/foo')}.", e.message

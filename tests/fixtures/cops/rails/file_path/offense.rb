@@ -36,3 +36,9 @@ File.join(Rails.root, "/app/models", "/user.rb")
 
 system "rm -rf #{Rails.root}/foo/bar"
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to')`.
+
+File.join(Rails.root.to_s, "lib", "captcha")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
+
+File.join(::Rails.root.to_s, "app", "models")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/FilePath: Prefer `Rails.root.join('path/to').to_s`.
