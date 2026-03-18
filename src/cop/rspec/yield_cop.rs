@@ -15,8 +15,10 @@ use crate::parse::source::SourceFile;
 /// only matches when &block is the sole parameter. Fixed by checking that the block
 /// has no required, optional, rest, or keyword params — only the block param.
 ///
-/// FN=11: Not addressed in this pass. Likely patterns where `receive` appears in
-/// positions our call chain traversal doesn't reach.
+/// FN=11: Root cause was a function name mismatch — `call_chain_includes_receive` was
+/// called but the actual function was renamed to `call_chain_or_args_includes_receive`
+/// (which checks `receive` in both receiver chain and arguments, needed for `do...end`
+/// blocks where the block attaches to `.to` rather than `receive`). Fixed 2026-03-18.
 pub struct Yield;
 
 /// Flags `receive(:method) { |&block| block.call }` — should use `.and_yield` instead.
@@ -154,7 +156,7 @@ impl Cop for Yield {
         }
 
         // Check that the outer call chain includes `receive`
-        if !call_chain_includes_receive(call) {
+        if !call_chain_or_args_includes_receive(&call) {
             return;
         }
 
@@ -164,16 +166,29 @@ impl Cop for Yield {
     }
 }
 
-fn call_chain_includes_receive(call: ruby_prism::CallNode<'_>) -> bool {
-    // Check if the call or any receiver in the chain is `receive`
+fn call_chain_or_args_includes_receive(call: &ruby_prism::CallNode<'_>) -> bool {
+    // Check if the call itself is `receive`
     let name = call.name().as_slice();
     if name == b"receive" {
         return true;
     }
 
+    // Check arguments for `receive` (handles `do...end` blocks on `.to` where
+    // `receive(:method)` is an argument rather than receiver)
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            if let Some(arg_call) = arg.as_call_node() {
+                if arg_call.name().as_slice() == b"receive" {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Walk receiver chain
     if let Some(recv) = call.receiver() {
         if let Some(recv_call) = recv.as_call_node() {
-            return call_chain_includes_receive(recv_call);
+            return call_chain_or_args_includes_receive(&recv_call);
         }
     }
 
