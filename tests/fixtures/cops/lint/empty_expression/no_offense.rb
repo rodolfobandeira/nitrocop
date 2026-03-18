@@ -5,3 +5,5 @@ if (condition)
   bar
 end
 result = (x > 0 ? x : -x)
+"result is #{foo}"
+`command #{bar}`
