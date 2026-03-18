@@ -1,8 +1,17 @@
-use crate::cop::node_type::{CALL_NODE, REGULAR_EXPRESSION_NODE};
+use crate::cop::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Style/RedundantRegexpArgument flags regexp arguments that could be strings.
+///
+/// ## Investigation findings (2026-03-18)
+///
+/// ### FN root cause fixed:
+/// - `is_deterministic_regexp` rejected ALL backslash escapes. RuboCop's
+///   LITERAL_REGEX allows `\` followed by non-special chars (e.g., `\.`, `\/`, `\-`).
+///   Only regex-specific escapes like `\d`, `\w`, `\s`, `\b`, `\A`, etc. make a
+///   regexp non-deterministic. Updated to match RuboCop's LITERAL_REGEX behavior.
 pub struct RedundantRegexpArgument;
 
 /// Methods where a regexp argument can be replaced with a string.
@@ -27,7 +36,7 @@ impl Cop for RedundantRegexpArgument {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, REGULAR_EXPRESSION_NODE]
+        &[CALL_NODE]
     }
 
     fn check_node(
@@ -96,16 +105,45 @@ impl Cop for RedundantRegexpArgument {
     }
 }
 
+/// Check if regexp content is deterministic (matches a fixed string).
+/// Matches RuboCop's DETERMINISTIC_REGEX which uses LITERAL_REGEX:
+///   LITERAL_REGEX = /[\w\s\-,"'!#%&<>=;:`~\/]|\\[^AbBdDgGhHkpPRwWXsSzZ0-9]/
+/// Each character must be either a literal char or a backslash-escaped literal char.
 fn is_deterministic_regexp(content: &[u8]) -> bool {
-    // Check if regexp content is a simple literal string with no special chars
-    for &b in content {
-        match b {
-            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'^' | b'$'
-            | b'|' | b'\\' => return false,
-            _ => {}
-        }
+    if content.is_empty() {
+        return false;
     }
-    !content.is_empty()
+
+    // Regex-special escape chars that indicate a non-deterministic pattern
+    const REGEX_ESCAPE_SPECIALS: &[u8] = b"AbBdDgGhHkpPRwWXsSzZ0123456789";
+
+    let mut i = 0;
+    while i < content.len() {
+        let b = content[i];
+        if b == b'\\' {
+            // Backslash escape: next char must not be a regex-special escape
+            i += 1;
+            if i >= content.len() {
+                return false; // trailing backslash
+            }
+            if REGEX_ESCAPE_SPECIALS.contains(&content[i]) {
+                return false;
+            }
+            // Escaped literal char — this is fine (e.g., \., \/, \-)
+        } else {
+            // Unescaped character must be in the literal set
+            // RuboCop allows: \w (word chars), \s (whitespace), and specific punctuation
+            match b {
+                // Regex metacharacters that are NOT literal
+                b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'^'
+                | b'$' | b'|' => return false,
+                // Everything else is literal (alphanumeric, underscore, space, punctuation)
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    true
 }
 
 #[cfg(test)]

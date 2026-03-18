@@ -6,3 +6,12 @@
 
 'foo'.split(/,/)
             ^^^ Style/RedundantRegexpArgument: Use string `"` instead of regexp `/` as the argument.
+
+'foo'.gsub(/\./, '-')
+           ^^^^ Style/RedundantRegexpArgument: Use string `"` instead of regexp `/` as the argument.
+
+'foo'.split(/\-/)
+            ^^^^ Style/RedundantRegexpArgument: Use string `"` instead of regexp `/` as the argument.
+
+'foo'.sub(/\//, '-')
+          ^^^^ Style/RedundantRegexpArgument: Use string `"` instead of regexp `/` as the argument.
