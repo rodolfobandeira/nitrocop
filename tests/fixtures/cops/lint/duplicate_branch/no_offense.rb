@@ -126,3 +126,25 @@ end
 
 # String interpolation with trailing space difference
 line.sub!(/^/, line == "" ? "#{prefix}" : "#{prefix} ")
+
+# Method call with parens vs without parens but different method names (not duplicates)
+case node_type
+when :nil
+  add_typing(node, type: AST::Builtin.nil_type)
+when :alias
+  add_other node, type: AST::Builtin.nil_type
+end
+
+# Different actual code despite similar comments
+case msg
+when /not found/
+  error_hash.merge!(
+    type: :not_found,
+    field: nil,
+  )
+when /invalid/
+  error_hash.merge!(
+    type: :invalid,
+    field: nil,
+  )
+end

@@ -79,6 +79,28 @@ use crate::parse::source::SourceFile;
 ///    spans within each node. Whitespace is normalized only OUTSIDE literal
 ///    spans; literal content is fingerprinted verbatim (strings use unescaped
 ///    bytes, regexes use unescaped pattern, interpolated strings use parts).
+///
+/// ## Follow-up (2026-03-18) — comments inside nodes, optional parens, -0.0
+///
+/// FP=0, FN=4 at 99.8% match rate. Three distinct root causes:
+///
+/// 1. **Comments inside a single node's source range** — previous comment
+///    stripping only worked between statements (iterating body nodes). Comments
+///    within a single node (e.g., trailing `# comment` on a hash argument, or
+///    different `# comment` blocks inside an `if/else` sub-expression) were
+///    included in the fingerprint. Fix: `strip_comments()` applied to all
+///    non-literal source regions before whitespace normalization.
+///
+/// 2. **Optional method call parentheses** — `foo(x)` and `foo x` produce the
+///    same AST but different source text. Fix: `call_node_fingerprint()` builds
+///    a structural fingerprint from method name + receiver + arguments,
+///    independent of opening/closing paren presence.
+///
+/// 3. **`-0.0` vs `0.0`** — In Ruby, `0.0 == -0.0` and they hash equally,
+///    so RuboCop's Set-based comparison considers them duplicate branches.
+///    Prism may parse `-0.0` as `FloatNode(-0.0)` or `CallNode(-@, FloatNode)`.
+///    Fix: `is_negated_zero_float()` checks for `-@` on zero, and the FloatNode
+///    path checks `val == 0.0` (which matches both `0.0` and `-0.0` per IEEE 754).
 pub struct DuplicateBranch;
 
 impl Cop for DuplicateBranch {
@@ -225,6 +247,27 @@ fn stmts_source(source: &SourceFile, stmts: &Option<ruby_prism::StatementsNode<'
     }
 }
 
+/// Strip single-line comments (`#` to end-of-line) from source bytes.
+/// This is applied to non-literal source regions before whitespace normalization
+/// so that branches differing only by comments are treated as duplicates,
+/// matching RuboCop's AST-based comparison which ignores comments.
+fn strip_comments(src: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'#' {
+            // Skip from '#' to end of line
+            while i < src.len() && src[i] != b'\n' {
+                i += 1;
+            }
+        } else {
+            result.push(src[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Strip all ASCII whitespace, inserting a single space only between two
 /// adjacent word characters (alphanumeric or underscore) to prevent identifier
 /// merging. This matches RuboCop's AST-based comparison which ignores all
@@ -249,6 +292,11 @@ fn normalize_whitespace(src: &[u8]) -> Vec<u8> {
         }
     }
     result
+}
+
+/// Strip comments, then normalize whitespace for non-literal source.
+fn normalize_source(src: &[u8]) -> Vec<u8> {
+    normalize_whitespace(&strip_comments(src))
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -284,9 +332,15 @@ impl<'pr> Visit<'pr> for MaxExtentFinder {
 /// Build a fingerprint for a single statement node.
 ///
 /// Finds all string/regex/symbol literal spans within the node using a visitor,
-/// then normalizes whitespace only OUTSIDE those spans. Literal content is
-/// preserved exactly, preventing false positives when whitespace inside strings
-/// or regexes differs between branches.
+/// then strips comments and normalizes whitespace only OUTSIDE those spans.
+/// Literal content is preserved exactly, preventing false positives when
+/// whitespace inside strings or regexes differs between branches.
+///
+/// Special cases:
+/// - CallNode: structural fingerprint from method name + args, independent of
+///   optional parentheses (`foo(x)` and `foo x` produce the same fingerprint)
+/// - Unary minus on zero float: `-0.0` fingerprints the same as `0.0` because
+///   Ruby's `0.0 == -0.0` and they hash equally in RuboCop's AST comparison
 fn node_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>) {
     // Fast path: plain string literal — use unescaped content
     if let Some(string) = node.as_string_node() {
@@ -302,6 +356,37 @@ fn node_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>
         return;
     }
 
+    // Unary minus on zero float: `-0.0` == `0.0` in Ruby (and hash equally),
+    // so RuboCop considers them duplicate branch bodies. Must be checked before
+    // the general CallNode path since `-0.0` parses as CallNode(-@, FloatNode).
+    if is_negated_zero_float(node) {
+        out.extend_from_slice(b"F:0.0");
+        return;
+    }
+
+    // CallNode: structural fingerprint independent of optional parentheses.
+    // `foo(x, y: z)` and `foo x, y: z` produce the same AST and should
+    // fingerprint equally.
+    if let Some(call) = node.as_call_node() {
+        call_node_fingerprint(bytes, &call, out);
+        return;
+    }
+
+    // Float literal: normalize so 0.0 fingerprints consistently
+    if let Some(float_node) = node.as_float_node() {
+        let val = float_node.value();
+        if val == 0.0 {
+            out.extend_from_slice(b"F:0.0");
+            return;
+        }
+    }
+
+    source_fingerprint(bytes, node, out);
+}
+
+/// Build a source-based fingerprint for a node: strips comments and normalizes
+/// whitespace outside literal spans.
+fn source_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>) {
     let loc = node.location();
     let node_start = loc.start_offset();
     let mut node_end = loc.end_offset();
@@ -313,7 +398,7 @@ fn node_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>
 
     let end = node_end.min(bytes.len());
     if node_start >= end {
-        let mut ws_out = normalize_whitespace(loc.as_slice());
+        let mut ws_out = normalize_source(loc.as_slice());
         out.append(&mut ws_out);
         return;
     }
@@ -325,7 +410,7 @@ fn node_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>
 
     if lit_finder.spans.is_empty() {
         // No literals — just normalize the whole source
-        let mut ws_out = normalize_whitespace(&bytes[node_start..end]);
+        let mut ws_out = normalize_source(&bytes[node_start..end]);
         out.append(&mut ws_out);
         return;
     }
@@ -338,9 +423,9 @@ fn node_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>
         let rel_start = span_start.saturating_sub(base);
         let rel_end = span_end.saturating_sub(base).min(raw.len());
 
-        // Normalize whitespace in the gap before this literal
+        // Strip comments + normalize whitespace in the gap before this literal
         if rel_start > cursor {
-            let mut ws_out = normalize_whitespace(&raw[cursor..rel_start]);
+            let mut ws_out = normalize_source(&raw[cursor..rel_start]);
             out.append(&mut ws_out);
         }
 
@@ -354,9 +439,66 @@ fn node_fingerprint(bytes: &[u8], node: &ruby_prism::Node<'_>, out: &mut Vec<u8>
 
     // Normalize any remaining source after the last literal
     if cursor < raw.len() {
-        let mut ws_out = normalize_whitespace(&raw[cursor..]);
+        let mut ws_out = normalize_source(&raw[cursor..]);
         out.append(&mut ws_out);
     }
+}
+
+/// Build a structural fingerprint for a CallNode, independent of optional parens.
+/// `foo(x, y: z)` and `foo x, y: z` produce the same fingerprint.
+fn call_node_fingerprint(bytes: &[u8], call: &ruby_prism::CallNode<'_>, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"C:");
+    // Receiver
+    if let Some(recv) = call.receiver() {
+        node_fingerprint(bytes, &recv, out);
+        if let Some(op) = call.call_operator_loc() {
+            out.extend_from_slice(op.as_slice());
+        } else {
+            out.push(b'.');
+        }
+    }
+    // Method name
+    out.extend_from_slice(call.name().as_slice());
+    // Arguments
+    out.push(b'(');
+    if let Some(args) = call.arguments() {
+        for (i, arg) in args.arguments().iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            node_fingerprint(bytes, &arg, out);
+        }
+    }
+    out.push(b')');
+    // Block
+    if let Some(block) = call.block() {
+        out.push(b'{');
+        node_fingerprint(bytes, &block, out);
+        out.push(b'}');
+    }
+}
+
+/// Check if a node is a unary minus applied to a zero float literal.
+/// In Ruby's AST, `-0.0` is equivalent to `0.0` (they hash equally).
+fn is_negated_zero_float(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        if call.name().as_slice() == b"-@"
+            && call.receiver().is_some()
+            && call.arguments().is_none()
+        {
+            if let Some(recv) = call.receiver() {
+                if let Some(float_node) = recv.as_float_node() {
+                    return float_node.value() == 0.0;
+                }
+                if let Some(int_node) = recv.as_integer_node() {
+                    let val = int_node.value();
+                    let (negative, digits) = val.to_u32_digits();
+                    return !negative && digits == [0];
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Collects byte spans of string/regex/symbol literals within a node.

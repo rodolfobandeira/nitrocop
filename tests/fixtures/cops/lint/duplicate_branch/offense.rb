@@ -181,3 +181,59 @@ rescue SecondError
 
   false
 end
+
+# case/when branches with trailing comments inside a single statement (comment within node source)
+case error_message
+when /File not found: (.+)/i
+  error_hash.merge!(
+    type: :file_not_found,
+    field: nil, # We don't know which agent without more context
+  )
+when /Configuration file not found/i
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  error_hash.merge!(
+    type: :file_not_found,
+    field: nil,
+  )
+end
+
+# if/else branches with comments inside a single block node (different comments, same code)
+if app_path == '.'
+  if use_absolute?
+    { root: resolve(path), desc: 'Absolute path' }
+  else
+    # This avoids any external paths.
+    # Seems fine!
+    { root: nil, desc: 'Relative path' }
+  end
+else
+^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  if use_absolute?
+    { root: resolve(path), desc: 'Absolute path' }
+  else
+    # Seems fine!
+    { root: nil, desc: 'Relative path' }
+  end
+end
+
+# case/when where -0.0 and 0.0 are considered duplicate branch bodies
+case string
+when 'inf'
+  Float::INFINITY
+when '0'
+  0.0
+when '-0'
+^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  -0.0
+else
+  string.to_f
+end
+
+# case/when with method call with and without parens (same AST)
+case node_type
+when :nil
+  add_typing(node, type: AST::Builtin.nil_type)
+when :alias
+^^^^^^^^^^^^^^^^ Lint/DuplicateBranch: Duplicate branch body detected.
+  add_typing node, type: AST::Builtin.nil_type
+end
