@@ -23,6 +23,15 @@ use crate::parse::source::SourceFile;
 /// `InterpolatedStringNode`. Fix: also check `as_interpolated_string_node()` and
 /// extract the leading text from the first `StringNode` part to determine if it
 /// starts with `#` or `.`.
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// FP=1 at drhenner__ror_ecommerce spec/models/order_spec.rb:235. The call
+/// `context ".create_invoice_transaction(...)"` has no block (no `do...end`).
+/// RuboCop uses `on_block` handler which only fires for block nodes, so blockless
+/// `context` calls are never checked. Also added receiver check (RuboCop uses
+/// `send nil? :context`). Fix: guard on `call.block()` being a `BlockNode` and
+/// `call.receiver().is_none()`.
 pub struct ContextMethod;
 
 impl Cop for ContextMethod {
@@ -57,6 +66,16 @@ impl Cop for ContextMethod {
         };
 
         if call.name().as_slice() != b"context" {
+            return;
+        }
+
+        // RuboCop uses on_block handler — only fires when call has a block
+        if call.block().is_none_or(|b| b.as_block_node().is_none()) {
+            return;
+        }
+
+        // Receiver must be nil (RuboCop: `send nil? :context`)
+        if call.receiver().is_some() {
             return;
         }
 

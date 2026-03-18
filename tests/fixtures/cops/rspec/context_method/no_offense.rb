@@ -9,3 +9,10 @@ end
 
 context 'with valid input' do
 end
+
+# context without a block should not be flagged (RuboCop uses on_block)
+context ".some_method"
+
+# context with receiver should not be flagged
+SomeClass.context ".some_method" do
+end
