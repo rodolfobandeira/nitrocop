@@ -100,3 +100,49 @@ RSpec.describe User do
   subject { described_class.new }
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
 end
+
+RSpec.shared_examples_for 'a model' do
+  let(:params) { foo }
+
+  subject { described_class.new }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+end
+
+RSpec.shared_context 'with setup' do
+  before { setup }
+
+  subject { described_class.new }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `before` declarations.
+end
+
+RSpec.feature 'User management' do
+  let(:admin) { create(:admin) }
+
+  subject { described_class.new }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+end
+
+RSpec.describe User do
+  items.each do |item|
+    context "with #{item}" do
+      let(:record) { create(:record, item: item) }
+
+      subject { described_class.new }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+    end
+  end
+end
+
+RSpec.describe User do
+  include_context 'shared setup'
+
+  subject { described_class.new }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `include_context` declarations.
+end
+
+RSpec.describe User do
+  it_behaves_like 'sortable'
+
+  subject { described_class.new }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `it_behaves_like` declarations.
+end

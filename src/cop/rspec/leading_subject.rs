@@ -48,6 +48,23 @@ use crate::parse::source::SourceFile;
 /// recursed into example group and include-family blocks, missing subjects
 /// inside arbitrary blocks. Fixed by recursing into ALL call nodes with blocks
 /// that are children of an example group body.
+///
+/// ## Investigation (2026-03-18)
+///
+/// **Root cause of 72 FNs:** Two issues found:
+///
+/// 1. `is_spec_group_call()` at the top level only matched `RSpec.describe` for
+///    receiver calls, missing `RSpec.shared_examples_for`, `RSpec.shared_context`,
+///    `RSpec.feature`, etc. Many corpus files use `RSpec.shared_examples_for` or
+///    `RSpec.shared_context` at the top level, so subjects in those blocks were
+///    never checked. Fixed by matching all `RSpec.<example_group>` methods.
+///
+/// 2. Calls with receivers (e.g. `items.each do...end`, `hash.each_pair do...end`)
+///    were completely skipped during recursion (`continue` after the
+///    `RSpec.describe` check). Subjects inside iterator blocks that contain
+///    nested `context`/`describe` blocks were missed. Fixed by recursing into
+///    the block body of any receiver call that has a block, matching RuboCop's
+///    `on_block` behavior that fires on ALL blocks.
 pub struct LeadingSubject;
 
 impl Cop for LeadingSubject {
@@ -135,18 +152,23 @@ impl LeadingSubject {
             if let Some(c) = stmt.as_call_node() {
                 let name = c.name().as_slice();
 
-                // Handle calls with receiver (e.g. RSpec.describe)
+                // Handle calls with receiver (e.g. RSpec.describe, items.each)
                 if c.receiver().is_some() {
-                    let is_rspec_describe = util::constant_name(&c.receiver().unwrap())
+                    let is_rspec_group = util::constant_name(&c.receiver().unwrap())
                         .is_some_and(|n| n == b"RSpec")
-                        && name == b"describe";
-                    if is_rspec_describe {
-                        // Recurse into RSpec.describe nested calls
+                        && is_rspec_example_group(name);
+                    if is_rspec_group {
+                        // Recurse into RSpec.describe / RSpec.shared_examples_for / etc.
                         self.check_block_body(source, &stmt, diagnostics);
                         // Also treat as offending (spec_group in RuboCop)
                         if first_relevant_name.is_none() {
                             first_relevant_name = Some(name);
                         }
+                    } else if c.block().is_some() {
+                        // Arbitrary receiver calls with blocks (e.g. items.each do...end)
+                        // must be recursed into to find subjects in nested scopes,
+                        // matching RuboCop's on_block behavior.
+                        self.check_block_body(source, &stmt, diagnostics);
                     }
                     continue;
                 }
@@ -219,7 +241,8 @@ fn is_spec_group_call(node: &ruby_prism::Node<'_>) -> bool {
     };
     let name = call.name().as_slice();
     if let Some(recv) = call.receiver() {
-        util::constant_name(&recv).is_some_and(|n| n == b"RSpec") && name == b"describe"
+        // RSpec.describe, RSpec.shared_examples_for, RSpec.shared_context, RSpec.feature, etc.
+        util::constant_name(&recv).is_some_and(|n| n == b"RSpec") && is_rspec_example_group(name)
     } else {
         is_rspec_example_group(name)
     }

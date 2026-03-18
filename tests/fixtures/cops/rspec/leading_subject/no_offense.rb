@@ -77,3 +77,27 @@ RSpec.describe User do
     let(:params) { foo }
   end
 end
+
+RSpec.shared_examples_for 'a model' do
+  subject { described_class.new }
+  let(:params) { foo }
+end
+
+RSpec.shared_context 'with setup' do
+  subject { described_class.new }
+  before { setup }
+end
+
+RSpec.feature 'User management' do
+  subject { described_class.new }
+  let(:admin) { create(:admin) }
+end
+
+RSpec.describe User do
+  items.each do |item|
+    context "with #{item}" do
+      subject { described_class.new }
+      let(:record) { create(:record, item: item) }
+    end
+  end
+end
