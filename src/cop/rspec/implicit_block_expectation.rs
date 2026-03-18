@@ -132,10 +132,7 @@ impl ImplicitBlockVisitor<'_> {
                 let name = call.name().as_slice();
 
                 // Example block (it/specify/etc.)
-                if call.receiver().is_none()
-                    && is_rspec_example(name)
-                    && has_lambda_subject
-                {
+                if call.receiver().is_none() && is_rspec_example(name) && has_lambda_subject {
                     if let Some(bn) = call.block().and_then(|b| b.as_block_node()) {
                         self.check_example_body(&bn);
                     }
@@ -244,12 +241,19 @@ fn is_lambda_or_proc(node: &ruby_prism::Node<'_>) -> bool {
             return true;
         }
 
-        // Proc.new { ... } — receiver is Proc constant
+        // Proc.new { ... } — receiver is Proc constant (simple or qualified)
         if name == b"new" {
             if let Some(recv) = call.receiver() {
                 if let Some(const_read) = recv.as_constant_read_node() {
                     if const_read.name().as_slice() == b"Proc" && call.block().is_some() {
                         return true;
+                    }
+                }
+                if let Some(const_path) = recv.as_constant_path_node() {
+                    if let Some(path_name) = const_path.name() {
+                        if path_name.as_slice() == b"Proc" && call.block().is_some() {
+                            return true;
+                        }
                     }
                 }
             }
