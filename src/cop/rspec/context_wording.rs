@@ -47,6 +47,14 @@ use crate::parse::source::SourceFile;
 /// Fix: return empty string instead of None when no leading text exists,
 /// so the prefix check correctly fails and reports the offense. Same fix
 /// applied to interpolated xstr nodes.
+///
+/// ## Corpus investigation (2026-03-18)
+///
+/// FP=1: rubocop__rubocop. Implicit string concatenation with line continuation
+/// (`"when #{var}: " \ 'extra text'`) creates a nested `InterpolatedStringNode`
+/// inside the outer `InterpolatedStringNode`. `extract_interp_leading_text` only
+/// checked for `StringNode` as the first part, missing the nested interp case.
+/// Fix: recurse into nested `InterpolatedStringNode` to extract leading text.
 pub struct ContextWording;
 
 const DEFAULT_PREFIXES: &[&str] = &["when", "with", "without"];
@@ -211,20 +219,31 @@ impl Cop for ContextWording {
 
 /// Extract leading text from an interpolated string's parts (before first interpolation).
 /// Returns empty string if the string starts with an interpolation (no leading text).
+///
+/// Handles implicit string concatenation (e.g., `"when #{var}: " 'extra'`) where
+/// Prism wraps segments in a parent InterpolatedStringNode whose first part is itself
+/// an InterpolatedStringNode. In that case, recurse into the nested node.
 fn extract_interp_leading_text(interp: &ruby_prism::InterpolatedStringNode<'_>) -> String {
     let parts: Vec<_> = interp.parts().iter().collect();
     let Some(first) = parts.first() else {
         return String::new();
     };
-    let Some(s) = first.as_string_node() else {
-        // First part is an interpolation (EmbeddedStatementsNode), not text.
-        // The description starts with a dynamic value, so no prefix can match.
-        return String::new();
-    };
-    let text = s.unescaped();
-    std::str::from_utf8(text)
-        .map(|s| s.to_string())
-        .unwrap_or_default()
+    if let Some(s) = first.as_string_node() {
+        let text = s.unescaped();
+        return std::str::from_utf8(text)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+    }
+    // Implicit string concatenation: first part may be a nested InterpolatedStringNode.
+    // E.g., `"when #{var}: " 'text'` → outer InterpolatedStringNode with parts:
+    //   [InterpolatedStringNode("when #{var}: "), StringNode("text")]
+    // Recurse into the nested interpolated string to extract its leading text.
+    if let Some(nested_interp) = first.as_interpolated_string_node() {
+        return extract_interp_leading_text(&nested_interp);
+    }
+    // First part is an interpolation (EmbeddedStatementsNode), not text.
+    // The description starts with a dynamic value, so no prefix can match.
+    String::new()
 }
 
 #[cfg(test)]
@@ -249,6 +268,24 @@ mod tests {
         assert!(
             diags.is_empty(),
             "AllowedPatterns should skip matching descriptions"
+        );
+    }
+
+    #[test]
+    fn implicit_concat_with_interpolation_not_flagged() {
+        // Ruby: context "when the value includes #{var}: " \
+        //               'extra text' do
+        // end
+        // Prism parses this as an outer InterpolatedStringNode wrapping a nested
+        // InterpolatedStringNode and a StringNode. The leading text is "when ..."
+        // which matches the "when" prefix, so it should NOT be flagged.
+        let src =
+            b"context \"when the value includes \x23{var}: \" \\\n        'extra text' do\nend\n";
+        let diags = crate::testutil::run_cop_full(&ContextWording, src);
+        assert!(
+            diags.is_empty(),
+            "Should not flag 'when...' with line continuation concat: got {} diagnostics",
+            diags.len()
         );
     }
 

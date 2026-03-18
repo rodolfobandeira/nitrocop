@@ -46,3 +46,9 @@ end
 # Interpolated string where leading text exactly matches a prefix
 context "with#{flag ? ' C-' : 'out '}acceleration" do
 end
+
+# Line continuation with interpolation (concatenated string)
+# Prism may parse this differently than a simple interpolated string
+context "when the value includes #{var}: " \
+        'extra text' do
+end
