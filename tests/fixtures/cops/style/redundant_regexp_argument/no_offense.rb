@@ -14,3 +14,10 @@ y = x.match?('world')
 
 # Single space regexp is idiomatic
 'foo'.split(/ /)
+
+# %r{} syntax should not be flagged (intentional style choice)
+string.gsub(%r{"}) { '\\"' }
+match_rule_quoted = Regexp.quote(match_rule).gsub(%r{\\\*}, '.*')
+'foo'.sub(%r{bar}, 'baz')
+'foo'.split(%r{,})
+'foo'.gsub(%r{\.}, '-')

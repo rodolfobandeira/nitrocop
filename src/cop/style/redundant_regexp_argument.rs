@@ -7,6 +7,13 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Investigation findings (2026-03-18)
 ///
+/// ### FP root cause fixed:
+/// - `%r{...}` percent-r regex syntax was being flagged. RuboCop's implementation
+///   checks `regexp_node.source` against DETERMINISTIC_REGEX which naturally excludes
+///   `%r{...}` because `{`/`}` are not in the literal character set. In Prism, we
+///   check `content_loc` (inner content only), so we need to explicitly check the
+///   opening delimiter and skip non-slash regexps (e.g., `%r{`, `%r|`, `%r(`, etc.).
+///
 /// ### FN root cause fixed:
 /// - `is_deterministic_regexp` rejected ALL backslash escapes. RuboCop's
 ///   LITERAL_REGEX allows `\` followed by non-special chars (e.g., `\.`, `\/`, `\-`).
@@ -68,11 +75,17 @@ impl Cop for RedundantRegexpArgument {
             return;
         }
 
-        // First argument must be a simple regexp literal
+        // First argument must be a slash-delimited regexp literal (/regex/, not %r{regex})
         let regex = match arg_list[0].as_regular_expression_node() {
             Some(r) => r,
             None => return,
         };
+
+        // Skip %r{...} syntax — only flag slash-delimited /regex/
+        let opening = regex.opening_loc().as_slice();
+        if !opening.starts_with(b"/") {
+            return;
+        }
 
         // Check if the regex is deterministic (no special regex chars)
         let content = regex.content_loc().as_slice();
