@@ -37,6 +37,16 @@ use ruby_prism::Visit;
 /// visitor that tracks whether we're inside an already-flagged modifier
 /// if/unless. When a multiline modifier is found, its subtree is marked as
 /// ignored and nested modifiers are skipped.
+///
+/// **Root cause of remaining FPs (2, fixed 2026-03-18):** Parser gem difference
+/// in how block nodes report `multiline?`. In the parser gem, a method call
+/// with a block becomes a `:block` node whose `multiline?` checks whether `{`
+/// and `}` are on different lines (not the overall expression span). In Prism,
+/// the body is a `CallNode` with a block child, and the overall span includes
+/// the receiver/args. Examples: `receiver.method(args)\n  .chain { block }`
+/// and `method("long" +\n  "args") { block }` — both have single-line `{}`
+/// braces, so RuboCop considers them non-multiline. Fixed by checking block
+/// delimiter positions when body is a CallNode with a block.
 pub struct MultilineIfModifier;
 
 impl Cop for MultilineIfModifier {
@@ -76,6 +86,13 @@ struct MultilineIfModifierVisitor<'a> {
 impl MultilineIfModifierVisitor<'_> {
     /// Check if a modifier if/unless body spans multiple lines.
     /// Returns `Some((body_start_offset, body_start_line, body_start_col))` if multiline.
+    ///
+    /// Special handling for CallNode with a block: In the parser gem, a method call
+    /// with a block becomes a `:block` node whose `multiline?` checks whether the
+    /// `{`/`}` (or `do`/`end`) delimiters are on different lines — not the overall
+    /// expression span. In Prism, the body is a `CallNode` with a block child. We
+    /// replicate RuboCop's behavior by checking the block's delimiter positions when
+    /// the body is a single CallNode with a block.
     fn check_body_multiline(
         &self,
         stmts: &ruby_prism::StatementsNode<'_>,
@@ -87,6 +104,30 @@ impl MultilineIfModifierVisitor<'_> {
 
         let first = &body_nodes[0];
         let last = &body_nodes[body_nodes.len() - 1];
+
+        // If the body is a single CallNode with a block, check block delimiter
+        // positions instead of the overall CallNode span. This matches RuboCop's
+        // parser gem where the body would be a :block node whose multiline? checks
+        // opening/closing brace positions.
+        if body_nodes.len() == 1 {
+            if let Some(call) = first.as_call_node() {
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    let open_line = self
+                        .source
+                        .offset_to_line_col(block.opening_loc().start_offset())
+                        .0;
+                    let close_line = self
+                        .source
+                        .offset_to_line_col(block.closing_loc().start_offset())
+                        .0;
+                    if open_line == close_line {
+                        // Block braces on same line — not multiline per RuboCop
+                        return None;
+                    }
+                }
+            }
+        }
+
         let body_start_line = self
             .source
             .offset_to_line_col(first.location().start_offset())
