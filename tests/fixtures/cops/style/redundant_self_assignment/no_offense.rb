@@ -37,3 +37,7 @@ arr = arr.slice!(0)
 
 # self.foo = foo.concat(ary) — attribute assignment to self
 self.foo = foo.concat(ary)
+
+# Attribute assignment with block — RuboCop doesn't flag these
+config.server_tag_roles = config.server_tag_roles.transform_values! { |v| v.split('/') }
+other.items = other.items.delete_if { |x| x.nil? }

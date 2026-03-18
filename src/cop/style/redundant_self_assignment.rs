@@ -31,6 +31,16 @@ use crate::parse::source::SourceFile;
 /// **Fix:** Replaced method list with exact RuboCop `METHODS_RETURNING_SELF` set.
 /// Added ivar/cvar/gvar write+read handling. Added attribute assignment detection
 /// via `CallNode` with `name.ends_with(b"=")`.
+///
+/// **FP fix (2026-03, corpus FP=1):** Attribute assignments where the RHS method
+/// call has a block (e.g., `config.roles = config.roles.transform_values! { ... }`)
+/// were incorrectly flagged. RuboCop's `redundant_self_assignment?` node matcher
+/// for `on_send` expects `(call (call %1 %2) ...)` as the argument, which doesn't
+/// match block-wrapped sends in the Parser gem AST (blocks wrap sends as
+/// `(block (send ...) ...)`). In Prism, blocks are stored in `CallNode.block()`,
+/// so we explicitly skip attribute assignments when `rhs_call.block().is_some()`.
+/// Note: variable assignments (`on_lvasgn`) DO handle blocks in RuboCop (line 61
+/// checks `rhs.type?(:any_block, :call)`), so we only skip blocks for Pattern 2.
 pub struct RedundantSelfAssignment;
 
 /// Methods that always return `self` (never `nil`), matching RuboCop's
@@ -233,6 +243,12 @@ impl Cop for RedundantSelfAssignment {
 
             let method_name = rhs_call.name().as_slice();
             if !method_returning_self(method_name) {
+                return;
+            }
+
+            // Skip when the RHS method call has a block — RuboCop's node matcher
+            // for attribute assignment doesn't match block-wrapped sends.
+            if rhs_call.block().is_some() {
                 return;
             }
 
