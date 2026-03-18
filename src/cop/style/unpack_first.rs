@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Investigation: FP=8 FN=6 were caused by a line location bug on multi-line expressions.
+/// The cop was reporting at `node.location().start_offset()` which spans the entire call chain
+/// from receiver to `.first`/`[0]`. For multi-line expressions (e.g. `OpenSSL::PKCS5.pbkdf2_hmac(...).unpack('H*')[0]`),
+/// this put the offense on the wrong line (chain start instead of `.unpack` line).
+/// Fix: report from `unpack_call.message_loc()` to the outer node's end, matching RuboCop's behavior.
+/// Message also changed to exclude receiver prefix (e.g. `unpack('h*').first` not `'foo'.unpack('h*').first`).
 pub struct UnpackFirst;
 
 impl UnpackFirst {
@@ -76,9 +82,13 @@ impl Cop for UnpackFirst {
                     if arg_list.len() == 1 {
                         let format_src =
                             std::str::from_utf8(arg_list[0].location().as_slice()).unwrap_or("...");
-                        let loc = node.location();
-                        let current = std::str::from_utf8(loc.as_slice()).unwrap_or("");
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        // Report from the unpack method name to the end of the outer call,
+                        // matching RuboCop's location behavior for multi-line chains.
+                        let msg_loc = unpack_call.message_loc().unwrap();
+                        let outer_end =
+                            node.location().start_offset() + node.location().as_slice().len();
+                        let current = source.byte_slice(msg_loc.start_offset(), outer_end, "");
+                        let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
                         diagnostics.push(self.diagnostic(
                             source,
                             line,
