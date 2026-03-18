@@ -17,6 +17,17 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: split hooks into three tiers and check `config.rails_version_at_least()`
 /// before matching 5.2 and 7.1 hooks, matching RuboCop's `hook_for_const`.
+///
+/// ## Investigation findings (2026-03-18)
+///
+/// Root cause of 5 FNs: all were `SQLite3Adapter.prepend(...)` in repos without
+/// `railties` in their Gemfile.lock (fizzy, solid_queue, neighbor). The version
+/// check used `config.rails_version_at_least(5.2)` which requires BOTH
+/// `TargetRailsVersion >= 5.2` AND `railties` in lockfile. But RuboCop's
+/// `ActiveSupportOnLoad` does NOT use `requires_gem 'railties'` — it only checks
+/// `target_rails_version >= 5.2` in `hook_for_const`. Fix: use
+/// `config.target_rails_version()` directly for the version-gated hook tiers,
+/// bypassing the railties lockfile gate.
 pub struct ActiveSupportOnLoad;
 
 /// Base LOAD_HOOKS — available at all Rails versions.
@@ -121,8 +132,11 @@ fn match_framework_class(
         }
     }
 
-    // Rails 5.2+ hooks
-    if config.rails_version_at_least(5.2) {
+    // Rails 5.2+ hooks — use target_rails_version() directly instead of
+    // rails_version_at_least() because RuboCop's ActiveSupportOnLoad does NOT
+    // use `requires_gem 'railties'`. It only checks `target_rails_version >= 5.2`
+    // in hook_for_const, so the railties lockfile gate must be skipped here.
+    if config.target_rails_version().is_some_and(|v| v >= 5.2) {
         for &(constant_path, hook) in RAILS_5_2_LOAD_HOOKS {
             if text == constant_path.as_bytes() {
                 return Some(hook);
@@ -130,8 +144,8 @@ fn match_framework_class(
         }
     }
 
-    // Rails 7.1+ hooks
-    if config.rails_version_at_least(7.1) {
+    // Rails 7.1+ hooks — same rationale as above
+    if config.target_rails_version().is_some_and(|v| v >= 7.1) {
         for &(constant_path, hook) in RAILS_7_1_LOAD_HOOKS {
             if text == constant_path.as_bytes() {
                 return Some(hook);
@@ -313,6 +327,31 @@ ActiveRecord::ConnectionAdapters::SQLite3Adapter.prepend(SqliteUuidAdapter)\nend
             diags.len(),
             1,
             "Expected 1 offense for SQLite3Adapter.prepend inside on_load block"
+        );
+    }
+
+    /// RAILS_5_2_LOAD_HOOKS should fire even without railties in lockfile.
+    /// RuboCop's ActiveSupportOnLoad does NOT use `requires_gem 'railties'`,
+    /// it only checks `target_rails_version >= 5.2` in `hook_for_const`.
+    #[test]
+    fn rails_5_2_hooks_fire_without_railties() {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        // No __RailtiesInLockfile — simulates projects without railties in lockfile
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        let source =
+            b"ActiveRecord::ConnectionAdapters::SQLite3Adapter.prepend(SqliteUuidAdapter)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ActiveSupportOnLoad, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for SQLite3Adapter.prepend without railties in lockfile"
         );
     }
 }
