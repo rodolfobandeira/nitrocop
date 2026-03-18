@@ -1,9 +1,9 @@
-use crate::cop::node_type::WHEN_NODE;
+use crate::cop::node_type::CASE_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// Corpus: 6 FPs fixed.
+/// Corpus: 6 FPs fixed, 22 FNs fixed.
 ///
 /// Round 1 (4 FPs): Multi-line `when` conditions (conditions spanning multiple lines)
 /// with comment-only bodies. The AllowComments search started from the `when` keyword
@@ -22,28 +22,16 @@ use crate::parse::source::SourceFile;
 /// `when /\Afile:/\nelse\n  # comment\n  code`. RuboCop's CommentsHelp#find_end_line
 /// uses the right_sibling's start line as the search boundary, which extends past
 /// the `else` keyword into the else body. Comments between `else` and the first
-/// else-body statement are found, suppressing the offense. Fix: extend the
-/// blank/comment line scan to also skip `when`/`else`/`end` keyword lines.
-/// Check if a trimmed line starts with a Ruby case/when structural keyword
-/// (`when`, `else`, `end`). Used to extend the AllowComments search range
-/// past these keywords to match RuboCop's CommentsHelp behavior.
-fn is_ruby_keyword_line(trimmed: &[u8]) -> bool {
-    for keyword in &[b"when" as &[u8], b"else", b"end"] {
-        if trimmed.starts_with(keyword) {
-            // Keyword must be the whole token: followed by whitespace, newline, or end of content
-            let rest = &trimmed[keyword.len()..];
-            if rest.is_empty()
-                || rest[0].is_ascii_whitespace()
-                || rest[0] == b'#'
-                || rest[0] == b';'
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
+/// else-body statement are found, suppressing the offense.
+///
+/// Round 4 (22 FNs): The line-scanning approach for AllowComments extended through
+/// `when`/`else`/`end` keyword lines, causing the search to escape the current when
+/// branch's scope. Comments in later when bodies or after the case `end` keyword
+/// would incorrectly suppress offenses for earlier empty when branches.
+/// Fix: switched from WHEN_NODE to CASE_NODE processing, iterating over when branches
+/// with AST-based boundary computation. For each empty when, the comment search range
+/// is bounded by the next when's start offset, the else body's first statement offset,
+/// or the case's end keyword offset — matching RuboCop's CommentsHelp#find_end_line.
 pub struct EmptyWhen;
 
 impl Cop for EmptyWhen {
@@ -56,7 +44,7 @@ impl Cop for EmptyWhen {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[WHEN_NODE]
+        &[CASE_NODE]
     }
 
     fn check_node(
@@ -68,113 +56,76 @@ impl Cop for EmptyWhen {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let when_node = match node.as_when_node() {
+        let case_node = match node.as_case_node() {
             Some(n) => n,
             None => return,
         };
 
-        let body_empty = match when_node.statements() {
-            None => true,
-            Some(stmts) => stmts.body().is_empty(),
-        };
-
-        if !body_empty {
-            return;
-        }
-
-        // AllowComments: when true, `when` bodies containing only comments are not offenses
         let allow_comments = config.get_bool("AllowComments", true);
-        if allow_comments {
-            // The WhenNode's location only covers the `when` keyword + conditions,
-            // NOT inline comments (e.g., `when "C" ; # comment`) or standalone
-            // comment lines below an empty when body. Extend the search range from
-            // the when keyword through all subsequent blank/comment lines until the
-            // next code token (next when/else/end).
-            let when_start = when_node.keyword_loc().start_offset();
-            let src = source.as_bytes();
+        let whens: Vec<_> = case_node.conditions().iter().collect();
 
-            // For multi-line when conditions, start scanning from after the
-            // last condition expression, not from the `when` keyword line.
-            // For heredoc conditions (StringNode, InterpolatedStringNode), the
-            // node's location only covers the opening delimiter (e.g. `<<~TEXT`),
-            // but the actual content and closing delimiter extend much further.
-            // Use closing_loc when available to get the true end offset.
-            let conditions = when_node.conditions();
-            let last_cond_end = conditions
-                .iter()
-                .map(|c| {
-                    let loc_end = c.location().end_offset();
-                    // Check for heredoc closing delimiter beyond the node location
-                    let closing_end = if let Some(s) = c.as_string_node() {
-                        s.closing_loc().map(|l| l.end_offset()).unwrap_or(loc_end)
-                    } else if let Some(s) = c.as_interpolated_string_node() {
-                        s.closing_loc().map(|l| l.end_offset()).unwrap_or(loc_end)
-                    } else {
-                        loc_end
-                    };
-                    loc_end.max(closing_end)
-                })
-                .max()
-                .unwrap_or(when_start);
-
-            // Find the end of the line containing the last condition
-            let line_end = src[last_cond_end..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(src.len(), |p| last_cond_end + p);
-
-            // Extend past subsequent blank/comment-only lines.
-            // Also scan past `when`/`else`/`end` keyword lines to match RuboCop's
-            // CommentsHelp#find_end_line, which uses the right_sibling's start line
-            // as the end boundary. This means comments in the `else` body (between
-            // the `else` keyword and the first statement) are included in the
-            // comment search for the preceding empty `when`.
-            let mut search_end = line_end;
-            let mut pos = if line_end < src.len() {
-                line_end + 1
-            } else {
-                src.len()
+        for (i, when_ref) in whens.iter().enumerate() {
+            let when_node = match when_ref.as_when_node() {
+                Some(w) => w,
+                None => continue,
             };
-            while pos < src.len() {
-                let next_nl = src[pos..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(src.len(), |p| pos + p);
-                let line = &src[pos..next_nl];
-                let trimmed = line
-                    .iter()
-                    .skip_while(|b| b.is_ascii_whitespace())
-                    .copied()
-                    .collect::<Vec<u8>>();
-                let is_keyword_line = is_ruby_keyword_line(&trimmed);
-                if trimmed.is_empty() || trimmed.starts_with(b"#") || is_keyword_line {
-                    search_end = next_nl;
-                    pos = if next_nl < src.len() {
-                        next_nl + 1
-                    } else {
-                        src.len()
-                    };
+
+            let body_empty = match when_node.statements() {
+                None => true,
+                Some(stmts) => stmts.body().is_empty(),
+            };
+
+            if !body_empty {
+                continue;
+            }
+
+            if allow_comments {
+                let when_start = when_node.keyword_loc().start_offset();
+
+                // Compute the search boundary for comments, matching RuboCop's
+                // CommentsHelp#find_end_line which uses:
+                // 1. The next sibling when's start offset
+                // 2. The else body's first statement offset (extends past `else` keyword)
+                // 3. The case's end keyword offset
+                let search_end = if i + 1 < whens.len() {
+                    whens[i + 1].location().start_offset()
+                } else if let Some(else_clause) = case_node.else_clause() {
+                    // RuboCop's find_end_line returns the right_sibling's start line.
+                    // In Parser's AST, the else body starts at the first statement,
+                    // so comments between `else` and the first statement are in range.
+                    else_clause
+                        .statements()
+                        .and_then(|stmts| stmts.body().iter().next())
+                        .map(|first_stmt| first_stmt.location().start_offset())
+                        .unwrap_or_else(|| case_node.end_keyword_loc().start_offset())
                 } else {
-                    break;
+                    case_node.end_keyword_loc().start_offset()
+                };
+
+                // Check for any comment in the range [when_start, search_end).
+                // This covers:
+                // - Inline comments on the when line (e.g., `when :foo ; # comment`)
+                // - Standalone comment lines in the body
+                // - `then # comment` patterns
+                let has_comment = _parse_result.comments().any(|comment| {
+                    let cs = comment.location().start_offset();
+                    cs >= when_start && cs < search_end
+                });
+
+                if has_comment {
+                    continue;
                 }
             }
 
-            for comment in _parse_result.comments() {
-                let comment_start = comment.location().start_offset();
-                if comment_start >= when_start && comment_start <= search_end {
-                    return;
-                }
-            }
+            let kw_loc = when_node.keyword_loc();
+            let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Avoid empty `when` conditions.".to_string(),
+            ));
         }
-
-        let kw_loc = when_node.keyword_loc();
-        let (line, column) = source.offset_to_line_col(kw_loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Avoid empty `when` conditions.".to_string(),
-        ));
     }
 }
 
