@@ -50,6 +50,13 @@ use crate::parse::source::SourceFile;
 ///   only checked direct `CallNode` children, missing calls inside `IfNode` and
 ///   `UnlessNode` wrappers. Fixed by extracting `collect_filter_call_from_node`
 ///   that also descends into conditional node bodies.
+///
+/// **Fixes applied (round 5): FN=3**
+/// - `default_include` was missing `**/app/mailers/**/*.rb`. The vendor config
+///   includes both `**/app/controllers/**/*.rb` and `**/app/mailers/**/*.rb`.
+///   Mailer files that use `before_action` with `only:` were not scanned.
+///   Also changed `app/controllers/**/*.rb` to `**/app/controllers/**/*.rb` to
+///   match the vendor's glob format with leading `**`.
 pub struct LexicallyScopedActionFilter;
 
 /// (call_start_offset, only_action_names, except_action_names)
@@ -81,7 +88,7 @@ impl Cop for LexicallyScopedActionFilter {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        &["app/controllers/**/*.rb"]
+        &["**/app/controllers/**/*.rb", "**/app/mailers/**/*.rb"]
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
