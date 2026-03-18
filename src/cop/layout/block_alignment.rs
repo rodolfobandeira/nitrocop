@@ -69,6 +69,9 @@ use crate::parse::source::SourceFile;
 /// Prism spans the entire expression including receiver chains, giving the exact expression
 /// start without heuristic line-based backward walking. This eliminates multiline string,
 /// comment interleaving, and bracket-balance issues in one structural change.
+/// Replaced `find_chain_expression_start` with `find_operator_continuation_start` which
+/// only walks through `||`, `&&`, `<<`, `+` operators (not brackets/commas/backslashes),
+/// preventing over-eager backward walking that caused false negatives.
 pub struct BlockAlignment;
 
 impl Cop for BlockAlignment {
@@ -145,12 +148,12 @@ impl Cop for BlockAlignment {
         // Also compute the expression start line's indent.
         let expression_start_indent = line_indent(bytes, call_start_offset);
 
-        // Fallback: use the line-based heuristic for cases the AST can't cover.
-        // The CallNode doesn't include parent operators like `||`, `&&`, `<<`.
-        // The heuristic walks backward through continuation patterns.
-        // Use the MINIMUM of the heuristic indent and the AST-based indent,
-        // since the heuristic may walk further back through `||`/`&&` chains.
-        let heuristic_indent = find_chain_expression_start(bytes, opening_loc.start_offset());
+        // Check for operator continuation: the CallNode doesn't include parent
+        // operators like `||`, `&&`, `<<`, `+`. If the call expression appears on
+        // the RHS of such an operator (e.g., `a || items.each do`), the `end`
+        // may validly align with the operator's LHS start.
+        let operator_continuation_indent =
+            find_operator_continuation_start(bytes, call_start_offset);
 
         // Get the column of `do`/`{` keyword itself
         let (_, do_col) = source.offset_to_line_col(opening_loc.start_offset());
@@ -184,7 +187,7 @@ impl Cop for BlockAlignment {
                 // closing must align with start of the expression
                 if end_col != expression_start_col
                     && end_col != expression_start_indent
-                    && end_col != heuristic_indent
+                    && operator_continuation_indent.is_none_or(|c| end_col != c)
                 {
                     diagnostics.push(self.diagnostic(
                         source,
@@ -205,14 +208,14 @@ impl Cop for BlockAlignment {
                 // - the expression start line indent, OR
                 // - the CallNode start column (for blocks inside parens/hash values), OR
                 // - the call expression column on the do-line (for hash-value blocks), OR
-                // - the heuristic chain expression indent (for ||/&& continuations)
+                // - the operator continuation indent (for ||/&&/+/<< continuations)
                 if end_col != start_of_line_indent
                     && end_col != do_col
                     && end_col != expression_start_col
                     && end_col != expression_start_indent
                     && (assignment_col.is_some() || end_col != call_start_col)
                     && end_col != call_expr_col
-                    && end_col != heuristic_indent
+                    && operator_continuation_indent.is_none_or(|c| end_col != c)
                 {
                     diagnostics.push(self.diagnostic(
                         source,
@@ -240,28 +243,6 @@ fn begins_its_line(bytes: &[u8], offset: usize) -> bool {
         }
     }
     true
-}
-
-/// Check if a line has unclosed parentheses or brackets (more opening than closing).
-/// This detects multiline argument lists and array/hash literals.
-/// NOTE: We only count `(` and `[`, NOT `{`. Curly braces typically open blocks
-/// or hash literals where each line is a separate statement, not a continuation
-/// of the outer expression. Including `{` would cause false positives when a
-/// `do...end` block is nested inside a brace block (e.g., `lambda { |env| ... }`).
-fn line_has_unclosed_bracket(line: &[u8]) -> bool {
-    let mut depth: i32 = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    for &b in line {
-        match b {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
-            b'(' | b'[' if !in_single && !in_double => depth += 1,
-            b')' | b']' if !in_single && !in_double => depth -= 1,
-            _ => {}
-        }
-    }
-    depth > 0
 }
 
 /// Get the indentation (number of leading whitespace characters) for the line
@@ -473,126 +454,64 @@ fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usiz
     pos
 }
 
-/// Walk backwards from the do-line to find the start of the method chain expression.
-/// If previous lines are continuations (e.g., starting with `.` or previous line
-/// ends with `\` or `.`), keep going up.
-fn find_chain_expression_start(bytes: &[u8], do_offset: usize) -> usize {
-    // Find start of the line containing `do`
-    let mut line_start = do_offset;
+/// Walk backward from `call_start_offset` to check if the call is on the RHS of
+/// a binary operator (`||`, `&&`, `<<`, `+`). If so, return the indent of the
+/// operator's LHS line. This handles patterns like:
+///   a ||
+///     items.each do |x|
+///     process(x)
+///   end
+///
+/// Unlike the previous `find_chain_expression_start` heuristic, this function
+/// ONLY walks through operator continuations — it does NOT walk through unclosed
+/// brackets, commas, backslash continuations, or leading dots. This prevents
+/// over-eager backward walking that caused false negatives (e.g., walking from
+/// `lambda{|env|` through `show_status(` into `req = ...`).
+fn find_operator_continuation_start(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
+    // Find start of the line containing the call
+    let mut line_start = call_start_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
         line_start -= 1;
     }
 
-    // First, check if the do-line itself has more closing brackets than opening.
-    // This means the expression started on a previous line (e.g., a multiline %i[] array).
-    // If so, scan backwards to find where the bracket was opened.
-    {
-        let do_line_content = &bytes[line_start..do_offset];
-        let bracket_balance = compute_bracket_balance(do_line_content);
-        if bracket_balance < 0 {
-            // More closing than opening brackets on the do-line.
-            // Walk backwards to find the line that opens the bracket.
-            let mut depth = bracket_balance;
-            let mut search_start = line_start;
-            while depth < 0 && search_start > 0 {
-                let prev_line_end = search_start - 1;
-                let mut prev_line_start = prev_line_end;
-                while prev_line_start > 0 && bytes[prev_line_start - 1] != b'\n' {
-                    prev_line_start -= 1;
-                }
-                let prev_content = &bytes[prev_line_start..prev_line_end];
-                depth += compute_bracket_balance(prev_content);
-                search_start = prev_line_start;
-            }
-            line_start = search_start;
-        }
+    // We only check if the PREVIOUS line ends with ||, &&, <<, or +
+    if line_start == 0 {
+        return None;
     }
 
-    // Look at previous lines to check if they're part of the same chain
-    loop {
-        if line_start == 0 {
-            break;
-        }
-        // Go to previous line
-        let prev_line_end = line_start - 1; // the \n
-        let mut prev_line_start = prev_line_end;
-        while prev_line_start > 0 && bytes[prev_line_start - 1] != b'\n' {
-            prev_line_start -= 1;
-        }
-
-        // Check if current line (the one at line_start) is a continuation
-        // (starts with whitespace + `.`)
-        let mut pos = line_start;
-        while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-            pos += 1;
-        }
-        if pos < bytes.len() && bytes[pos] == b'.' {
-            // This line starts with `.`, so the expression continues from the previous line
-            line_start = prev_line_start;
-            continue;
-        }
-
-        // Check if previous line ends with `\` (backslash continuation),
-        // `.` or `&.` (trailing dot method chain), `,` (multiline argument list),
-        // `+` or other binary operators (string concatenation, logical operators),
-        // or has unclosed brackets (multiline literal/args).
-        let prev_line_content = &bytes[prev_line_start..prev_line_end];
-        let trimmed_end = prev_line_content
-            .iter()
-            .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r');
-        if let Some(last_non_ws) = trimmed_end {
-            let last_byte = prev_line_content[last_non_ws];
-            if last_byte == b'\\' || last_byte == b',' || last_byte == b'.' || last_byte == b'+' {
-                line_start = prev_line_start;
-                continue;
-            }
-            // Check for trailing logical operators: ||, &&
-            // Single | or & could be block parameter delimiter or block-pass, so only
-            // match double operators.
-            if last_byte == b'|' && last_non_ws > 0 && prev_line_content[last_non_ws - 1] == b'|' {
-                line_start = prev_line_start;
-                continue;
-            }
-            if last_byte == b'&' && last_non_ws > 0 && prev_line_content[last_non_ws - 1] == b'&' {
-                line_start = prev_line_start;
-                continue;
-            }
-            // Check if previous line has unclosed brackets (multiline array/hash/args)
-            if line_has_unclosed_bracket(prev_line_content) {
-                line_start = prev_line_start;
-                continue;
-            }
-        }
-
-        break;
+    let prev_line_end = line_start - 1; // the \n
+    let mut prev_line_start = prev_line_end;
+    while prev_line_start > 0 && bytes[prev_line_start - 1] != b'\n' {
+        prev_line_start -= 1;
     }
 
-    // Return the indent of the expression start line (count both spaces and tabs)
+    let prev_line_content = &bytes[prev_line_start..prev_line_end];
+    let trimmed_end = prev_line_content
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r');
+    let last_non_ws = trimmed_end?;
+    let last_byte = prev_line_content[last_non_ws];
+
+    let is_operator = match last_byte {
+        b'+' => true,
+        b'|' => last_non_ws > 0 && prev_line_content[last_non_ws - 1] == b'|',
+        b'&' => last_non_ws > 0 && prev_line_content[last_non_ws - 1] == b'&',
+        b'<' => last_non_ws > 0 && prev_line_content[last_non_ws - 1] == b'<',
+        _ => false,
+    };
+
+    if !is_operator {
+        return None;
+    }
+
+    // Return the indent of the previous line (the operator's LHS)
     let mut indent = 0;
-    while line_start + indent < bytes.len()
-        && (bytes[line_start + indent] == b' ' || bytes[line_start + indent] == b'\t')
+    while prev_line_start + indent < bytes.len()
+        && (bytes[prev_line_start + indent] == b' ' || bytes[prev_line_start + indent] == b'\t')
     {
         indent += 1;
     }
-    indent
-}
-
-/// Compute bracket balance for a line (positive = more opening, negative = more closing).
-/// Ignores brackets inside strings.
-fn compute_bracket_balance(line: &[u8]) -> i32 {
-    let mut balance: i32 = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    for &b in line {
-        match b {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
-            b'(' | b'[' | b'{' if !in_single && !in_double => balance += 1,
-            b')' | b']' | b'}' if !in_single && !in_double => balance -= 1,
-            _ => {}
-        }
-    }
-    balance
+    Some(indent)
 }
 
 #[cfg(test)]
