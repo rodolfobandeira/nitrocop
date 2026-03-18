@@ -57,10 +57,8 @@ shared_examples_for 'a valid record' do
   end
 end
 
-# shared_context with subject — also ignored
-shared_context 'with setup' do
-  before { subject.prepare }
-end
+# shared_context is NOT ignored by IgnoreSharedExamples — only shared_examples is.
+# subject in shared_context outside of an example/hook is not flagged (not in example scope)
 
 # subject with arguments is NOT a bare subject reference
 RSpec.describe Config do

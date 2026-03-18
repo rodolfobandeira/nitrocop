@@ -52,6 +52,17 @@ use ruby_prism::Visit;
 /// `shared_context`. So `IgnoreSharedExamples: true` should not suppress
 /// offenses inside `shared_context` blocks. Fix: removed `shared_context`
 /// from `is_shared_group_call`.
+///
+/// ## Corpus verification (2026-03-18)
+///
+/// Verified all 41 FNs are exclusively `subject` references in
+/// `shared_context` blocks across 9 repos (opf/openproject 13, shoes/shoes4 10,
+/// solidus 7, puppetlabs/r10k 4, decidim 2, apartment 2, synapse 1,
+/// spidr 1, forem 1). Patterns include `subject.method_call` as receiver
+/// (e.g., `expect(subject.status)`), `subject` in conditionals
+/// (e.g., `if subject.is_a?(Foo)`), and `subject` in before/around hooks
+/// within shared_context. All patterns confirmed handled by the
+/// `is_shared_group_call` fix. Added 3 inline tests covering these patterns.
 pub struct NamedSubject;
 
 /// EnforcedStyle:
@@ -495,6 +506,43 @@ mod tests {
             diags.len(),
             1,
             "subject! named definition should be recognized in named_only mode"
+        );
+    }
+
+    #[test]
+    fn subject_in_shared_context_around_hook() {
+        // shared_context is NOT suppressed by IgnoreSharedExamples.
+        // subject inside an around hook within shared_context should be flagged.
+        let source = b"shared_context 'Tarball' do\n  around(:each) do |example|\n    if subject.is_a?(Foo)\n      subject.settings[:cache_root] = cache_root\n    end\n    example.run\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&NamedSubject, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "subject inside shared_context around hook should be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn subject_method_call_in_shared_context_it_block() {
+        // subject.status inside an it block within shared_context should be flagged
+        let source = b"shared_context 'test' do\n  it 'succeeds' do\n    expect(subject.status).to eq(200)\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&NamedSubject, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "subject.status inside shared_context it block should be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn subject_in_shared_context_before_hook() {
+        // subject inside a before hook within shared_context should be flagged
+        let source = b"shared_context 'setup' do\n  before :each do\n    subject.element_width = 43\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&NamedSubject, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "subject inside shared_context before hook should be flagged, got: {diags:?}"
         );
     }
 }

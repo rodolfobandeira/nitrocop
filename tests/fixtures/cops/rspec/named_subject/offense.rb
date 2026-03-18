@@ -58,3 +58,18 @@ def self.it_should_have_view(key, value)
            ^^^^^^^ RSpec/NamedSubject: Name your test subject if you need to reference it explicitly.
   end
 end
+
+# shared_context is NOT a shared example group for IgnoreSharedExamples purposes.
+# RuboCop's `shared_example?` matcher only matches SharedGroups.examples
+# (shared_examples, shared_examples_for), not SharedGroups.context (shared_context).
+# So subject inside shared_context examples IS flagged even with IgnoreSharedExamples: true.
+RSpec.describe Config do
+  subject { described_class.new }
+
+  shared_context "with setup" do
+    it "succeeds" do
+      expect(subject.status).to eq(200)
+             ^^^^^^^ RSpec/NamedSubject: Name your test subject if you need to reference it explicitly.
+    end
+  end
+end
