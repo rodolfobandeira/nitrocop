@@ -4,20 +4,40 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// RSpec/ExpectInHook: flags `expect`, `is_expected`, `expect_any_instance_of` inside hooks.
+/// RSpec/ExpectInHook: flags expectation calls inside before/after/around hooks.
 ///
-/// **Root cause of 157 FNs (0 FP):** The `find_expects_in_node` recursive search only handled
+/// **Root cause of original 157 FNs (0 FP):** The `find_expects_in_node` recursive search only handled
 /// `StatementsNode` and `CallNode` receiver chains. It did not recurse into `IfNode`, `BlockNode`,
 /// `UnlessNode`, `CaseNode`, `BeginNode`, or any other container nodes. This meant any `expect`
 /// call nested inside control flow or iterator blocks within a hook body was missed.
 ///
-/// **Fix:** Expanded `find_expects_in_node` to recurse into all common container node types
+/// **Fix (round 1):** Expanded `find_expects_in_node` to recurse into all common container node types
 /// (if/unless/case/when/else/begin/ensure/block/for/while/until/lambda/parentheses/case_match/in),
 /// plus CallNode arguments and blocks. This matches RuboCop's `def_node_search` deep traversal.
+///
+/// **Root cause of remaining 13 FNs (0 FP):** Three distinct gaps:
+/// 1. `DefNode` — `expect` inside `def method_name` inside a hook was not traversed (4 FN in discourse, 2 in jruby)
+/// 2. Write nodes — `@var = expr` wrapping CallNodes with blocks containing `expect` (1 antiwork, 1 neo4jrb, 2 diaspora, 1 discourse)
+/// 3. Missing expectation methods — `should_receive`/`should_not_receive` not in EXPECT_METHODS (3 FN in brynary/webrat)
+///
+/// **Fix (round 2):** Added DefNode body traversal, write node (local/instance/class/global/constant/multi)
+/// value traversal, and expanded EXPECT_METHODS to match RuboCop's full `Expectations.all` list:
+/// `expect`, `is_expected`, `expect_any_instance_of`, `are_expected`, `should`, `should_not`,
+/// `should_receive`, `should_not_receive`.
 pub struct ExpectInHook;
 
 /// Expectation methods to flag inside hooks.
-const EXPECT_METHODS: &[&[u8]] = &[b"expect", b"is_expected", b"expect_any_instance_of"];
+/// Matches RuboCop's `Expectations.all` from rspec language config.
+const EXPECT_METHODS: &[&[u8]] = &[
+    b"expect",
+    b"is_expected",
+    b"expect_any_instance_of",
+    b"are_expected",
+    b"should",
+    b"should_not",
+    b"should_receive",
+    b"should_not_receive",
+];
 
 impl Cop for ExpectInHook {
     fn name(&self) -> &'static str {
@@ -236,6 +256,38 @@ fn find_expects_in_node(
         if let Some(body) = lambda.body() {
             find_expects_in_node(&body, source, cop, hook_name, diagnostics);
         }
+        return;
+    }
+    // DefNode — method definitions inside hooks (RuboCop's def_node_search traverses into these)
+    if let Some(def_node) = node.as_def_node() {
+        if let Some(body) = def_node.body() {
+            find_expects_in_node(&body, source, cop, hook_name, diagnostics);
+        }
+        return;
+    }
+    // Write nodes — assignments whose RHS may contain expect calls
+    if let Some(write) = node.as_local_variable_write_node() {
+        find_expects_in_node(&write.value(), source, cop, hook_name, diagnostics);
+        return;
+    }
+    if let Some(write) = node.as_instance_variable_write_node() {
+        find_expects_in_node(&write.value(), source, cop, hook_name, diagnostics);
+        return;
+    }
+    if let Some(write) = node.as_class_variable_write_node() {
+        find_expects_in_node(&write.value(), source, cop, hook_name, diagnostics);
+        return;
+    }
+    if let Some(write) = node.as_global_variable_write_node() {
+        find_expects_in_node(&write.value(), source, cop, hook_name, diagnostics);
+        return;
+    }
+    if let Some(write) = node.as_constant_write_node() {
+        find_expects_in_node(&write.value(), source, cop, hook_name, diagnostics);
+        return;
+    }
+    if let Some(write) = node.as_multi_write_node() {
+        find_expects_in_node(&write.value(), source, cop, hook_name, diagnostics);
     }
 }
 
