@@ -10,3 +10,12 @@ shared_examples_for 'foo' do
     expect(1).to eq(1)
   end
 end
+
+# Module-wrapped describe in a _spec.rb file is fine
+module Specs
+  describe User do
+    it 'works' do
+      expect(true).to eq(true)
+    end
+  end
+end

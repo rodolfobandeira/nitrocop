@@ -9,6 +9,10 @@ use crate::parse::source::SourceFile;
 /// `arguments.empty?` guard that skips matchers without arguments — these are
 /// dynamic predicate matchers (calling `object.exist?`) not redundant wrappers
 /// around built-in matchers. Fixed by adding the same argument-presence check.
+///
+/// FN=21 from old-style `.should`/`.should_not` syntax (e.g.,
+/// `lines[1].should be_include("value")`). Fixed by adding `should` and
+/// `should_not` to the method name check alongside `to`/`not_to`/`to_not`.
 pub struct RedundantPredicateMatcher;
 
 /// Maps redundant `be_X` matchers to their built-in equivalents.
@@ -59,7 +63,12 @@ impl Cop for RedundantPredicateMatcher {
         };
 
         let method_name = call.name().as_slice();
-        if method_name != b"to" && method_name != b"not_to" && method_name != b"to_not" {
+        if method_name != b"to"
+            && method_name != b"not_to"
+            && method_name != b"to_not"
+            && method_name != b"should"
+            && method_name != b"should_not"
+        {
             return;
         }
 
