@@ -227,3 +227,27 @@ y = something || other
 # MODIFY in || (return value checked as boolean — exempt)
 # (yield and super with modify persist calls moved to offense.rb —
 #  RuboCop's argument? doesn't treat yield/super as argument context)
+
+# Block-bearing persist calls in Argument context are exempt.
+# In RuboCop's Parser AST, `create { }` becomes Block(Send, Args, Body).
+# assignable_node unwraps to block_node, then argument? checks block_node.parent.
+# When the block is a direct argument to a method, argument? returns true (exempt).
+@calc << InlineBox.create(width: 10, height: 20) {}
+Glue.new(InlineBox.create(width: width, height: 10) {})
+subscriptions.push(Subscription.create { queues.each {|q| q = [] }})
+@buildings << Building.create { |b| b.build_owner(first_name: 'foo') }
+
+# Hash#update and non-AR update with block as argument (exempt — argument context)
+test_equal({"a"=>100, "b"=>200, "c"=>300}, h.update(h2) { |k, o, n| o })
+expect(atomic.update { |v| v + 1 }).to eq 1001
+
+# Create as keyword arg inside compound boolean — compound_boolean doesn't apply
+# because the create's first ancestor is the method call (send), not the or/and node.
+# RuboCop's in_condition_or_compound_boolean? checks the FIRST non-begin ancestor.
+sash || reload.sash || update(sash: Sash.create)
+x = clean_install || cache_version.version != Version.create(Metadata.cache_version)
+Person.find_by(handle: id) || Person.new(key: key, pod: Pod.find_or_create_by(url: url))
+
+# Assignment inside assert — persisted? checked on next statement
+assert version = parent.versions.create(name: 'test', sharing: 'descendants')
+assert version.persisted?

@@ -373,6 +373,7 @@ impl Cop for SaveBang {
             suppress_create_assignment: false,
             in_local_assignment: false,
             in_compound_boolean: false,
+            in_transparent_container: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -397,6 +398,12 @@ struct SaveBangVisitor<'a, 'src> {
     /// so create inside `||`/`&&` is ALWAYS flagged as conditional regardless of
     /// enclosing context. Only affects CREATE methods, not MODIFY methods.
     in_compound_boolean: bool,
+    /// When true, the current context was inherited through a transparent container
+    /// (hash/array/keyword_hash). In RuboCop's `assignable_node`, a block-bearing call
+    /// inside a hash/array breaks the chain — the block node's parent is the pair/array,
+    /// not the enclosing assignment/argument. So block-bearing calls inside transparent
+    /// containers lose their parent's exemption and are treated as void context.
+    in_transparent_container: bool,
 }
 
 impl SaveBangVisitor<'_, '_> {
@@ -608,6 +615,18 @@ impl SaveBangVisitor<'_, '_> {
                 }
             }
         }
+        // CallNode wrapping an assignment: `assert version = create(...)`.
+        // In RuboCop, VariableForce tracks the assignment regardless of nesting.
+        // Check the first argument of the call for a nested local variable write.
+        if let Some(call) = node.as_call_node() {
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    if let Some(name) = Self::assignment_var_name(&arg) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
         None
     }
 
@@ -628,12 +647,24 @@ impl SaveBangVisitor<'_, '_> {
         false
     }
 
-    /// Check if the RHS of an assignment contains a create-type persist call.
-    fn rhs_has_create_call(&self, node: &ruby_prism::Node<'_>) -> bool {
+    /// Check if a node's subtree contains a create-type persist call.
+    fn subtree_has_create_call(&self, node: &ruby_prism::Node<'_>) -> bool {
         if let Some(call) = node.as_call_node() {
             if self.classify_persist_call(&call) == Some(true) {
                 return true;
             }
+            // Check arguments recursively
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    if self.subtree_has_create_call(&arg) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Check assignment value
+        if let Some(lv) = node.as_local_variable_write_node() {
+            return self.subtree_has_create_call(&lv.value());
         }
         false
     }
@@ -646,19 +677,14 @@ impl SaveBangVisitor<'_, '_> {
         body: &[ruby_prism::Node<'_>],
         idx: usize,
     ) -> bool {
-        // Extract variable name from assignment
+        // Extract variable name from assignment (handles nested assignments like `assert x = create`)
         let var_name = match Self::assignment_var_name(stmt) {
             Some(name) => name,
             None => return false,
         };
 
-        // Check if the RHS contains a create-type call
-        let rhs = self.get_assignment_rhs(stmt);
-        let has_create = match rhs {
-            Some(rhs_node) => self.rhs_has_create_call(&rhs_node),
-            None => false,
-        };
-        if !has_create {
+        // Check if the statement's subtree contains a create-type call
+        if !self.subtree_has_create_call(stmt) {
             return false;
         }
 
@@ -685,32 +711,6 @@ impl SaveBangVisitor<'_, '_> {
         };
         finder.visit(node);
         finder.found
-    }
-
-    /// Get the RHS value node from an assignment statement.
-    fn get_assignment_rhs<'n>(
-        &self,
-        node: &'n ruby_prism::Node<'n>,
-    ) -> Option<ruby_prism::Node<'n>> {
-        if let Some(lv) = node.as_local_variable_write_node() {
-            return Some(lv.value());
-        }
-        if let Some(iv) = node.as_instance_variable_write_node() {
-            return Some(iv.value());
-        }
-        if let Some(gv) = node.as_global_variable_write_node() {
-            return Some(gv.value());
-        }
-        if let Some(cv) = node.as_class_variable_write_node() {
-            return Some(cv.value());
-        }
-        if let Some(lov) = node.as_local_variable_or_write_node() {
-            return Some(lov.value());
-        }
-        if let Some(mw) = node.as_multi_write_node() {
-            return Some(mw.value());
-        }
-        None
     }
 
     fn flag_void_context(&mut self, call: &ruby_prism::CallNode<'_>) {
@@ -765,6 +765,7 @@ impl SaveBangVisitor<'_, '_> {
             // is Assignment — meaning a LocalVariableWriteNode (or similar) pushed it
             // INSIDE the or/and expression. For `@x = get || create`, the or_node
             // pushes Condition (not inheriting Assignment), so we correctly flag it.
+            //
             let current = self.current_context();
             if matches!(current, Some(Context::Assignment)) {
                 // Let the assignment path handle it below
@@ -791,19 +792,17 @@ impl SaveBangVisitor<'_, '_> {
             }
         }
 
-        // Block-wrapped persist calls in Argument context: In RuboCop's Parser gem AST,
-        // `create { block }` becomes Block(Send, Args, Body). When checking `argument?` on
-        // the Send node, it walks: Send→Block(parent)→enclosing, and Block.parent (e.g. array)
-        // is not send_type?, so argument? returns false. RuboCop flags these.
-        // In Prism, the block is part of the CallNode, so the CallNode gets Argument context
-        // from the enclosing expression. We override to VoidStatement for block-bearing calls.
-        let effective_context = match self.current_context() {
-            Some(Context::Argument)
-                if call.block().is_some_and(|b| b.as_block_node().is_some()) =>
-            {
-                Some(Context::VoidStatement)
-            }
-            ctx => ctx,
+        // Block-bearing persist calls inside transparent containers (hash/array):
+        // In RuboCop's `assignable_node`, the block node breaks the walk chain.
+        // `create { }` inside a hash/array means assignable_node returns block_node
+        // (not the hash/array), and block_node.parent is pair/array (not the enclosing
+        // assignment/argument). So none of the exemptions (return_value_assigned?,
+        // argument?, explicit_return?) apply — RuboCop flags with MSG.
+        let has_block_body = call.block().is_some_and(|b| b.as_block_node().is_some());
+        let effective_context = if has_block_body && self.in_transparent_container {
+            Some(Context::VoidStatement)
+        } else {
+            self.current_context()
         };
 
         match effective_context {
@@ -977,9 +976,21 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         }
 
         if let Some(args) = node.arguments() {
+            // Clear in_compound_boolean when visiting arguments of a non-boolean
+            // method call. In RuboCop, compound_boolean? checks the node's FIRST
+            // non-begin ancestor. When create is inside a method call's arguments
+            // within a boolean (e.g., `x || version != create(arg)`), the first
+            // ancestor is the `!=` send, not the or — so compound_boolean doesn't
+            // apply. But when create is a direct operand of the boolean (e.g.,
+            // `log(find || create)`), the first ancestor IS the or node.
+            // Clearing the flag at the method argument boundary ensures only
+            // direct boolean operands see compound_boolean.
+            let saved_compound = self.in_compound_boolean;
+            self.in_compound_boolean = false;
             self.context_stack.push(Context::Argument);
             self.visit_arguments_node(&args);
             self.context_stack.pop();
+            self.in_compound_boolean = saved_compound;
         }
 
         if let Some(block) = node.block() {
@@ -1485,30 +1496,39 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         // RuboCop's VariableForce check_assignment checks `if rhs_node.send_type?` —
         // ArrayNode doesn't match, so create calls inside arrays in local assignments
         // are not flagged by VariableForce.
-        let saved = self.in_local_assignment;
+        let saved_local = self.in_local_assignment;
+        let saved_transparent = self.in_transparent_container;
         self.in_local_assignment = false;
+        self.in_transparent_container = true;
         for element in node.elements().iter() {
             self.visit(&element);
         }
-        self.in_local_assignment = saved;
+        self.in_local_assignment = saved_local;
+        self.in_transparent_container = saved_transparent;
     }
 
     fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
-        let saved = self.in_local_assignment;
+        let saved_local = self.in_local_assignment;
+        let saved_transparent = self.in_transparent_container;
         self.in_local_assignment = false;
+        self.in_transparent_container = true;
         for element in node.elements().iter() {
             self.visit(&element);
         }
-        self.in_local_assignment = saved;
+        self.in_local_assignment = saved_local;
+        self.in_transparent_container = saved_transparent;
     }
 
     fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
-        let saved = self.in_local_assignment;
+        let saved_local = self.in_local_assignment;
+        let saved_transparent = self.in_transparent_container;
         self.in_local_assignment = false;
+        self.in_transparent_container = true;
         for element in node.elements().iter() {
             self.visit(&element);
         }
-        self.in_local_assignment = saved;
+        self.in_local_assignment = saved_local;
+        self.in_transparent_container = saved_transparent;
     }
 
     // ── BeginNode: body statements are in the parent's context ───────────
