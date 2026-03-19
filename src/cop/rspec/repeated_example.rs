@@ -197,6 +197,45 @@ use std::collections::HashMap;
 /// structurally different expressions like `defined?(@@a ||= true)` and `defined?(A ||= true)`
 /// to produce identical fingerprints — both emitted only the right-hand side.
 /// Fix: added custom visitors for all missing write node types to emit the variable name.
+///
+/// **Investigation (2026-03-19):** 8 FPs and 46 FNs remaining.
+///
+/// FP root cause 1: `CallOperatorWriteNode` (`a.b += 1`) had no custom visitor. The default
+/// visitor only visits receiver and value, missing `read_name`, `write_name`, and `operator`
+/// attributes. This caused `app.connections += 1` and `app.connections -= 1` to produce
+/// identical fingerprints. Fix: added `visit_call_operator_write_node` that emits all three
+/// attributes plus `visit_call_and_write_node` / `visit_call_or_write_node`.
+///
+/// FP root cause 2: No structural boundary markers in `StatementsNode`. When a block body
+/// has N children, their fingerprints are simply concatenated. This means `[A B] C` (inner
+/// block with 2 stmts, outer with 1) produces the same bytes as `[A B C]` (inner block
+/// with 3 stmts). Observed in jruby/natalie `open_spec.rb` where `raise Exception` inside
+/// vs outside an inner block produced identical fingerprints.
+/// Fix: emit child count in `visit_statements_node` before visiting children.
+///
+/// FN root cause 1: `IntegerNode` and `FloatNode` used source text as fingerprint value.
+/// Parser gem normalizes literals to their parsed values: `0` == `00`, `-0.0` == `0.0`.
+/// Prism preserves source text (`"-0.0"` vs `"0.0"`), causing different fingerprints for
+/// semantically identical values.
+/// Fix: parse integer/float values from source and emit canonical representations.
+/// For floats, normalize `-0.0` to `0.0` since `-0.0 == 0.0` in Ruby.
+///
+/// FN root cause 2: `KeywordHashNode` vs `HashNode` difference. Prism uses `KeywordHashNode`
+/// for implicit hash args (`foo(a: 1)`) and `HashNode` for explicit (`foo({a: 1})`). Parser
+/// gem normalizes both to `s(:hash, ...)`. The `visit_branch_node_enter` hook emitted
+/// different type tags for these node types.
+/// Fix: normalize `KeywordHashNode` type tag to `HashNode` tag in `normalized_type_tag()`.
+///
+/// FN root cause 3: `UnlessNode` vs `IfNode` normalization. Parser gem normalizes
+/// `unless cond then A else B end` to `if cond then B else A end` — the branches are
+/// swapped. Also normalizes empty else clauses to nil (same as no else).
+/// Fix: rewrote `visit_unless_node` to swap branches and `visit_if_node` to normalize
+/// empty else clauses, matching Parser gem's output.
+///
+/// FN root cause 4: `DefNode` not handled in `iter_child_nodes`. Examples inside method
+/// definitions (like `def self.impersonates_a(klass); it { ... }; end`) were not found
+/// because the recursive example collection didn't recurse into method bodies.
+/// Fix: added `DefNode` case to `iter_child_nodes`.
 pub struct RepeatedExample;
 
 impl Cop for RepeatedExample {
@@ -496,6 +535,16 @@ fn iter_child_nodes<'a>(node: &ruby_prism::Node<'a>) -> Vec<ruby_prism::Node<'a>
         }
         return children;
     }
+    // For DefNode: examples inside method definitions should be found.
+    // RuboCop's `find_all_in_scope` recurses into method defs since they're
+    // not scope changes (only example groups, shared groups, includes are).
+    if let Some(def_node) = node.as_def_node() {
+        let mut children = Vec::new();
+        if let Some(body) = def_node.body() {
+            children.push(body);
+        }
+        return children;
+    }
     // Default: no children to recurse into
     Vec::new()
 }
@@ -621,6 +670,54 @@ impl AstFingerprinter {
         self.buf.extend_from_slice(&len.to_le_bytes());
         self.buf.extend_from_slice(bytes);
     }
+
+    /// Normalize Prism node type tags to match Parser gem equivalences.
+    /// - KeywordHashNode → HashNode (Parser normalizes keyword args `foo(a: 1)` and
+    ///   explicit hash `foo({a: 1})` both to `s(:hash, ...)`)
+    /// - UnlessNode → IfNode (Parser normalizes `unless` to `if` with swapped branches)
+    fn normalized_type_tag(&self, node: &ruby_prism::Node<'_>) -> u8 {
+        // KeywordHashNode (89) → HashNode (64)
+        if node.as_keyword_hash_node().is_some() {
+            return 64; // HashNode tag
+        }
+        // UnlessNode → IfNode tag (Parser normalizes unless to if with swapped branches)
+        if node.as_unless_node().is_some() {
+            return 66; // IfNode tag
+        }
+        crate::cop::node_type::node_type_tag(node)
+    }
+
+    /// Emit an else-branch from an IfNode's subsequent node.
+    /// Parser gem normalizes `if c; else; end` (empty else) to `s(:if, c, nil, nil)`,
+    /// same as `if c; end` (no else). So empty else = no else.
+    /// IfNode.subsequent() returns Option<Node> which may be an ElseNode or another IfNode (elsif).
+    fn emit_else_branch(&mut self, subsequent: Option<ruby_prism::Node<'_>>) {
+        if let Some(node) = subsequent {
+            if let Some(else_node) = node.as_else_node() {
+                self.emit_else_node_stmts(&else_node);
+            } else {
+                // Subsequent IfNode (elsif chain) — visit it
+                self.buf.push(1);
+                self.visit(&node);
+            }
+        } else {
+            self.buf.push(0); // no else clause
+        }
+    }
+
+    /// Emit statements from an ElseNode, treating empty/missing as absent.
+    fn emit_else_node_stmts(&mut self, else_node: &ruby_prism::ElseNode<'_>) {
+        if let Some(stmts) = else_node.statements() {
+            if stmts.body().is_empty() {
+                self.buf.push(0); // empty statements = absent
+            } else {
+                self.buf.push(1); // present
+                self.visit(&stmts.as_node());
+            }
+        } else {
+            self.buf.push(0); // no statements = absent
+        }
+    }
 }
 
 impl<'pr> Visit<'pr> for AstFingerprinter {
@@ -629,12 +726,16 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     // vs SourceLineNode, NilNode vs FalseNode) always produce different
     // fingerprints, even when reached via a parent's default visitor which
     // calls `self.visit(&child)` without going through `fingerprint_node`.
+    //
+    // We normalize certain Prism node types to match Parser gem equivalences:
+    // - KeywordHashNode → HashNode tag (Parser normalizes both to :hash)
+    // - UnlessNode → IfNode tag (Parser normalizes unless to if with swapped branches)
     fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
-        self.buf.push(crate::cop::node_type::node_type_tag(&node));
+        self.buf.push(self.normalized_type_tag(&node));
     }
 
     fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
-        self.buf.push(crate::cop::node_type::node_type_tag(&node));
+        self.buf.push(self.normalized_type_tag(&node));
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -681,13 +782,42 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     }
 
     fn visit_integer_node(&mut self, node: &ruby_prism::IntegerNode<'pr>) {
-        // Use the source representation for integer values
-        self.emit_bytes(node.location().as_slice());
+        // Use the parsed integer value, not the source text. Parser gem normalizes
+        // different representations to the same value: `0` and `00` both become
+        // `s(:int, 0)`. Prism's IntegerNode doesn't expose a direct value() method
+        // for arbitrary precision, but we can parse from the source and emit a
+        // canonical representation.
+        let src = node.location().as_slice();
+        // Parse the integer from source text to normalize representations like
+        // 0, 00, 0x0, 0b0 all to the same canonical value.
+        // For simplicity, use the source text stripped of underscores and parsed.
+        let s = String::from_utf8_lossy(src);
+        let s = s.replace('_', "");
+        if let Ok(val) = parse_ruby_int(&s) {
+            self.buf.extend_from_slice(&val.to_le_bytes());
+        } else {
+            // Fallback to source text if parsing fails
+            self.emit_bytes(src);
+        }
         ruby_prism::visit_integer_node(self, node);
     }
 
     fn visit_float_node(&mut self, node: &ruby_prism::FloatNode<'pr>) {
-        self.emit_bytes(node.location().as_slice());
+        // Use the parsed float value, not the source text. Parser gem normalizes
+        // `-0.0` and `0.0` to the same value since `-0.0 == 0.0` is true in Ruby.
+        // Also normalizes different notations like `1.0e2` and `100.0`.
+        let src = node.location().as_slice();
+        let s = String::from_utf8_lossy(src);
+        let s = s.replace('_', "");
+        if let Ok(val) = s.parse::<f64>() {
+            // Normalize: use the bit pattern, but treat -0.0 as 0.0
+            // since Ruby's -0.0 == 0.0 returns true, and Parser gem
+            // considers s(:float, -0.0) == s(:float, 0.0)
+            let normalized = if val == 0.0 { 0.0_f64 } else { val };
+            self.buf.extend_from_slice(&normalized.to_le_bytes());
+        } else {
+            self.emit_bytes(src);
+        }
         ruby_prism::visit_float_node(self, node);
     }
 
@@ -899,6 +1029,12 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     // the following custom visitors no longer need manual type tag emission.
     // They can simply delegate to the default visitors.
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        // Emit child count to disambiguate different nesting structures.
+        // Without this, `[A B] C` (2 children in inner scope, 1 in outer)
+        // produces the same bytes as `[A B C]` (3 children in inner scope).
+        // This is because there's no "end of block" marker in the fingerprint.
+        let count = node.body().len() as u32;
+        self.buf.extend_from_slice(&count.to_le_bytes());
         ruby_prism::visit_statements_node(self, node);
     }
 
@@ -1162,6 +1298,31 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
         self.emit_bytes(node.name().as_slice());
     }
 
+    // === Call operator write node ===
+    // `a.b += 1` is CallOperatorWriteNode in Prism with operator `:+`.
+    // `a.b -= 1` has operator `:-`. The default visitor only visits receiver and value,
+    // missing the read_name, write_name, and operator attributes.
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
+        self.emit_bytes(node.read_name().as_slice());
+        self.emit_bytes(node.write_name().as_slice());
+        self.emit_bytes(node.binary_operator().as_slice());
+        ruby_prism::visit_call_operator_write_node(self, node);
+    }
+
+    // === Call and/or write nodes ===
+    // `a.b &&= 1` and `a.b ||= 1` are CallAndWriteNode / CallOrWriteNode.
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
+        self.emit_bytes(node.read_name().as_slice());
+        self.emit_bytes(node.write_name().as_slice());
+        ruby_prism::visit_call_and_write_node(self, node);
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
+        self.emit_bytes(node.read_name().as_slice());
+        self.emit_bytes(node.write_name().as_slice());
+        ruby_prism::visit_call_or_write_node(self, node);
+    }
+
     // === Logical binary operator nodes ===
     //
     // `&&`/`and` → AndNode (tag differs from OrNode), `||`/`or` → OrNode.
@@ -1192,13 +1353,42 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     // When visited as children without going through `fingerprint_node`, their
     // type tags are not emitted and the two forms become indistinguishable.
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        self.buf.push(1); // disambiguate IfNode from UnlessNode
-        ruby_prism::visit_if_node(self, node);
+        // Emit in normalized form: predicate, then-branch, else-branch.
+        // This must match the UnlessNode visitor's output for equivalent constructs.
+        // Parser gem: `if c then A else B end` → `s(:if, c, A, B)`
+        // Parser gem: `if c; end` → `s(:if, c, nil, nil)` — empty else is nil
+        self.visit(&node.predicate());
+        // Then-branch (may be None for `if c; end`)
+        if let Some(stmts) = node.statements() {
+            self.buf.push(1); // marker: then-branch present
+            self.visit(&stmts.as_node());
+        } else {
+            self.buf.push(0); // marker: then-branch absent (nil in Parser)
+        }
+        // Else-branch: Parser normalizes empty else to nil
+        self.emit_else_branch(node.subsequent());
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        self.buf.push(2); // disambiguate UnlessNode from IfNode
-        ruby_prism::visit_unless_node(self, node);
+        // Parser gem normalizes `unless cond then A else B end` to
+        // `if cond then B else A end` — swapping the branches. We must match
+        // this behavior so `unless x then '' else 'x' end` and
+        // `if x then 'x' else '' end` produce the same fingerprint.
+        // Note: visit_branch_node_enter already emits the (normalized) IfNode tag.
+        self.visit(&node.predicate());
+        // Then-branch = unless's else clause (swapped)
+        if let Some(else_node) = node.else_clause() {
+            self.emit_else_node_stmts(&else_node);
+        } else {
+            self.buf.push(0);
+        }
+        // Else-branch = unless's then clause (swapped)
+        if let Some(stmts) = node.statements() {
+            self.buf.push(1); // marker: else-branch present
+            self.visit(&stmts.as_node());
+        } else {
+            self.buf.push(0); // marker: else-branch absent
+        }
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
@@ -1209,6 +1399,27 @@ impl<'pr> Visit<'pr> for AstFingerprinter {
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         self.buf.push(2); // disambiguate UntilNode from WhileNode
         ruby_prism::visit_until_node(self, node);
+    }
+}
+
+/// Parse a Ruby integer literal from its source text, handling different bases.
+fn parse_ruby_int(s: &str) -> Result<i64, std::num::ParseIntError> {
+    let s = s.trim();
+    if s.starts_with("0x") || s.starts_with("0X") {
+        i64::from_str_radix(&s[2..], 16)
+    } else if s.starts_with("0b") || s.starts_with("0B") {
+        i64::from_str_radix(&s[2..], 2)
+    } else if s.starts_with("0o") || s.starts_with("0O") {
+        i64::from_str_radix(&s[2..], 8)
+    } else if s.starts_with("0d") || s.starts_with("0D") {
+        s[2..].parse::<i64>()
+    } else if s.starts_with('0') && s.len() > 1 && s.as_bytes()[1].is_ascii_digit() {
+        // Octal without prefix: 00, 010, etc.
+        i64::from_str_radix(&s[1..], 8)
+    } else if let Some(rest) = s.strip_prefix('-') {
+        parse_ruby_int(rest).map(|v| -v)
+    } else {
+        s.parse::<i64>()
     }
 }
 
@@ -1235,4 +1446,149 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(RepeatedExample, "cops/rspec/repeated_example");
+
+    #[test]
+    fn unless_if_ternary_normalization() {
+        // Parser gem normalizes unless to if with swapped branches,
+        // and ternary is also just an IfNode. All three should match.
+        let source = br#"
+describe "conditionals" do
+  it "if" do
+    defined?(if x then 'x' else '' end).should == "expression"
+  end
+
+  it "unless" do
+    defined?(unless x then '' else 'x' end).should == "expression"
+  end
+
+  it "ternary" do
+    defined?(x ? 'x' : '').should == "expression"
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            3,
+            "if/unless/ternary with same semantics should be 3 duplicates: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn empty_else_normalization() {
+        // Parser gem normalizes `if c; end` and `if c; else; end` both to
+        // s(:if, c, nil, nil) — the empty else clause is removed.
+        let source = br#"
+describe "empty else" do
+  it "no else" do
+    if true
+    end.should == nil
+  end
+
+  it "empty else" do
+    if true
+    else
+    end.should == nil
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "if-no-else and if-empty-else should be duplicates: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn call_operator_write_different_operators() {
+        // `a.b += 1` and `a.b -= 1` should NOT be duplicates
+        let source = br#"
+describe "operator write" do
+  it "increments" do
+    obj.value += 1
+    obj.save!
+  end
+
+  it "decrements" do
+    obj.value -= 1
+    obj.save!
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "+= vs -= should not be flagged as duplicates: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn keyword_hash_vs_explicit_hash() {
+        // `foo(a: 1)` and `foo({a: 1})` should be duplicates
+        // (Parser normalizes both to s(:hash, ...))
+        let source = br#"
+describe "hash normalization" do
+  it "implicit" do
+    test_request :errors => { :message => 'x' }
+    expect { run }.to raise_error(Error)
+  end
+
+  it "explicit" do
+    test_request({ :errors => { :message => 'x' } })
+    expect { run }.to raise_error(Error)
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "implicit keyword hash and explicit hash should be duplicates: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn nesting_structure_not_confused() {
+        // Different nesting: `raise` inside vs outside inner block
+        let source = br#"
+describe "nesting" do
+  it "outside" do
+    -> do
+      method do |x|
+        inner_call do
+          super()
+          record(:called)
+        end
+        raise RuntimeError
+      end
+    end.should raise_error(RuntimeError)
+  end
+
+  it "inside" do
+    -> do
+      method do |x|
+        inner_call do
+          super()
+          record(:called)
+          raise RuntimeError
+        end
+      end
+    end.should raise_error(RuntimeError)
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            0,
+            "different nesting structures should not be flagged as duplicates: {:?}",
+            diags
+        );
+    }
 }

@@ -344,3 +344,47 @@ describe 'self vs nil' do
   it { expect(self).to be_truthy }
   it { expect(nil).to be_falsey }
 end
+
+# Attribute operator write: += vs -= are NOT duplicates
+# CallOperatorWriteNode has different operators (+= vs -=)
+describe 'attribute operator assignments' do
+  it "increments" do
+    app.connections += 1
+    app.save!
+    wait_for(app.connections)
+  end
+
+  it "decrements" do
+    app.connections -= 1
+    app.save!
+    wait_for(app.connections)
+  end
+end
+
+# Different nesting structures: raise inside vs outside inner block
+# These produce different ASTs despite having similar source text
+describe 'nesting structure differences' do
+  it "raise outside inner block" do
+    -> do
+      IO.open(@fd, "w") do |io|
+        mock(io, :close) do
+          super()
+          record(:called)
+        end
+        raise RuntimeError
+      end
+    end.should raise_error(RuntimeError)
+  end
+
+  it "raise inside inner block" do
+    -> do
+      IO.open(@fd, "w") do |io|
+        mock(io, :close) do
+          super()
+          record(:called)
+          raise RuntimeError
+        end
+      end
+    end.should raise_error(RuntimeError)
+  end
+end

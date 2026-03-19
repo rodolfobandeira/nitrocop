@@ -95,3 +95,42 @@ describe 'symbol first args' do
     expect(foo).to be(bar)
   end
 end
+
+# Integer literal 0 and 00 are the same value (both parse as int 0)
+# Parser gem normalizes both to s(:int, 0)
+describe 'integer value normalization' do
+  it { should cmp 0 }
+  ^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 84.
+  it { should cmp 00 }
+  ^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 83.
+end
+
+# Float -0.0 and 0.0 are equal in Ruby (-0.0 == 0.0 is true)
+# Parser gem stores both as s(:float, 0.0) since -0.0 == 0.0
+describe 'float sign normalization' do
+  it "uses 0.0" do
+  ^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 94.
+    model.value = 0.0
+    model.value?.should == false
+  end
+  it "uses -0.0" do
+  ^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 90.
+    model.value = -0.0
+    model.value?.should == false
+  end
+end
+
+# Implicit keyword hash args vs explicit hash args: RuboCop normalizes both
+# Parser gem: `foo(a: 1)` and `foo({a: 1})` both produce s(:send, nil, :foo, s(:hash, ...))
+describe 'keyword hash vs explicit hash' do
+  it "implicit keyword hash" do
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 107.
+    expect(strategy).to receive(:new).with({ param: "one" })
+    cleaner.strategy = [:truncation, param: "one"]
+  end
+  it "explicit hash" do
+  ^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 103.
+    expect(strategy).to receive(:new).with({ param: "one" })
+    cleaner.strategy = :truncation, { param: "one" }
+  end
+end

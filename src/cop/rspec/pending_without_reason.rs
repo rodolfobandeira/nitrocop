@@ -1,7 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::node_type::CALL_NODE;
-use crate::cop::util::{self, is_rspec_example, is_rspec_example_group, RSPEC_DEFAULT_INCLUDE};
+use crate::cop::util::{self, RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -123,20 +123,19 @@ impl<'a, 'pr> PendingWithoutReasonVisitor<'a, 'pr> {
     ///   ancestors = [ProgramNode, StatementsNode, <current CallNode>]
     ///   AND the StatementsNode has exactly one child.
     fn is_sole_top_level(&self) -> bool {
-        // ancestors[-1] is the current CallNode.
-        // ancestors[-2] should be StatementsNode (or possibly a block wrapper).
-        // ancestors[-3] should be ProgramNode.
-        if self.ancestors.len() < 3 {
+        // In Prism's Visit traversal, the ancestor stack for a top-level
+        // CallNode is [ProgramNode, CallNode]. StatementsNode is NOT pushed
+        // as a separate branch node — it's visited internally by ProgramNode.
+        // We check: the immediate parent is ProgramNode and its statements
+        // body has exactly one child.
+        if self.ancestors.len() < 2 {
             return false;
         }
         let idx = self.ancestors.len();
-        let Some(stmts) = self.ancestors[idx - 2].as_statements_node() else {
+        let Some(program) = self.ancestors[idx - 2].as_program_node() else {
             return false;
         };
-        if self.ancestors[idx - 3].as_program_node().is_none() {
-            return false;
-        }
-        stmts.body().len() == 1
+        program.statements().body().len() == 1
     }
 
     fn parent_context(&self) -> ParentContext {
