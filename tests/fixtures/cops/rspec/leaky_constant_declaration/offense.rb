@@ -126,3 +126,31 @@ end
 describe MyConst = SomeModule::SomeClass do
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
 end
+
+# MultiWriteNode with ConstantTargetNode targets (parallel assignment)
+describe SomeClass do
+  CONST_A, CONST_B = 1, 2
+  ^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+           ^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+end
+
+# MultiWriteNode with single RHS
+describe SomeClass do
+  SINGLE_A, SINGLE_B = 1
+  ^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+            ^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+end
+
+# MultiWriteNode with splatted constant target in rest position
+describe SomeClass do
+  first, *SPLATTED = [1, 2, 3]
+          ^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+end
+
+# ForNode with constant iterator variable
+describe SomeClass do
+  for ITER_CONST in [1, 2, 3]
+      ^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+    puts ITER_CONST
+  end
+end

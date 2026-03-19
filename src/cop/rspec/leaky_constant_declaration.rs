@@ -40,6 +40,16 @@ use ruby_prism::Visit;
 /// calls (e.g., `describe MyConst = SomeModule::SomeClass do`) were not visited because
 /// only the block body was traversed at incremented depth, not the call arguments.
 /// Fix: also visit the call's arguments after incrementing `example_group_depth`.
+///
+/// **Root cause of FN=12 (round 5):** Two missing node types:
+/// 1. `MultiWriteNode` with `ConstantTargetNode` targets (6 FNs): Patterns like
+///    `CONST_A, CONST_B = 1, 2` create MultiWriteNode with ConstantTargetNode in `lefts()`.
+///    Also handles splatted constant targets in the `rest()` position.
+/// 2. `ForNode` with constant iterator (2 FNs): `for CONST in collection` uses a
+///    ConstantTargetNode as the loop index variable.
+/// 3. Remaining 4 FNs from ffi repos (`ToNativeMap= {...}` inside `Class.new do ... end`)
+///    appear to be Ruby parsing edge cases — the no-space-before-`=` syntax may be parsed
+///    as a method call rather than constant assignment by Prism.
 pub struct LeakyConstantDeclaration;
 
 impl Cop for LeakyConstantDeclaration {
@@ -175,6 +185,71 @@ impl Visit<'_> for LeakyVisitor<'_> {
                 "Stub constant instead of declaring explicitly.".to_string(),
             ));
         }
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'_>) {
+        if self.example_group_depth > 0 {
+            // Check lefts for ConstantTargetNode targets
+            for target in node.lefts().iter() {
+                if let Some(ct) = target.as_constant_target_node() {
+                    let loc = ct.location();
+                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                    self.diagnostics.push(self.cop.diagnostic(
+                        self.source,
+                        line,
+                        column,
+                        "Stub constant instead of declaring explicitly.".to_string(),
+                    ));
+                }
+            }
+            // Check rights (not needed — rights are values, not targets)
+            // Check rest for splatted constant target
+            if let Some(rest) = node.rest() {
+                if let Some(ct) = rest.as_constant_target_node() {
+                    let loc = ct.location();
+                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                    self.diagnostics.push(self.cop.diagnostic(
+                        self.source,
+                        line,
+                        column,
+                        "Stub constant instead of declaring explicitly.".to_string(),
+                    ));
+                } else if let Some(splat) = rest.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        if let Some(ct) = expr.as_constant_target_node() {
+                            let loc = ct.location();
+                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                            self.diagnostics.push(self.cop.diagnostic(
+                                self.source,
+                                line,
+                                column,
+                                "Stub constant instead of declaring explicitly.".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // Recurse into values in case they contain nested example groups
+        ruby_prism::visit_multi_write_node(self, node);
+    }
+
+    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'_>) {
+        if self.example_group_depth > 0 {
+            let index = node.index();
+            if let Some(ct) = index.as_constant_target_node() {
+                let loc = ct.location();
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                self.diagnostics.push(self.cop.diagnostic(
+                    self.source,
+                    line,
+                    column,
+                    "Stub constant instead of declaring explicitly.".to_string(),
+                ));
+            }
+        }
+        // Recurse into body in case it contains nested example groups
+        ruby_prism::visit_for_node(self, node);
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'_>) {
