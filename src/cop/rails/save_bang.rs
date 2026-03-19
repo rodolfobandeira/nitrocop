@@ -213,6 +213,59 @@ use ruby_prism::Visit;
 /// **FN root cause 4: Splat breaks argument context (1 FN).**
 /// `execute *builder.create` — `assignable_node` stops at splat, `argument?` returns false.
 /// **Fix:** Added `visit_splat_node` pushing VoidStatement for the expression.
+///
+/// ## Corpus investigation (2026-03-19, batch 5)
+///
+/// Location-level verification: FP=18→6, FN=37→1 (48 of 55 known mismatches fixed).
+///
+/// **FN root cause 5: Or/And node inherited Assignment context (3 FN).**
+/// `@dir = get || create(...)` — RuboCop's `return_value_assigned?` uses `assignable_node`
+/// which only walks through hash/array parents, NOT through or/and nodes. So create inside
+/// `||` inside an assignment is NOT considered assigned — compound_boolean takes priority.
+/// **Fix:** `visit_or_node` no longer inherits Assignment context from parent. When the or
+/// is inside an assignment, children get Condition context (compound_boolean path).
+///
+/// **FN root cause 6: ImplicitReturn leaked through if/else branches (1 FN).**
+/// `def m; if cond; self.x = find || create; end; end` — the if node is the single
+/// statement in the method body (ImplicitReturn), but RuboCop's `implicit_return?` does NOT
+/// walk through if/case/begin nodes — it only walks through or_type? parents.
+/// **Fix:** `visit_if_node` and `visit_unless_node` push VoidStatement for body/else clauses
+/// to prevent ImplicitReturn from the outer scope leaking into branches.
+///
+/// **FN root cause 7: Or node ImplicitReturn applied to both children (1 FN).**
+/// `items.map { |v| Gem::Version.create(v) or raise }` — create is the LEFT child of `or`
+/// in a single-statement block body. RuboCop's `implicit_return?` uses `sibling_index` +
+/// `find_method_with_sibling_index` where walking through an or_type? increments the index.
+/// The formula `method.children.size == node.sibling_index + sibling_index` only holds for
+/// the RIGHT child (index 1), not the LEFT child (index 0) of the or expression.
+/// **Fix:** `visit_or_node` only grants ImplicitReturn to the right child; left child gets
+/// Condition context.
+///
+/// **FN root cause 8: csend `&.persisted?` incorrectly suppressed create (1 FN).**
+/// `s = DomainSetup.create(...); s if s&.persisted?` — RuboCop's `call_to_persisted?`
+/// checks `node.send_type?` which excludes csend (safe navigation). So `s&.persisted?`
+/// does NOT count as a persisted? check. Our PersistedFinder and checked_immediately path
+/// were matching both send and csend.
+/// **Fix:** Added csend detection (call_operator length == 2) to exclude `&.persisted?`.
+///
+/// **FP root cause: create in `&&` with direct assignment (discourse topic.rb).**
+/// `if (new_post = creator.create) && new_post.present?` — create is directly assigned
+/// inside a `&&` expression. RuboCop's `return_value_assigned?` sees the assignment parent
+/// and returns true (priority over compound_boolean). Our compound_boolean check was
+/// overriding the Assignment context.
+/// **Fix:** When `in_compound_boolean` is true but current context is Assignment (meaning
+/// the create was directly assigned inside the boolean), let the assignment path handle it.
+///
+/// **Remaining (6 FP, 1 FN):**
+/// - 6 FP: Require VariableForce-level tracking (non-adjacent persisted? checks in
+///   complex control flow, multi-write assignments). Examples: discourse topic.rb:1112
+///   (`(x=create)&&x.present?` with `x.persisted?` in if-body), discourse
+///   export_csv_file.rb:85 (create in local var, value used non-adjacent), redmine
+///   project.rb (save in if-body), taps operation.rb (create-with-block in multi-write).
+///   Some may also be oracle artifacts (config differences or stale data).
+/// - 1 FN: neo4j association_proxy_spec.rb:225 (`Lesson.create` inside `[x, create]`
+///   inside `+=` operator — may be an oracle artifact since `+=` RHS array isn't tracked
+///   by VariableForce's `right_assignment_node`).
 pub struct SaveBang;
 
 /// Modify-type persistence methods whose return value indicates success/failure.
@@ -704,18 +757,37 @@ impl SaveBangVisitor<'_, '_> {
         // of a create call inside `||` is the OrNode, not the enclosing call/assignment.
         // So argument? and assigned? return false. Only implicit_return? and explicit_return?
         // walk through or_type? parents, so only those exempt create in compound boolean.
+        //
         if is_create && self.in_compound_boolean {
-            // Check if ImplicitReturn or ExplicitReturn exist ANYWHERE in the stack,
-            // not just at the top. The or_node visitor pushes Condition on top, so
-            // current_context() is Condition, but we need to see through to the
-            // enclosing ImplicitReturn/ExplicitReturn context.
-            let has_return_exempt = self
-                .context_stack
-                .iter()
-                .any(|c| matches!(c, Context::ImplicitReturn | Context::ExplicitReturn));
-            if !has_return_exempt {
-                self.flag_create_conditional(call);
-                return;
+            // RuboCop checks return_value_assigned? BEFORE compound_boolean?.
+            // When create is directly assigned (e.g., `(x = create) && x.present?`),
+            // the assignment takes priority. We detect this when the immediate context
+            // is Assignment — meaning a LocalVariableWriteNode (or similar) pushed it
+            // INSIDE the or/and expression. For `@x = get || create`, the or_node
+            // pushes Condition (not inheriting Assignment), so we correctly flag it.
+            let current = self.current_context();
+            if matches!(current, Some(Context::Assignment)) {
+                // Let the assignment path handle it below
+            } else {
+                // Check if ImplicitReturn or ExplicitReturn exist in the relevant
+                // portion of the stack. RuboCop's implicit_return? walks UP through
+                // or_type? parents to find the def/block, but does NOT walk through
+                // begin/if/case nodes. The or_node only inherits ImplicitReturn when
+                // it's a direct child of a method/block body (not nested in if/else).
+                // We detect this by looking above VoidStatement barriers — a VoidStatement
+                // pushed by visit_if_node/visit_unless_node blocks ImplicitReturn inheritance.
+                // Only check contexts from the most recent or_node inheritance point upward,
+                // stopping at VoidStatement boundaries.
+                let has_return_exempt = self
+                    .context_stack
+                    .iter()
+                    .rev()
+                    .take_while(|c| !matches!(c, Context::VoidStatement))
+                    .any(|c| matches!(c, Context::ImplicitReturn | Context::ExplicitReturn));
+                if !has_return_exempt {
+                    self.flag_create_conditional(call);
+                    return;
+                }
             }
         }
 
@@ -814,6 +886,8 @@ impl SaveBangVisitor<'_, '_> {
 /// A simple visitor that searches a subtree for `var.persisted?` calls.
 /// Used by `subtree_checks_persisted` to match RuboCop's VariableForce behavior
 /// of finding persisted? references anywhere in a scope, not just the next statement.
+/// NOTE: Only matches `.persisted?` (send), NOT `&.persisted?` (csend).
+/// RuboCop's call_to_persisted? checks `node.send_type?` which excludes csend.
 struct PersistedFinder<'v> {
     var_name: &'v [u8],
     found: bool,
@@ -824,7 +898,14 @@ impl<'pr> Visit<'pr> for PersistedFinder<'_> {
         if self.found {
             return;
         }
-        if node.name().as_slice() == b"persisted?" {
+        // Only match `.persisted?` (regular send), not `&.persisted?` (csend).
+        // RuboCop's call_to_persisted? checks node.send_type? which excludes csend.
+        // In Prism, csend (safe navigation) has call_operator "&." with length 2,
+        // while regular send has "." with length 1 (or None for implicit receiver).
+        let is_csend = node
+            .call_operator_loc()
+            .is_some_and(|loc| loc.end_offset() - loc.start_offset() == 2);
+        if !is_csend && node.name().as_slice() == b"persisted?" {
             if let Some(recv) = node.receiver() {
                 if SaveBangVisitor::node_is_var(&recv, self.var_name) {
                     self.found = true;
@@ -854,7 +935,12 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         // - `!` / `not` operator counts as condition/compound boolean (single_negative?)
         if let Some(recv) = node.receiver() {
             let method_name = node.name().as_slice();
-            let is_persisted_check = method_name == b"persisted?";
+            // checked_immediately?: only `.persisted?` (send), not `&.persisted?` (csend).
+            // RuboCop's call_to_persisted? checks node.send_type? which excludes csend.
+            let is_csend_call = node
+                .call_operator_loc()
+                .is_some_and(|loc| loc.end_offset() - loc.start_offset() == 2);
+            let is_persisted_check = method_name == b"persisted?" && !is_csend_call;
             let is_negation = method_name == b"!" && node.arguments().is_none();
             let is_setter = is_setter_method(method_name);
 
@@ -986,14 +1072,20 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         self.visit(&predicate);
         self.context_stack.pop();
 
-        // The then-body and else-body inherit the parent context
-        // (they are statement sequences where persist calls may appear)
+        // The then-body and else-body do NOT inherit ImplicitReturn from
+        // outer scopes. RuboCop's implicit_return? only recognizes statements
+        // that are direct children of def/block bodies — not statements nested
+        // inside if/else branches. Push VoidStatement to prevent leakage.
         if let Some(stmts) = node.statements() {
+            self.context_stack.push(Context::VoidStatement);
             self.visit_statements_node(&stmts);
+            self.context_stack.pop();
         }
 
         if let Some(subsequent) = node.subsequent() {
+            self.context_stack.push(Context::VoidStatement);
             self.visit(&subsequent);
+            self.context_stack.pop();
         }
     }
 
@@ -1336,27 +1428,42 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
     }
 
     fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
-        // RuboCop's implicit_return? walks up through or_type? nodes.
-        // So if an OrNode is in implicit return position, both children
-        // inherit ImplicitReturn context (not Condition), matching RuboCop
-        // behavior where `find(**opts) || create(**opts)` at end of method
-        // is exempt.
-        // Same for ExplicitReturn, Assignment, Argument contexts
-        // where the return value of the || expression is being used.
+        // RuboCop's implicit_return? uses find_method_with_sibling_index which
+        // increments sibling_index when walking through or_type? parents. The
+        // formula `method.children.size == node.sibling_index + sibling_index`
+        // means only the RIGHT child (index 1) of an or expression qualifies as
+        // implicit return. The LEFT child (index 0) does NOT — so create on the
+        // left side of || in implicit return is still flagged as compound_boolean.
+        //
+        // For ExplicitReturn: `find_method_with_sibling_index` also walks through
+        // or, and explicit_return? checks the parent similarly. Both children
+        // are exempt from explicit return (the return applies to the whole or expr).
+        //
+        // For Argument: both children inherit — the or result is used as an argument.
+        //
+        // Assignment does NOT inherit through || — RuboCop's return_value_assigned?
+        // uses assignable_node which only walks through hash/array parents, NOT
+        // through or/and nodes.
         let saved = self.in_compound_boolean;
         self.in_compound_boolean = true;
         let ctx = self.current_context();
         match ctx {
-            Some(Context::ImplicitReturn)
-            | Some(Context::ExplicitReturn)
-            | Some(Context::Assignment)
-            | Some(Context::Argument) => {
-                // Inherit parent context — the || result is being used
+            Some(Context::ImplicitReturn) => {
+                // Only the RIGHT child inherits ImplicitReturn.
+                // Left child gets Condition (compound_boolean context).
+                self.context_stack.push(Context::Condition);
+                self.visit(&node.left());
+                self.context_stack.pop();
+                self.visit(&node.right());
+            }
+            Some(Context::ExplicitReturn) | Some(Context::Argument) => {
+                // Both children inherit — the || result is being used
                 self.visit(&node.left());
                 self.visit(&node.right());
             }
             _ => {
-                // VoidStatement or None: the || is in condition/boolean context
+                // VoidStatement, Assignment, Condition, or None:
+                // Children are in condition/boolean context.
                 self.context_stack.push(Context::Condition);
                 self.visit(&node.left());
                 self.visit(&node.right());
@@ -1527,12 +1634,23 @@ impl<'pr> Visit<'pr> for SaveBangVisitor<'_, '_> {
         self.visit(&node.rescue_expression());
     }
 
-    // ── SplatNode: breaks argument context chain ─────────────────────────
+    // ── SplatNode / AssocSplatNode: breaks argument context chain ──────
 
     fn visit_splat_node(&mut self, node: &ruby_prism::SplatNode<'pr>) {
-        // Splat breaks the argument context chain in RuboCop.
+        // Splat (*expr) breaks the argument context chain in RuboCop.
         // assignable_node stops at the splat, and splat.argument? returns false.
         if let Some(expr) = node.expression() {
+            self.context_stack.push(Context::VoidStatement);
+            self.visit(&expr);
+            self.context_stack.pop();
+        }
+    }
+
+    fn visit_assoc_splat_node(&mut self, node: &ruby_prism::AssocSplatNode<'pr>) {
+        // Keyword splat (**expr) breaks the argument context chain in RuboCop,
+        // same as regular splat. kwsplat is not send_type?, so argument? returns false.
+        // Example: `binding(**{}.update(kwargs))` — update is flagged.
+        if let Some(expr) = node.value() {
             self.context_stack.push(Context::VoidStatement);
             self.visit(&expr);
             self.context_stack.pop();

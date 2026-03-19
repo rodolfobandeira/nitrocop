@@ -222,3 +222,39 @@ def process_super_implicit
   super(object.save)
                ^^^^ Rails/SaveBang: Use `save!` instead of `save` if the return value is not checked.
 end
+
+# Create in || inside setter assignment — compound_boolean should flag
+self.parent_tag = Tag.find_by_name("x") || Tag.create(name: "x")
+                                               ^^^^^^ Rails/SaveBang: `create` returns a model which is always truthy.
+
+# Hash#update on hash literal — flagged as persist method
+{ruby_method_type: :class}.update(kwargs)
+                           ^^^^^^ Rails/SaveBang: Use `update!` instead of `update` if the return value is not checked.
+
+# Create in || assigned to local (no persisted? check) — compound_boolean
+x = AdminSetting.first || AdminSetting.create(last_updated_by: Admin.first)
+                                       ^^^^^^ Rails/SaveBang: `create` returns a model which is always truthy.
+
+# Create in || with memoization operator — compound_boolean
+@current ||= current_user.presence || User.create(email: "x")
+                                           ^^^^^^ Rails/SaveBang: `create` returns a model which is always truthy.
+
+# Create chained: Student.create.lessons — create return value used as receiver chain
+Student.create.lessons
+        ^^^^^^ Rails/SaveBang: Use `create!` instead of `create` if the return value is not checked.
+
+# Create on LEFT side of `or`/`||` in block implicit return — NOT exempt
+# (RuboCop's implicit_return? only exempts the right side via sibling_index math)
+items.map { |v| Gem::Version.create(v) or raise }
+                             ^^^^^^ Rails/SaveBang: `create` returns a model which is always truthy.
+
+# Create in || inside instance variable assignment — compound_boolean takes priority
+# (RuboCop's return_value_assigned? doesn't walk through or nodes)
+@directory = connection.directories.get(key) || connection.directories.create(key: key)
+                                                                       ^^^^^^ Rails/SaveBang: `create` returns a model which is always truthy.
+
+# CREATE with csend persisted? — RuboCop's call_to_persisted? only matches send_type?, not csend
+# So `s&.persisted?` does NOT count as a persisted? check
+s = DomainSetup.create(domain: "x")
+                ^^^^^^ Rails/SaveBang: Use `create!` instead of `create` if the return value is not checked. Or check `persisted?` on model returned from `create`.
+s if s&.persisted?

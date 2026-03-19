@@ -100,6 +100,7 @@ if user.persisted?
   foo
 end
 
+
 # CREATE with persisted? check on next line (instance variable)
 @user = User.create
 if @user.persisted?
