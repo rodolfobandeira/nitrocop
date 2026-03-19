@@ -344,3 +344,35 @@ constants.map{|c|k=const_get(c);
 k.meta_def(:urls){[f(k,p)]} if (!k
 .respond_to?(:urls) || mu==true)};end end
 X=Controllers
+
+# Modifier if with multiline condition and trailing comment — not real content
+return true if name =~ /\.map$/i ||  # Name convention
+  lines[0] =~ /^{"version":\d+,/
+
+next_statement
+
+# Regular if with multiline condition and trailing comment followed by blank line
+if lines[0] == '(function() {' &&     # First line is module closure opening
+    lines[-2] == '}).call(this);' &&  # Second to last line closes module closure
+    lines[-1] == ''                   # Last line is blank
+
+  do_something
+end
+
+# next unless with multiline condition and trailing comment
+items.each do |l|
+  next unless basename =~ /^[^_]*_#{provider}_/ || # For first section
+    basename =~ /^[^_]*_other_/
+
+  process(l)
+end
+
+# next if with trailing comment on last condition line
+items.each do |l|
+  next if [
+    :abstract_api,
+    :twogis
+  ].include?(l) # lookups that always return a result
+
+  process(l)
+end

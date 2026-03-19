@@ -107,6 +107,14 @@ use ruby_prism::Visit;
 ///   blank/non-blank. In minified code, the right sibling can be on the SAME
 ///   line as the condition end. Fixed by also checking the tail of the
 ///   condition-end line for non-whitespace content.
+///
+/// **FP root causes (round 6, 11 FP → 0 FP):**
+/// - All 11 FPs caused by trailing comments on the condition's last line.
+///   The tail check in `check_multiline_condition` looked for non-whitespace
+///   content after the predicate end offset. A trailing `# comment` has `#`
+///   as non-whitespace, so it was treated as real content (like minified code),
+///   triggering a false offense. Fixed by checking if the first non-whitespace
+///   byte in the tail is `#` — if so, it's a comment and should be ignored.
 pub struct EmptyLineAfterMultilineCondition;
 
 impl Cop for EmptyLineAfterMultilineCondition {
@@ -639,10 +647,15 @@ impl EmptyLineAfterMultilineCondition {
             let cond_line = lines[pred_end_line - 1];
             if col < cond_line.len() {
                 let tail = &cond_line[col..];
-                if tail.iter().any(|&b| b != b' ' && b != b'\t') {
-                    let (line, col) =
-                        source.offset_to_line_col(predicate.location().start_offset());
-                    return vec![self.diagnostic(source, line, col, MSG.to_string())];
+                // Skip trailing comments — they are not real content after the condition.
+                // Find the first non-whitespace byte; if it's `#`, treat as blank tail.
+                let first_non_ws = tail.iter().position(|&b| b != b' ' && b != b'\t');
+                if let Some(pos) = first_non_ws {
+                    if tail[pos] != b'#' {
+                        let (line, col) =
+                            source.offset_to_line_col(predicate.location().start_offset());
+                        return vec![self.diagnostic(source, line, col, MSG.to_string())];
+                    }
                 }
             }
         }
