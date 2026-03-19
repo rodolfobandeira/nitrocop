@@ -7,6 +7,12 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// RSpec/DescribedClassModuleWrapping: Avoid opening modules and defining specs within them.
+///
+/// Corpus FN=7 root cause: `contains_rspec_describe` only recursed into nested
+/// `ModuleNode`s but not `ClassNode`s. The VCR corpus pattern `module VCR; class Cassette;
+/// ::RSpec.describe ...` was missed because the class wrapper was not traversed.
+/// Fix: refactored to a deep recursive search through both module and class bodies.
+/// `::RSpec.describe` (ConstantPathNode with parent=None) was already handled.
 pub struct DescribedClassModuleWrapping;
 
 impl Cop for DescribedClassModuleWrapping {
@@ -70,20 +76,34 @@ fn contains_rspec_describe(module_node: ruby_prism::ModuleNode<'_>) -> bool {
         Some(b) => b,
         None => return false,
     };
-    let stmts = match body.as_statements_node() {
-        Some(s) => s,
-        None => return false,
-    };
+    body_contains_rspec_describe(&body)
+}
 
-    for stmt in stmts.body().iter() {
-        if is_rspec_describe(&stmt) {
-            return true;
-        }
-        // Check nested modules
-        if let Some(nested_module) = stmt.as_module_node() {
-            if contains_rspec_describe(nested_module) {
+fn body_contains_rspec_describe(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            if node_contains_rspec_describe(&stmt) {
                 return true;
             }
+        }
+    }
+    false
+}
+
+fn node_contains_rspec_describe(node: &ruby_prism::Node<'_>) -> bool {
+    if is_rspec_describe(node) {
+        return true;
+    }
+    // Recurse into nested modules
+    if let Some(nested_module) = node.as_module_node() {
+        if let Some(body) = nested_module.body() {
+            return body_contains_rspec_describe(&body);
+        }
+    }
+    // Recurse into nested classes
+    if let Some(class_node) = node.as_class_node() {
+        if let Some(body) = class_node.body() {
+            return body_contains_rspec_describe(&body);
         }
     }
     false
