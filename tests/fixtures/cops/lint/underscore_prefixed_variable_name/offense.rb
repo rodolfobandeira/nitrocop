@@ -109,6 +109,22 @@ module HasData
   end
 end
 
+# Variable assigned at def level, read inside a lambda
+def method_with_lambda
+  _route = something
+  ^^^^^^ Lint/UnderscorePrefixedVariableName: Do not use prefix `_` for a variable that is used.
+  handler = ->(x) { _route.call(x) }
+  handler.call(42)
+end
+
+# Variable assigned at def level, read via operator-write inside a lambda
+def setup_workspace
+  _filenames = nil
+  ^^^^^^^^^^^ Lint/UnderscorePrefixedVariableName: Do not use prefix `_` for a variable that is used.
+  filenames = ->{ _filenames ||= workspace.filenames.to_set }
+  filenames.call
+end
+
 # Variable assigned and used inside a let block (class-level)
 describe 'records' do
   let(:item) do
