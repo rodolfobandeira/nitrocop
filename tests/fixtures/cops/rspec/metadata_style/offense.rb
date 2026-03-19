@@ -39,4 +39,10 @@ end
 RSpec.configure do |config|
   config.before(:each, a: true)
                        ^^^^^^^ RSpec/MetadataStyle: Use symbol style for metadata.
+
+  # Hooks inside conditionals within configure block
+  if ENV['SPECIAL']
+    config.before(:each, special: true)
+                         ^^^^^^^^^^^^^^ RSpec/MetadataStyle: Use symbol style for metadata.
+  end
 end

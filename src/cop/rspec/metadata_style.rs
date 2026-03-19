@@ -35,6 +35,14 @@ use crate::parse::source::SourceFile;
 ///   Added `as_block_node()` check to distinguish from `BlockArgumentNode`.
 /// - FP: Need to skip the first argument (description/scope) per RuboCop's
 ///   `_ $...` pattern — the first arg is not metadata.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FP=0, FN=3 (2 from thredded, 1 from discourse).
+///
+/// FN=3: Hook calls inside `if ENV['MIGRATION_SPEC']` conditional blocks within
+/// `RSpec.configure`. `walk_for_config_hooks` only checked direct statements,
+/// not branches. Fix: recurse into if/unless/else branches.
 pub struct MetadataStyle;
 
 /// Default enforces symbol style: `:foo` instead of `foo: true`.
@@ -265,6 +273,7 @@ impl MetadataStyle {
     }
 
     /// Walk statements looking for hook calls on the config variable.
+    /// Recurses into if/unless branches to find hook calls inside conditionals.
     fn walk_for_config_hooks(
         &self,
         source: &SourceFile,
@@ -275,10 +284,74 @@ impl MetadataStyle {
     ) {
         if let Some(stmts) = node.as_statements_node() {
             for stmt in stmts.body().iter() {
-                self.check_config_hook_call(source, &stmt, param_name, style, diagnostics);
+                self.walk_for_config_hooks_single(source, &stmt, param_name, style, diagnostics);
             }
         } else {
+            self.walk_for_config_hooks_single(source, node, param_name, style, diagnostics);
+        }
+    }
+
+    /// Process a single statement: check if it's a hook call or recurse into if/unless.
+    fn walk_for_config_hooks_single(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        param_name: &[u8],
+        style: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Direct hook call
+        if node.as_call_node().is_some() {
             self.check_config_hook_call(source, node, param_name, style, diagnostics);
+            return;
+        }
+        // Recurse into if/unless branches
+        if let Some(if_node) = node.as_if_node() {
+            if let Some(stmts) = if_node.statements() {
+                self.walk_for_config_hooks(
+                    source,
+                    &stmts.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                );
+            }
+            if let Some(subsequent) = if_node.subsequent() {
+                self.walk_for_config_hooks(source, &subsequent, param_name, style, diagnostics);
+            }
+            return;
+        }
+        if let Some(unless_node) = node.as_unless_node() {
+            if let Some(stmts) = unless_node.statements() {
+                self.walk_for_config_hooks(
+                    source,
+                    &stmts.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                );
+            }
+            if let Some(else_clause) = unless_node.else_clause() {
+                self.walk_for_config_hooks(
+                    source,
+                    &else_clause.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                );
+            }
+            return;
+        }
+        if let Some(else_node) = node.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                self.walk_for_config_hooks(
+                    source,
+                    &stmts.as_node(),
+                    param_name,
+                    style,
+                    diagnostics,
+                );
+            }
         }
     }
 
