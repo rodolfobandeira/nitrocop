@@ -12,3 +12,10 @@
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
 '::ffff:192.168.1.1'
 ^^^^^^^^^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
+# Link-local IPv6 with zone IDs (fe80 prefix + %zone suffix)
+'fe80::1%lo0'
+^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
+'fe80::200:11ff:fe22:1122%5'
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.
+'fe80:0:0:0:0:0:0:1%eth0'
+^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/IpAddresses: Do not hardcode IP addresses.

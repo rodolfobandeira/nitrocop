@@ -1,11 +1,13 @@
-use crate::cop::node_type::STRING_NODE;
+use ruby_prism::Visit;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
+use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 
 /// Checks for hardcoded IP addresses in string literals.
 ///
-/// ## Investigation findings (2026-03-15, updated 2026-03-18)
+/// ## Investigation findings (2026-03-15, updated 2026-03-19)
 ///
 /// Root causes of 217 FPs and 66 FNs:
 ///
@@ -25,18 +27,31 @@ use crate::parse::source::SourceFile;
 ///    left/right halves of `::` split to be valid hex (no empty groups allowed).
 ///    These patterns appear in Ruby code as scope resolution operators (`:::`) and
 ///    IRB completion candidates.
+/// 5. String literals inside regexp interpolation (e.g., `/#{method('::1')}/`)
+///    were flagged. RuboCop's `StringHelp` mixin calls `ignore_node` on regexp
+///    nodes and `part_of_ignored_node?` skips all descendant strings. Switched
+///    from `check_node` to `check_source` with a custom visitor that tracks
+///    regexp nesting depth to replicate this behavior.
 ///
 /// **FN causes (fixed):**
 /// 1. Missing IPv4-mapped IPv6 support (`::ffff:192.168.1.1`). Ruby's
 ///    `Resolv::IPv6::Regex` includes `Regex_6Hex4Dec` and `Regex_CompressedHex4Dec`
 ///    patterns for this format.
-///
-/// **Remaining FN (5):** No detailed location data available from corpus oracle.
-/// Likely edge cases in IPv6 validation or config resolution differences.
+/// 2. Missing link-local IPv6 with zone IDs (`fe80::1%lo0`). Ruby's
+///    `Resolv::IPv6::Regex` includes `Regex_LinkLocal_6Hex7` and
+///    `Regex_LinkLocal_CompressedHex7` patterns for `fe80` prefix addresses
+///    with `%zone_id` suffixes. Zone ID allows `[-0-9A-Za-z._~]+`.
 pub struct IpAddresses;
 
-/// Maximum length of an IPv6 address string (IPv4-mapped IPv6 is longest).
-const IPV6_MAX_SIZE: usize = 45;
+/// Maximum length of an IPv6 address string.
+/// Link-local with zone ID can exceed 45 chars (e.g., fe80::1%long_interface_name).
+/// Use a generous limit.
+const IPV6_MAX_SIZE: usize = 80;
+
+/// Valid zone ID character per RFC 6874: [-0-9A-Za-z._~]
+fn is_valid_zone_id_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'~'
+}
 
 impl IpAddresses {
     /// Validate an IPv4 octet matching Ruby's `Resolv::IPv4::Regex256` pattern.
@@ -79,6 +94,11 @@ impl IpAddresses {
         // Three or more consecutive colons is never valid IPv6
         if s.contains(":::") {
             return false;
+        }
+
+        // Check for link-local with zone ID (fe80 prefix + %zone suffix)
+        if let Some(pct_pos) = s.find('%') {
+            return Self::is_ipv6_link_local_with_zone(s, pct_pos);
         }
 
         // Try IPv4-mapped IPv6 formats first (e.g., ::ffff:192.168.1.1)
@@ -221,6 +241,52 @@ impl IpAddresses {
         }
     }
 
+    /// Validate link-local IPv6 addresses with zone IDs.
+    /// Matches Ruby's Resolv::IPv6::Regex_LinkLocal_6Hex7 and
+    /// Regex_LinkLocal_CompressedHex7. These require:
+    /// - `fe80` prefix (case-insensitive)
+    /// - Valid IPv6 address body
+    /// - `%` followed by one or more zone ID characters `[-0-9A-Za-z._~]`
+    fn is_ipv6_link_local_with_zone(s: &str, pct_pos: usize) -> bool {
+        let addr_part = &s[..pct_pos];
+        let zone_part = &s[pct_pos + 1..];
+
+        // Zone ID must be non-empty and contain only valid characters
+        if zone_part.is_empty() || !zone_part.bytes().all(is_valid_zone_id_char) {
+            return false;
+        }
+
+        // Must start with fe80 (case-insensitive)
+        if !addr_part
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("fe80"))
+        {
+            return false;
+        }
+
+        // The address part (without zone) must be a valid IPv6 address
+        // Must only contain hex digits and colons in address part
+        if !addr_part
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b':')
+        {
+            return false;
+        }
+
+        // After "fe80", must have a colon
+        if addr_part.len() < 5 || addr_part.as_bytes()[4] != b':' {
+            return false;
+        }
+
+        // Validate as a normal IPv6 address (reuse existing validation)
+        if addr_part.contains("::") {
+            Self::is_ipv6_compressed(addr_part)
+        } else {
+            let groups: Vec<&str> = addr_part.split(':').collect();
+            groups.len() == 8 && groups.iter().all(|g| Self::is_valid_hex_group(g))
+        }
+    }
+
     /// Pre-filter: the first character must be a hex digit or colon.
     /// Matches RuboCop's `starts_with_hex_or_colon?` optimization.
     fn starts_with_hex_or_colon(s: &str) -> bool {
@@ -229,35 +295,15 @@ impl IpAddresses {
             None => false,
         }
     }
-}
 
-impl Cop for IpAddresses {
-    fn name(&self) -> &'static str {
-        "Style/IpAddresses"
-    }
-
-    fn default_enabled(&self) -> bool {
-        false
-    }
-
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[STRING_NODE]
-    }
-
-    fn check_node(
+    /// Check a single string node for IP address content.
+    fn check_string_node(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        string_node: &ruby_prism::StringNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let string_node = match node.as_string_node() {
-            Some(s) => s,
-            None => return,
-        };
-
         // Skip string segments inside interpolated strings (no opening delimiter).
         // Matches RuboCop's StringHelp `node.loc?(:begin)` check.
         if string_node.opening_loc().is_none() {
@@ -287,9 +333,16 @@ impl Cop for IpAddresses {
             .get_string_array("AllowedAddresses")
             .or_else(|| Some(vec!["::".to_string()]));
 
+        // For allowed address comparison, strip zone ID if present
+        let content_for_allowed = if let Some(pct_pos) = content_str.find('%') {
+            &content_str[..pct_pos]
+        } else {
+            content_str
+        };
+
         // Check if it's in allowed addresses (case-insensitive)
         if let Some(ref allowed_list) = allowed {
-            let content_lower = content_str.to_lowercase();
+            let content_lower = content_for_allowed.to_lowercase();
             for addr in allowed_list {
                 if addr.to_lowercase() == content_lower {
                     return;
@@ -309,6 +362,75 @@ impl Cop for IpAddresses {
                 "Do not hardcode IP addresses.".to_string(),
             ));
         }
+    }
+}
+
+impl Cop for IpAddresses {
+    fn name(&self) -> &'static str {
+        "Style/IpAddresses"
+    }
+
+    fn default_enabled(&self) -> bool {
+        false
+    }
+
+    fn check_source(
+        &self,
+        source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        let mut visitor = IpAddressVisitor {
+            cop: self,
+            source,
+            config,
+            in_regexp_depth: 0,
+            diagnostics: Vec::new(),
+        };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
+    }
+}
+
+/// AST visitor that tracks regexp nesting to skip string nodes inside regexps.
+/// Matches RuboCop's `StringHelp#on_regexp` which calls `ignore_node(node)`,
+/// causing all descendant `str` nodes to be skipped via `part_of_ignored_node?`.
+struct IpAddressVisitor<'a, 'src> {
+    cop: &'a IpAddresses,
+    source: &'src SourceFile,
+    config: &'a CopConfig,
+    in_regexp_depth: u32,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl<'pr> Visit<'pr> for IpAddressVisitor<'_, '_> {
+    fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+        if self.in_regexp_depth == 0 {
+            self.cop
+                .check_string_node(self.source, node, self.config, &mut self.diagnostics);
+        }
+        // StringNode is a leaf, no children to visit
+    }
+
+    fn visit_interpolated_regular_expression_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
+    ) {
+        self.in_regexp_depth += 1;
+        ruby_prism::visit_interpolated_regular_expression_node(self, node);
+        self.in_regexp_depth -= 1;
+    }
+
+    fn visit_interpolated_match_last_line_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedMatchLastLineNode<'pr>,
+    ) {
+        self.in_regexp_depth += 1;
+        ruby_prism::visit_interpolated_match_last_line_node(self, node);
+        self.in_regexp_depth -= 1;
     }
 }
 
@@ -359,6 +481,12 @@ mod tests {
         assert!(IpAddresses::is_ipv6("::ffff:192.168.1.1"));
         assert!(IpAddresses::is_ipv6("64:ff9b::192.0.2.33"));
 
+        // Link-local with zone ID
+        assert!(IpAddresses::is_ipv6("fe80::1%lo0"));
+        assert!(IpAddresses::is_ipv6("fe80::200:11ff:fe22:1122%5"));
+        assert!(IpAddresses::is_ipv6("fe80:0:0:0:0:0:0:1%eth0"));
+        assert!(IpAddresses::is_ipv6("FE80::1%lo0")); // case-insensitive
+
         // Invalid
         assert!(!IpAddresses::is_ipv6("2001:db8::1xyz"));
         assert!(!IpAddresses::is_ipv6(""));
@@ -369,6 +497,11 @@ mod tests {
         assert!(!IpAddresses::is_ipv6(":::A"));
         assert!(!IpAddresses::is_ipv6("::A:"));
         assert!(!IpAddresses::is_ipv6(":::A:"));
+
+        // Zone ID without fe80 prefix is not valid
+        assert!(!IpAddresses::is_ipv6("dead::beef%eth0"));
+        // Empty zone ID is not valid
+        assert!(!IpAddresses::is_ipv6("fe80::1%"));
     }
 
     #[test]

@@ -8,3 +8,6 @@ a * b + c
 "str" * count
 x + CONST
 x + Foo::Bar
+# method call with operator name but non-constant receiver
+result.|(other_result)
+obj.&(another)

@@ -20,3 +20,10 @@
 ':::A'
 '::A:'
 ':::A:'
+# IP address strings inside regexp interpolation (RuboCop ignores strings in regexps)
+x =~ /^#{method('::1')}\b/
+y =~ /#{addr('127.0.0.1')}/
+# Zone ID without valid fe80 prefix is not a valid IP
+'dead::beef%eth0'
+# Zone ID with invalid format
+'fe80::1%'
