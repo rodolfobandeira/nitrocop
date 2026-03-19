@@ -65,7 +65,7 @@ jobs:
           import json, os, sys, hashlib
 
           corpus_size = os.environ.get('CORPUS_SIZE', 'standard')
-          BATCH_SIZE = 20 if corpus_size == 'extended' else 10
+          BATCH_SIZE = 25 if corpus_size == 'extended' else 10
 
           repos = []
           with open('bench/corpus/manifest.jsonl') as f:
@@ -113,6 +113,9 @@ jobs:
               })
 
           print(f'{len(repos)} repos in {len(batches)} batches (batch_size={BATCH_SIZE}, corpus={corpus_size})', file=sys.stderr)
+          if len(batches) > 256:
+              print(f'ERROR: {len(batches)} batches exceeds GitHub Actions matrix limit of 256. Increase BATCH_SIZE.', file=sys.stderr)
+              sys.exit(1)
           matrix = {'include': batches}
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'matrix={json.dumps(matrix)}\n')
