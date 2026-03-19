@@ -292,6 +292,27 @@ class RssController < ApplicationController
   end
 end
 
+# Subtree-matched class with nested controller inside a module:
+# the per-class reset ensures the module's non-controller classes aren't falsely flagged,
+# while the full-visitor recurse finds the real controller inside the module.
+class FlashTestCase < ActionController::TestCase
+  class TestController < ActionController::Base
+    def use_flash
+      flash[:notice] = "hello"
+      redirect_to root_path
+    end
+  end
+
+  module ::Admin
+    class NonController
+      def helper
+        flash[:alert] = "msg"
+        render :index
+      end
+    end
+  end
+end
+
 # Flash in def-with-rescue — no render in right siblings, only redirect
 class PaymentsController < ApplicationController
   def create
