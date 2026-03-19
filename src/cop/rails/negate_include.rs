@@ -19,6 +19,22 @@ use crate::parse::source::SourceFile;
 /// both `if` and `elsif` conditions (test fixtures added). The FN is a
 /// corpus config artifact — likely the rubocop repo's config resolution
 /// differs from the baseline, causing this cop to not run on that file.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FP=3, FN=0. All 3 FPs are `![TkFOR, TkWHILE, TkUNTIL].include?(...)`
+/// in vendored gem files:
+///   - `heroku/ruby/1.9.1/gems/rdoc-*/lib/rdoc/ruby_lex.rb` (cjstewart88__Tubalr, 2 FPs)
+///   - `vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb` (liaoziyang__stackneveroverflow, 1 FP)
+///
+/// Root cause: file-exclusion path resolution, NOT cop logic. RuboCop
+/// correctly flags `![...].include?(x)` too (verified locally). The corpus
+/// oracle runs nitrocop on `repos/REPO_ID/`, producing paths like
+/// `repos/REPO_ID/vendor/bundle/...` which don't match the `vendor/**/*`
+/// AllCops.Exclude glob because the repo prefix prevents matching. RuboCop
+/// uses `--force-exclusion` which handles this correctly. The `heroku/`
+/// paths aren't under `vendor/` at all and are likely excluded by RuboCop's
+/// file discovery or `.gitignore` handling. No cop-level fix needed.
 pub struct NegateInclude;
 
 impl Cop for NegateInclude {
