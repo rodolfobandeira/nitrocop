@@ -13,3 +13,5 @@ foo&.to_i || 1
 foo&.to_f || 1.0
 foo&.to_a || [1]
 foo&.to_h || { a: 1 }
+foo&.to_i(16) || 0
+bar&.to_s(:db) || ''

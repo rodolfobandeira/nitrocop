@@ -3,6 +3,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-19)
+///
+/// Corpus oracle reported FP=2, FN=0.
+///
+/// FP=2: Both in DataDog/dd-trace-rb — `1.times(&new_object)` where a proc variable
+/// is passed as a block argument. RuboCop's `times_call?` pattern only matches
+/// `(send (int $_) :times (block-pass (sym $_))?)` — block-pass with a symbol is
+/// flagged, but block-pass with a local variable is not. Fixed by checking whether
+/// the block argument's expression is a SymbolNode; non-symbol block args skip.
 pub struct UselessTimes;
 
 impl Cop for UselessTimes {
@@ -40,6 +49,20 @@ impl Cop for UselessTimes {
         // Must have no arguments (times takes no args)
         if call.arguments().is_some() {
             return;
+        }
+
+        // Block-pass with a non-symbol expression (e.g., 1.times(&proc_var)) is NOT useless.
+        // RuboCop only flags: 1.times, 1.times { ... }, 1.times(&:symbol).
+        // It does NOT flag: 1.times(&variable) because the proc may have side effects.
+        if let Some(block) = call.block() {
+            if let Some(block_arg) = block.as_block_argument_node() {
+                // &:symbol is fine (flagged), but &variable is not
+                if let Some(expr) = block_arg.expression() {
+                    if expr.as_symbol_node().is_none() {
+                        return;
+                    }
+                }
+            }
         }
 
         let receiver = match call.receiver() {

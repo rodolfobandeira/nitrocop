@@ -23,6 +23,20 @@ use crate::parse::source::SourceFile;
 /// The cop was missing the `on_or` handler entirely. It only visited `CallNode`
 /// but the conversion-with-default pattern requires visiting `OrNode` and
 /// checking if the LHS is a safe-nav conversion call with a matching default RHS.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FP regression FP=1→2.
+///
+/// FP in DataDog/dd-trace-rb: `get_tag(...)&.to_i(16) || 0` — `to_i(16)` has an
+/// argument (base-16 conversion). `nil.to_i` returns 0, but `nil.to_i(16)` raises
+/// ArgumentError because NilClass#to_i takes no arguments. Fixed by checking that
+/// the conversion method has no arguments before flagging.
+///
+/// FP in discourse/discourse: `mail[:cc]&.element&.addresses&.to_h { ... } || {}` —
+/// chain of safe navigations. This may be a version discrepancy (discourse's
+/// RuboCop version may not have the conversion_with_default check). Remaining FP=1
+/// from extended corpus; FN=402 from missing features (InferNonNilReceiver, etc).
 pub struct RedundantSafeNavigation;
 
 /// Methods guaranteed to exist on every instance (their receivers can't be nil)
@@ -186,6 +200,12 @@ impl RedundantSafeNavigation {
         };
 
         let method_name = csend.name().as_slice();
+
+        // Conversion methods with arguments (e.g., to_i(16)) are NOT redundant.
+        // nil.to_i returns 0, but nil.to_i(16) raises ArgumentError.
+        if csend.arguments().is_some() {
+            return;
+        }
 
         // Check method is a conversion method and RHS is its matching default
         let is_match = match method_name {
