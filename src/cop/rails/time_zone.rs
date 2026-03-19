@@ -192,6 +192,19 @@ use crate::parse::source::SourceFile;
 /// `[:days_in_month, :local]`, `:local` is dangerous, no good method → offense.
 /// Fix: added `in_dangerous_time_context()` check for non-dangerous Time methods
 /// that detects enclosing dangerous Time calls without safe chains.
+///
+/// ## Investigation (2026-03-19): FP=40
+///
+/// **GOOD_METHODS neutralize danger in chain (40 FP — FIXED):**
+/// `Time.new(2005, 10, 30, 0, 0, 0, Time.zone)` — the inner `Time.zone` call
+/// triggered `in_dangerous_time_context()` which found the enclosing `Time.new(`
+/// as dangerous. But RuboCop's `extract_method_chain` builds chain `[:zone, :new]`,
+/// and `not_danger_chain?` returns true because `:zone` is in GOOD_METHODS. The
+/// presence of ANY good method in the chain neutralizes the danger.
+/// Fix: skip `in_dangerous_time_context()` when the inner method is a GOOD_METHOD
+/// (`zone`, `zone_default`, `find_zone`, `find_zone!`). Also affects patterns like
+/// `Time.new(2019, 1, 1, 0, 0, 0, "+03:00")` which already passed via the 7-arg
+/// check, and `Time.new(2010, 1, 1, 0, 0, 0, "+10:00")` similarly.
 pub struct TimeZone;
 
 impl Cop for TimeZone {
@@ -282,7 +295,20 @@ impl Cop for TimeZone {
         // to the chain when the receiver traces to Time. So Time.zone.local(year, month,
         // Time.days_in_month(month)) has chain [:days_in_month, :local] and :local is
         // dangerous with no good method → offense.
+        //
+        // However, if the inner method is a GOOD_METHOD (zone, zone_default, find_zone,
+        // find_zone!), it neutralizes the danger — RuboCop's not_danger_chain? returns
+        // true when the chain includes any good method. E.g., Time.zone inside
+        // Time.new(2005, 10, 30, 0, 0, 0, Time.zone) has chain [:zone, :new], and
+        // :zone is good → no offense.
         if !is_unsafe_method {
+            // GOOD_METHODS neutralize any dangerous method in the chain (both modes).
+            if matches!(
+                method,
+                b"zone" | b"zone_default" | b"find_zone" | b"find_zone!"
+            ) {
+                return;
+            }
             let bytes = source.as_bytes();
             let start = call.location().start_offset();
             if let Some((dangerous_method, msg_loc)) =

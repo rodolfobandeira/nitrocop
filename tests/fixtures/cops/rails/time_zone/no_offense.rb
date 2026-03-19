@@ -64,3 +64,9 @@ Time.parse(helper_method(Time.now)).utc
 
 # Non-dangerous Time.XXX inside dangerous enclosing Time call WITH safe chain
 Time.zone.local(year, month, Time.days_in_month(month)).utc
+
+# Time.new with 7 arguments — 7th arg is UTC offset, timezone-aware
+Time.new(2005, 10, 30, 0, 0, 0, Time.zone)
+Time.new(2019, 1, 1, 0, 0, 0, "+03:00")
+Time.new(2010, 1, 1, 0, 0, 0, "+10:00")
+Time.new(1988, 3, 15, 3, 0, 0, "-05:00")
