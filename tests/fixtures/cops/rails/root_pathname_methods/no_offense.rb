@@ -11,3 +11,6 @@ result = File.open(Rails.root.join('fixtures', 'data.html')).read
 organization.profile_image = File.open(Rails.root.join("app/assets/images/2.png"))
 record.avatar = File.open(Rails.root.join("uploads", "photo.png"))
 item.attachment = IO.open(Rails.root.join("files", "report.pdf"))
+File.exists?(Rails.root.join("public", filename[1..-1]))
+File.exists?(Rails.root.join("public", theme_path, "images", "logo.gif"))
+Dir.exists?(Rails.root.join("app", "assets"))

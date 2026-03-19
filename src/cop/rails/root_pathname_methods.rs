@@ -41,6 +41,14 @@ use crate::parse::source::SourceFile;
 /// refining the `=` heuristic: only skip if the bytes before `=` show a dotted LHS
 /// (e.g., `obj.attr =`). Compound operators (`||=`, `&&=`, `+=`, etc.) and simple variable
 /// identifiers are no longer skipped.
+///
+/// **Corpus investigation (2026-03-19):**
+///
+/// **FPs fixed (12):** All 12 FPs were `File.exists?(Rails.root.join(...))` or similar calls
+/// using `exists?` (with the trailing 's'). RuboCop's `FILE_METHODS`, `DIR_METHODS`, and
+/// `FILE_TEST_METHODS` only include `exist?` (without the 's'), not the deprecated `exists?`.
+/// `File.exists?` / `Dir.exists?` are deprecated Ruby methods. Removed `exists?` from
+/// nitrocop's method lists to match RuboCop.
 pub struct RootPathnameMethods;
 
 const FILE_METHODS: &[&[u8]] = &[
@@ -50,7 +58,6 @@ const FILE_METHODS: &[&[u8]] = &[
     b"binwrite",
     b"readlines",
     b"exist?",
-    b"exists?",
     b"directory?",
     b"file?",
     b"empty?",
@@ -110,7 +117,6 @@ const DIR_METHODS: &[&[u8]] = &[
     b"glob",
     b"[]",
     b"exist?",
-    b"exists?",
     b"mkdir",
     b"rmdir",
     b"children",
