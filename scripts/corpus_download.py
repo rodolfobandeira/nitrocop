@@ -90,12 +90,13 @@ def _cache_dir() -> Path:
     return d
 
 
-def _try_gh(repo: str | None) -> tuple[Path, int, str] | None:
+def _try_gh(repo: str | None, prefer: str = "extended") -> tuple[Path, int, str] | None:
     """Try downloading via gh CLI. Returns (path, run_id, head_sha) or None.
 
-    Checks recent successful corpus oracle runs and prefers the extended
-    artifact (corpus-report-extended) over standard (corpus-report), since
-    extended is a superset covering all repos.
+    Checks recent successful corpus oracle runs. The `prefer` parameter
+    controls which artifact is tried first:
+    - "extended": try corpus-report-extended first (5k+ repos, superset)
+    - "standard": try corpus-report first (1k repos, matches README/docs)
     """
     if not shutil.which("gh"):
         return None
@@ -126,27 +127,32 @@ def _try_gh(repo: str | None) -> tuple[Path, int, str] | None:
     if not runs:
         return None
 
-    # Try each run, preferring extended artifact over standard.
+    # Try each run, with artifact preference controlled by `prefer`.
     # Runs are ordered newest-first, so the first successful download wins.
-    artifact_names = ["corpus-report-extended", "corpus-report"]
+    if prefer == "standard":
+        artifact_names = ["corpus-report", "corpus-report-extended"]
+    else:
+        artifact_names = ["corpus-report-extended", "corpus-report"]
 
     for run in runs:
         run_id = run["databaseId"]
         head_sha = run.get("headSha", "")
 
-        # Check cache (new format with variant, then old format without)
-        for variant in artifact_names:
-            cache_path = _cache_dir() / f"corpus-results-{run_id}-{variant}.json"
-            if cache_path.exists():
-                label = "extended" if "extended" in variant else "standard"
-                print(f"Using cached {label} corpus-results from run {run_id}", file=sys.stderr)
-                return cache_path, run_id, head_sha
+        # Check cache for preferred variant only (don't auto-fallback)
+        preferred = artifact_names[0]
+        cache_path = _cache_dir() / f"corpus-results-{run_id}-{preferred}.json"
+        if cache_path.exists():
+            label = "extended" if "extended" in preferred else "standard"
+            print(f"Using cached {label} corpus-results from run {run_id}", file=sys.stderr)
+            return cache_path, run_id, head_sha
+        # Old-format cache (no variant suffix) — treat as acceptable
         old_cache = _cache_dir() / f"corpus-results-{run_id}.json"
         if old_cache.exists():
             print(f"Using cached corpus-results from run {run_id}", file=sys.stderr)
             return old_cache, run_id, head_sha
 
-        # Try downloading extended first, then standard
+        # Try downloading — preferred variant first. If preferred is not
+        # available in this run, skip to the next run so we find one that has it.
         for variant in artifact_names:
             tmpdir = tempfile.mkdtemp(prefix="corpus-dl-")
             dl_result = subprocess.run(
@@ -156,6 +162,9 @@ def _try_gh(repo: str | None) -> tuple[Path, int, str] | None:
             )
             if dl_result.returncode != 0:
                 shutil.rmtree(tmpdir, ignore_errors=True)
+                if variant == preferred:
+                    # Preferred not available in this run — try next run
+                    break
                 continue
 
             path = Path(tmpdir) / "corpus-results.json"
@@ -219,10 +228,10 @@ def _github_api_download(url: str, token: str) -> bytes:
         raise
 
 
-def _try_curl_api(repo: str | None) -> tuple[Path, int, str] | None:
+def _try_curl_api(repo: str | None, prefer: str = "extended") -> tuple[Path, int, str] | None:
     """Try downloading via GitHub REST API with GH_TOKEN env var.
 
-    Prefers extended artifact over standard, same as _try_gh.
+    Uses same `prefer` logic as _try_gh.
     """
     token = (os.environ.get("GH_TOKEN_FOR_ACTIONS_READ")
              or os.environ.get("GH_TOKEN")
@@ -241,7 +250,10 @@ def _try_curl_api(repo: str | None) -> tuple[Path, int, str] | None:
         return None
 
     api_base = f"https://api.github.com/repos/{repo}"
-    artifact_names = ["corpus-report-extended", "corpus-report"]
+    if prefer == "standard":
+        artifact_names = ["corpus-report", "corpus-report-extended"]
+    else:
+        artifact_names = ["corpus-report-extended", "corpus-report"]
 
     # List recent successful runs
     try:
@@ -260,13 +272,13 @@ def _try_curl_api(repo: str | None) -> tuple[Path, int, str] | None:
         run_id = run["id"]
         head_sha = run.get("head_sha", "")
 
-        # Check cache (new format with variant, then old format without)
-        for variant in artifact_names:
-            cache_path = _cache_dir() / f"corpus-results-{run_id}-{variant}.json"
-            if cache_path.exists():
-                label = "extended" if "extended" in variant else "standard"
-                print(f"Using cached {label} corpus-results from run {run_id}", file=sys.stderr)
-                return cache_path, run_id, head_sha
+        # Check cache for preferred variant only
+        preferred = artifact_names[0]
+        cache_path = _cache_dir() / f"corpus-results-{run_id}-{preferred}.json"
+        if cache_path.exists():
+            label = "extended" if "extended" in preferred else "standard"
+            print(f"Using cached {label} corpus-results from run {run_id}", file=sys.stderr)
+            return cache_path, run_id, head_sha
         old_cache = _cache_dir() / f"corpus-results-{run_id}.json"
         if old_cache.exists():
             print(f"Using cached corpus-results from run {run_id}", file=sys.stderr)
@@ -478,7 +490,7 @@ def get_synthetic_results_path(run_id: int) -> Path | None:
 
 
 def download_corpus_results(
-    *, include_head_sha: bool = True
+    *, include_head_sha: bool = True, prefer: str = "standard"
 ) -> tuple[Path, int, str]:
     """Download corpus-results.json from the latest successful corpus-oracle CI run.
 
@@ -488,6 +500,10 @@ def download_corpus_results(
     3. Parse checked-in docs/corpus.md (summary data only)
     4. Exit with helpful error message
 
+    The `prefer` parameter controls which artifact is preferred:
+    - "standard": prefer corpus-report (1k repos, matches README/docs scorecard)
+    - "extended": prefer corpus-report-extended (5k+ repos, more granular)
+
     Returns (path_to_json, run_id, head_sha).
     If include_head_sha is False, head_sha may be empty.
     """
@@ -495,13 +511,13 @@ def download_corpus_results(
     repo = _detect_github_repo()
 
     # Try gh first
-    result = _try_gh(repo)
+    result = _try_gh(repo, prefer=prefer)
     if result:
         _clean_stale_local(project_root)
         return result
 
     # Try curl/API fallback
-    result = _try_curl_api(repo)
+    result = _try_curl_api(repo, prefer=prefer)
     if result:
         _clean_stale_local(project_root)
         return result

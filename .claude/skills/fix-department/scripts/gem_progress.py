@@ -636,13 +636,13 @@ def main():
     if not args.summary and not args.gem:
         args.summary = True
 
-    # Load corpus results
+    # Load corpus results — default to standard corpus (matches README/docs scorecard)
     oracle_sha = ""
     _run_id = 0
     if args.input:
         input_path = args.input
     else:
-        input_path, _run_id, oracle_sha = download_latest_corpus_results()
+        input_path, _run_id, oracle_sha = download_latest_corpus_results(prefer="standard")
 
     data = json.loads(input_path.read_text())
     summary = data["summary"]
