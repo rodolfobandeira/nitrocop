@@ -22,6 +22,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 MANIFEST_PATH = Path(__file__).parent / "manifest.jsonl"
@@ -57,23 +58,37 @@ def graphql(query: str, variables: dict | None = None) -> dict:
     if variables:
         for k, v in variables.items():
             cmd += ["-f", f"{k}={v}"]
-    import time
-    for attempt in range(3):
+    for attempt in range(5):
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            return json.loads(result.stdout)
-        if "502" in result.stderr or "503" in result.stderr:
-            wait = 2 ** attempt
-            print(f"  Retrying in {wait}s (HTTP error)...", file=sys.stderr)
-            time.sleep(wait)
-            continue
-        print(f"GraphQL query failed: {result.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    print(f"GraphQL query failed after 3 retries: {result.stderr.strip()}", file=sys.stderr)
+        if result.returncode != 0:
+            stderr_lower = result.stderr.lower()
+            if "502" in result.stderr or "503" in result.stderr:
+                wait = 2 ** attempt
+                print(f"  Retrying in {wait}s (HTTP error)...", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            if result.returncode == 4 or "403" in result.stderr or "secondary rate limit" in stderr_lower:
+                print(f"  Rate limited, sleeping 60s (attempt {attempt+1}/5)...", file=sys.stderr)
+                time.sleep(60)
+                continue
+            print(f"GraphQL query failed: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        data = json.loads(result.stdout)
+        # Check for rate limit errors in the GraphQL response body
+        errors = data.get("errors", [])
+        if errors:
+            error_msg = " ".join(e.get("message", "") for e in errors).lower()
+            if "rate limit" in error_msg or "abuse" in error_msg:
+                print(f"  Rate limited (GraphQL error), sleeping 60s (attempt {attempt+1}/5)...", file=sys.stderr)
+                time.sleep(60)
+                continue
+        return data
+    print(f"GraphQL query failed after 5 retries: {result.stderr.strip()}", file=sys.stderr)
     sys.exit(1)
 
 
-def search_repos_graphql(count: int, existing_urls: set[str]) -> list[dict]:
+def search_repos_graphql(count: int, existing_urls: set[str], min_stars: int = 50,
+                         resume_path: Path | None = None) -> list[dict]:
     """Search GitHub for Ruby repos with Gemfiles using GraphQL.
 
     Each query fetches up to 100 repos with their default branch SHA and
@@ -88,7 +103,17 @@ def search_repos_graphql(count: int, existing_urls: set[str]) -> list[dict]:
         "stars:500..1000",
         "stars:200..500",
         "stars:100..200",
+        "stars:50..100",
     ]
+
+    # Filter star ranges by min_stars (approximate: skip ranges whose lower bound < min_stars)
+    def lower_bound(sq: str) -> int:
+        """Extract the lower bound from a star range string."""
+        if ">" in sq:
+            return int(sq.split(">")[1])
+        return int(sq.split(":")[1].split("..")[0])
+
+    star_queries = [sq for sq in star_queries if lower_bound(sq) >= min_stars]
 
     for star_range in star_queries:
         if len(results) >= count:
@@ -118,6 +143,7 @@ def search_repos_graphql(count: int, existing_urls: set[str]) -> list[dict]:
   }}
 }}"""
             data = graphql(query)
+            time.sleep(1.0)
             search = data.get("data", {}).get("search", {})
             edges = search.get("edges", [])
             if not edges:
@@ -149,15 +175,21 @@ def search_repos_graphql(count: int, existing_urls: set[str]) -> list[dict]:
 
                 sha = branch_ref["target"]["oid"]
                 owner, repo = slug.split("/", 1)
-                results.append({
+                entry = {
                     "id": make_id(owner, repo, sha),
                     "repo_url": f"https://github.com/{slug}",
                     "sha": sha,
                     "source": "github_stars",
                     "set": "frozen",
                     "notes": f"auto-discovered, {stars} stars",
-                })
+                }
+                results.append(entry)
                 seen.add(normalized)
+                if resume_path is not None:
+                    with open(resume_path, "a") as rf:
+                        rf.write(json.dumps(entry) + "\n")
+                    if len(results) % 50 == 0:
+                        print(f"  Progress: {len(results)} repos saved so far", file=sys.stderr)
                 if len(results) >= count:
                     break
 
@@ -248,13 +280,29 @@ def main():
     parser.add_argument("--count", type=int, default=50, help="Number of repos to discover (with --stars)")
     parser.add_argument("--repo", type=str, help="Add a specific repo by URL")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be added without writing")
+    parser.add_argument("--min-stars", type=int, default=50, help="Minimum star count for --stars mode")
+    parser.add_argument("--output", type=str, default=None, help="Output manifest path (default: manifest.jsonl)")
+    parser.add_argument("--resume", action="store_true", help="Write repos incrementally in --stars mode (survives Ctrl-C)")
     args = parser.parse_args()
 
     if not args.stars and not args.repo:
         parser.error("Specify --stars or --repo")
 
+    output_path = Path(args.output) if args.output else MANIFEST_PATH
+
+    # Load existing entries from the default manifest for dedup.
+    # If --output points elsewhere, also load that file for dedup.
     existing = load_manifest()
     seen_urls = existing_repo_urls(existing)
+    if args.output and output_path != MANIFEST_PATH and output_path.exists():
+        output_entries = []
+        for line in output_path.read_text().splitlines():
+            line = line.strip()
+            if line:
+                output_entries.append(json.loads(line))
+        seen_urls |= existing_repo_urls(output_entries)
+        existing.extend(output_entries)
+
     new_entries: list[dict] = []
 
     if args.repo:
@@ -272,8 +320,17 @@ def main():
                 new_entries.append(entry)
 
     if args.stars:
-        print(f"Searching for top {args.count} new Ruby repos by stars...", file=sys.stderr)
-        new_entries.extend(search_repos_graphql(args.count, seen_urls))
+        print(f"Searching for top {args.count} new Ruby repos by stars (min {args.min_stars} stars)...", file=sys.stderr)
+        resume_path = output_path if args.resume else None
+        try:
+            new_entries.extend(search_repos_graphql(args.count, seen_urls,
+                                                    min_stars=args.min_stars,
+                                                    resume_path=resume_path))
+        except KeyboardInterrupt:
+            print(f"\nInterrupted. {len(new_entries)} repos saved so far.", file=sys.stderr)
+            if args.resume:
+                print(f"Repos written to {output_path}", file=sys.stderr)
+            return
         print(f"Found {len(new_entries)} new repos with Gemfiles", file=sys.stderr)
 
     if not new_entries:
@@ -284,12 +341,16 @@ def main():
         print(f"\nDry run: would add {len(new_entries)} repos:", file=sys.stderr)
         for e in new_entries:
             print(f"  {e['repo_url']} ({e['sha'][:7]}, {e['notes']})", file=sys.stderr)
-    else:
-        with open(MANIFEST_PATH, "a") as f:
+    elif not args.resume:
+        # In resume mode, entries were already written incrementally
+        with open(output_path, "a") as f:
             for e in new_entries:
                 f.write(json.dumps(e) + "\n")
         total = len(existing) + len(new_entries)
-        print(f"\nAdded {len(new_entries)} repos. Manifest now has {total} entries.", file=sys.stderr)
+        print(f"\nAdded {len(new_entries)} repos to {output_path}. Manifest now has {total} entries.", file=sys.stderr)
+    else:
+        total = len(existing) + len(new_entries)
+        print(f"\nAdded {len(new_entries)} repos to {output_path} (resume mode). Manifest now has {total} entries.", file=sys.stderr)
 
 
 if __name__ == "__main__":
