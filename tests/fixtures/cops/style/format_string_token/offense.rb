@@ -17,3 +17,13 @@ v = <<~HEREDOC
   world %{age}
         ^^^^^^ Style/FormatStringToken: Prefer annotated tokens (like `%<foo>s`) over template tokens (like `%{foo}`).
 HEREDOC
+# Template tokens in regular strings used with redirect
+a1 = "admin/customize/watched_words/%{path}"
+                                    ^^^^^^ Style/FormatStringToken: Prefer annotated tokens (like `%<foo>s`) over template tokens (like `%{foo}`).
+a2 = "tag/%{tag_id}"
+          ^^^^^^^^^ Style/FormatStringToken: Prefer annotated tokens (like `%<foo>s`) over template tokens (like `%{foo}`).
+# Unannotated tokens in format context with % operator
+a3 = "items/%s/%s...%s" % [file, ver1, ver2]
+            ^^ Style/FormatStringToken: Prefer annotated tokens (like `%<foo>s`) over unannotated tokens (like `%s`).
+               ^^ Style/FormatStringToken: Prefer annotated tokens (like `%<foo>s`) over unannotated tokens (like `%s`).
+                    ^^ Style/FormatStringToken: Prefer annotated tokens (like `%<foo>s`) over unannotated tokens (like `%s`).

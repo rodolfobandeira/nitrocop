@@ -18,6 +18,19 @@ use std::collections::HashSet;
 ///
 /// Fix: per-token reporting at exact source positions + format context only for top-level
 /// string nodes (not propagated to parts of interpolated strings).
+///
+/// Corpus investigation (FP=26, FN=3):
+/// Three root causes:
+/// 1. Multi-line format-context strings (heredocs, %[] literals): In Parser gem, these become
+///    dstr nodes, so str parts lose format context. Prism keeps them as StringNode, so nitrocop
+///    incorrectly flagged unannotated tokens. Fix: skip format context for strings with newlines.
+/// 2. `%#{var}s` pattern in literal text (single-quoted heredocs): The `#` was treated as a
+///    printf flag, making `{var}` parse as a template token. Fix: negative lookbehind for `#`
+///    before `{` in template token detection, matching RuboCop's `(?<!#)` in TEMPLATE_NAME regex.
+/// 3. AllowedMethods too broad: `collect_all_string_offsets` recursively traversed into nested
+///    CallNodes, suppressing strings whose nearest send ancestor was NOT the allowed method.
+///    Fix: stop traversal at CallNode boundaries (`collect_shallow_string_offsets`), matching
+///    RuboCop's `each_ancestor(:send).first` check.
 pub struct FormatStringToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +142,13 @@ impl FormatStringToken {
                     }
                 } else if j < s.len() && s[j] == b'{' {
                     // Template: %[flags][width][.prec]{name}
+                    // But NOT if preceded by '#' — that's Ruby interpolation #{...}
+                    // matching RuboCop's (?<!#) negative lookbehind in TEMPLATE_NAME regex
+                    if j > 0 && s[j - 1] == b'#' {
+                        // Skip: this is %#{ which is Ruby interpolation, not a format template
+                        i += 1;
+                        continue;
+                    }
                     let mut k = j + 1;
                     let mut has_word_char = false;
                     while k < s.len() && (s[k].is_ascii_alphanumeric() || s[k] == b'_') {
@@ -266,16 +286,18 @@ impl FormatContextCollector<'_> {
         }
     }
 
-    /// Collect start offsets of all string/interpolated-string nodes in a subtree
-    /// (for allowed methods, which suppress all string args regardless of nesting)
-    fn collect_all_string_offsets(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
+    /// Collect string offsets in a subtree, stopping at nested CallNode boundaries.
+    /// This matches RuboCop's `use_allowed_method?` which checks `each_ancestor(:send).first`,
+    /// meaning only the NEAREST send ancestor matters. Strings inside nested method calls
+    /// have a different nearest send ancestor and should NOT be suppressed.
+    fn collect_shallow_string_offsets(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
         if node.as_string_node().is_some() || node.as_interpolated_string_node().is_some() {
             offsets.insert(node.location().start_offset());
         }
-        struct StringCollector<'a> {
+        struct ShallowStringCollector<'a> {
             offsets: &'a mut HashSet<usize>,
         }
-        impl<'pr> Visit<'pr> for StringCollector<'_> {
+        impl<'pr> Visit<'pr> for ShallowStringCollector<'_> {
             fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
                 self.offsets.insert(node.location().start_offset());
                 ruby_prism::visit_string_node(self, node);
@@ -287,8 +309,13 @@ impl FormatContextCollector<'_> {
                 self.offsets.insert(node.location().start_offset());
                 ruby_prism::visit_interpolated_string_node(self, node);
             }
+            fn visit_call_node(&mut self, _node: &ruby_prism::CallNode<'pr>) {
+                // Stop recursion at nested call nodes: strings inside nested
+                // method calls have that call as their nearest send ancestor,
+                // so AllowedMethods should not suppress them.
+            }
         }
-        let mut sc = StringCollector { offsets };
+        let mut sc = ShallowStringCollector { offsets };
         sc.visit(node);
     }
 }
@@ -321,10 +348,11 @@ impl<'pr> Visit<'pr> for FormatContextCollector<'_> {
 
         // Check if any ancestor method is in AllowedMethods
         if self.is_allowed_method(method_name) {
-            // All string arguments to this method should be suppressed
+            // Suppress strings that are direct args (or in non-call subtrees like hashes/arrays),
+            // but NOT strings nested inside other method calls (their nearest send differs).
             if let Some(args) = node.arguments() {
                 for arg in args.arguments().iter() {
-                    Self::collect_all_string_offsets(&arg, self.allowed_method_string_offsets);
+                    Self::collect_shallow_string_offsets(&arg, self.allowed_method_string_offsets);
                 }
             }
         }
@@ -494,11 +522,17 @@ impl<'pr> Visit<'pr> for FormatStringTokenVisitor<'_> {
             return;
         }
 
-        let in_format_context = self.format_context_offsets.contains(&offset);
+        let raw_format_context = self.format_context_offsets.contains(&offset);
 
         // Use content_loc for positional mapping (raw source bytes)
         let content_loc = node.content_loc();
         let content = content_loc.as_slice();
+
+        // Multi-line strings (heredocs, %[...] literals) in format context: in RuboCop's
+        // Parser gem, these become dstr nodes whose str parts lose format context (the
+        // str part's parent is dstr, not the format call). Match this by treating
+        // multi-line format-context strings as NOT in format context.
+        let in_format_context = raw_format_context && !content.contains(&b'\n');
         let content_start = content_loc.start_offset();
 
         self.check_string_content(content, content_start, in_format_context);

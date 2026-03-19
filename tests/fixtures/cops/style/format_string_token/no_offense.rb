@@ -28,3 +28,20 @@ o = "contains %s and %d tokens"
 # Strings inside backtick (xstr) context are skipped
 p = `curl -w '%{http_code}' http://example.com`
 q = `echo %{name} %s`
+# Heredoc used with % operator: unannotated tokens not flagged
+# (RuboCop parses heredocs as dstr, so str parts lose format context)
+r = <<-TEXT % [name, target, score, result, elapsed, verify]
+  block %s
+  target: %s
+  data: '%s' + %s (nonce)
+  found: %s
+  time: %f
+  verify: %f
+TEXT
+# Multi-line %[] string literal with % operator: unannotated tokens not flagged
+# (RuboCop's Parser gem produces dstr for multi-line strings, so parts lose format context)
+s = %[service %s
+  started at %s] % [svc, time]
+# String with interpolation in format specifier: %#{var}s is not a token
+t = format("%#{padding}s: %s", prefix, message)
+u = sprintf("| %-#{width}s | %-#{offset}s |", key, value)
