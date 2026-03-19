@@ -30,3 +30,9 @@ if condition
   result = create :item
            ^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
 end
+
+# Factory call inside lambda body (lambda clears ambiguity)
+trigger: -> { create :user }
+              ^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses
+in_stage(stage, trigger: -> { create :item })
+                              ^^^^^^ FactoryBot/ConsistentParenthesesStyle: Prefer method call with parentheses

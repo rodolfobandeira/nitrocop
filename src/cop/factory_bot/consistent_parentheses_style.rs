@@ -34,6 +34,16 @@ use crate::parse::source::SourceFile;
 /// unconditionally. In Parser AST, else-branch content is a direct child of `if`
 /// (ambiguous), same as the then-branch. Applied same single-statement-CallNode
 /// ambiguity logic to the else branch via `as_else_node()` check.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// Corpus oracle reported FP=0, FN=2. Both FN in decko-commons/decko.
+/// Factory calls (`create`) inside lambda bodies `-> { ... }` nested within
+/// ambiguous contexts (hash values, method arguments) were incorrectly skipped.
+///
+/// FN fix: Added `visit_lambda_node` override to clear `parent_is_ambiguous`.
+/// Lambda bodies are independent contexts (like block bodies and parentheses),
+/// so factory calls inside them should not inherit ambiguity from outer context.
 pub struct ConsistentParenthesesStyle;
 
 impl Cop for ConsistentParenthesesStyle {
@@ -312,6 +322,19 @@ impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
             }
         }
 
+        self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
+        // Lambda bodies are independent contexts (like blocks and parentheses).
+        // Factory calls inside `-> { create :sym }` are not ambiguous even when
+        // the lambda itself appears inside an ambiguous context (assoc, call args).
+        self.parent_is_ambiguous = false;
+        self.ambiguity_kind = None;
+        ruby_prism::visit_lambda_node(self, node);
         self.parent_is_ambiguous = saved;
         self.ambiguity_kind = saved_kind;
     }
