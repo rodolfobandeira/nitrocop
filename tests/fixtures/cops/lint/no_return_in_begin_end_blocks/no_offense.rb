@@ -109,17 +109,6 @@ rescue URI::InvalidURIError
   nil
 end
 
-# FP fix: def with rescue inside a begin..end assignment
-@instance ||= begin
-  def helper_method
-    return 42 if cached?
-    compute_value
-  rescue StandardError
-    nil
-  end
-  MyClass.new
-end
-
 # FP fix: method call block with rescue inside assignment
 result = benchmark("query") do
   Problem.find(params[:id])

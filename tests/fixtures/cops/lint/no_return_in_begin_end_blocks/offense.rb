@@ -156,6 +156,27 @@ class Worker
   end
 end
 
+# Return inside nested def inside begin..end assignment (RuboCop walks into nested defs)
+@instance ||= begin
+  def instance
+    return @instance
+    ^^^^^^ Lint/NoReturnInBeginEndBlocks: Do not `return` in `begin..end` blocks in assignment contexts.
+  end
+  new
+end
+
+# Return inside nested def with rescue inside begin..end assignment
+@cached ||= begin
+  def helper_method
+    return 42 if cached?
+    ^^^^^^ Lint/NoReturnInBeginEndBlocks: Do not `return` in `begin..end` blocks in assignment contexts.
+    compute_value
+  rescue StandardError
+    nil
+  end
+  MyClass.new
+end
+
 # Deeply nested begin inside assignment value (RuboCop's each_node(:kwbegin))
 def fetch_data
   status = Timeout.timeout(600) do

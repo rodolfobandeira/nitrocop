@@ -25,6 +25,17 @@ use ruby_prism::Visit;
 /// resetting `in_begin_assignment` to false, so nested scopes start fresh but
 /// assignments within methods are properly checked.
 ///
+/// ## FN=2 fix (2026-03-19)
+///
+/// 2 remaining FNs from `return` inside nested `def` within `begin..end`
+/// assignment contexts (jruby bench_red_black.rb and gc/redblack.rb pattern:
+/// `@instance ||= begin; def instance; return @instance; end; new; end`).
+/// RuboCop's `each_node(:return)` walks into nested defs without any scope
+/// boundary. The visitor was resetting `in_begin_assignment` to false in
+/// `visit_def_node`, preventing detection. Fix: only reset `in_assignment_value`
+/// (not `in_begin_assignment`) when entering nested defs, matching RuboCop's
+/// behavior of flagging returns at any depth within the begin..end block.
+///
 /// ## FP=19 fix (2026-03-19)
 ///
 /// 19 FPs from `return` inside implicit `BeginNode` from rescue clauses in
@@ -301,14 +312,16 @@ impl<'pr> Visit<'pr> for NoReturnVisitor<'_, '_> {
         }
     }
 
-    // Recurse into methods/classes/modules but reset the begin-assignment
-    // flag so nested scopes start fresh. RuboCop checks for return inside
-    // begin..end assignments regardless of nesting depth.
+    // Recurse into methods/classes/modules but reset the assignment-value
+    // flag so nested scopes start fresh. RuboCop's `each_node(:return)` walks
+    // into nested defs without any scope boundary, so `in_begin_assignment`
+    // must NOT be reset — returns inside nested defs within begin..end
+    // assignment blocks are still flagged.
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        let old = self.in_begin_assignment;
-        self.in_begin_assignment = false;
+        let old = self.in_assignment_value;
+        self.in_assignment_value = false;
         ruby_prism::visit_def_node(self, node);
-        self.in_begin_assignment = old;
+        self.in_assignment_value = old;
     }
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         let old = self.in_begin_assignment;
