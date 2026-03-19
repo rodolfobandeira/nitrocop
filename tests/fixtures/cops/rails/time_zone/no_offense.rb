@@ -53,17 +53,14 @@ Time.utc(Time.now.year, 1, 1)
 Time.now.localtime("+09:00")
 Time.at(time).localtime("+05:30")
 
-# Time.now/local nested inside outer call with safe chain after closing paren
+# Time.now/local nested inside outer Time call with safe chain after closing paren
+# Only safe when the enclosing call's receiver traces to Time (method_from_time_class? gate)
 Time.to_mongo(Time.local(2009, 8, 15, 0, 0, 0)).zone
 Time.parse(date.to_s, Time.now).iso8601
 Time.at(Time.now + (60 * 60 * 24 * 7)).utc
-foo(Time.now).in_time_zone
-bar(Time.local(2023, 1, 1)).to_i
-wrap(Time.now).zone
 
-# Nested parens: inner Time.now inside outer call that has safe chain
+# Nested parens: inner Time.now inside outer Time call that has safe chain
 Time.parse(helper_method(Time.now)).utc
 
-# Safe navigation &. continues the chain (treated like regular . in nitrocop)
-Time.at(val)&.utc
-Time.now&.to_i
+# Non-dangerous Time.XXX inside dangerous enclosing Time call WITH safe chain
+Time.zone.local(year, month, Time.days_in_month(month)).utc

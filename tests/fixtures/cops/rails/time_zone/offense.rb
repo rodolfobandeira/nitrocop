@@ -85,3 +85,27 @@ Time.httpdate((Time.now - 3600).httpdate)
 # String interpolation: literal parens in string text are not Ruby method calls
 "tolerance zone (#{Time.at(ts)})"
                         ^^ Rails/TimeZone: Use `Time.zone.at` instead of `Time.at`.
+
+# Safe navigation &. breaks chain — RuboCop's send_type? excludes csend
+Time.at(val)&.utc
+     ^^ Rails/TimeZone: Use `Time.zone.at` instead of `Time.at`.
+
+Time.now&.to_i
+     ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+# Non-Time receiver in enclosing call — chain doesn't trace to Time
+foo(Time.now).in_time_zone
+         ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+bar(Time.local(2023, 1, 1)).to_i
+         ^^^^^ Rails/TimeZone: Use `Time.zone.local` instead of `Time.local`.
+
+wrap(Time.now).zone
+          ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+ActiveSupport::Duration.build(params.to_time - Time.now).seconds.to_i
+                                                    ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.
+
+# Non-dangerous Time method inside dangerous enclosing Time call
+Time.zone.local(year, month, Time.days_in_month(month))
+                                  ^^^^^^^^^^^^^^ Rails/TimeZone: Use `Time.zone.local` instead of `Time.local`.

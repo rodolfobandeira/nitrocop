@@ -168,18 +168,30 @@ use crate::parse::source::SourceFile;
 /// incorrectly suppressing the offense. Fix: stop backward scan at `#{` boundaries
 /// (return None when `bytes[i] == b'{'` and `bytes[i-1] == b'#'`).
 ///
-/// **Remaining 4 FN (not fixed):**
-/// - feedbin (2): `Time.at(...)&.utc` — safe-navigation `&.` pattern. Previously
-///   attempted removing `&.` support, reverted due to 405 FP regression.
-/// - TracksApp (1): `Time.zone.local(year, month, Time.days_in_month(month))` —
-///   corpus artifact. RuboCop's `on_const` fires on `Time`, but `Time.zone.local`
-///   has `:zone` in GOOD_METHODS → `not_danger_chain?` returns true → no offense.
-///   RuboCop should not flag this; likely a stale corpus data point.
-/// - hackclub (1): `Duration.build(Time.now).seconds.to_i` — `.to_i` is on a
-///   Duration object, not Time. RuboCop's `method_from_time_class?` returns false
-///   for non-Time receivers, so `.to_i` isn't in the chain. Attempted fix with
-///   `is_time_class_receiver` gate caused 675-offense regression (reason unclear,
-///   possibly due to edge cases in the byte-level heuristic). Deferred.
+/// **Previous 4 FN now FIXED (2026-03-19):**
+///
+/// **1. `&.` breaks chain (feedbin, 2 FN):** RuboCop's `extract_method_chain` uses
+/// `node.send_type?` which excludes `csend` (safe navigation). So `Time.at(x)&.utc`
+/// does NOT see `utc` in the chain → offense. Previous attempt was reverted due to
+/// 405 FP, but the current corpus oracle baseline reflects the correct behavior.
+/// Fix: stop `chain_contains_tz_safe_method` at `&.` instead of following it.
+///
+/// **2. `method_from_time_class?` gate (hackclub, 1 FN + 3 fixture corrections):**
+/// `Duration.build(Time.now).seconds.to_i` — `.to_i` is on Duration, not Time.
+/// RuboCop's `method_from_time_class?` returns false for non-Time receivers, so
+/// `.to_i` isn't added to the chain. Fix: added `receiver_traces_to_time()` helper
+/// and gated both the direct method name check AND chain-after-paren check in
+/// `enclosing_call_is_safe_recursive`. Also corrected `foo(Time.now).in_time_zone`,
+/// `bar(Time.local(...)).to_i`, and `wrap(Time.now).zone` from no_offense to
+/// offense — these have non-Time receivers, so the safe chain doesn't apply.
+///
+/// **3. Non-dangerous Time.XXX in dangerous enclosing Time call (TracksApp, 1 FN):**
+/// `Time.zone.local(year, month, Time.days_in_month(month))` — RuboCop's chain
+/// walk goes up from inner `Time` through `days_in_month` to enclosing `local`,
+/// where `method_from_time_class?` confirms the receiver traces to Time. Chain =
+/// `[:days_in_month, :local]`, `:local` is dangerous, no good method → offense.
+/// Fix: added `in_dangerous_time_context()` check for non-dangerous Time methods
+/// that detects enclosing dangerous Time calls without safe chains.
 pub struct TimeZone;
 
 impl Cop for TimeZone {
@@ -244,9 +256,6 @@ impl Cop for TimeZone {
         // Methods that are timezone-unsafe on Time (matches RuboCop's DANGEROUS_METHODS)
         // Note: utc, gm, mktime are NOT dangerous — they already produce UTC times
         let is_unsafe_method = matches!(method, b"now" | b"parse" | b"at" | b"new" | b"local");
-        if !is_unsafe_method {
-            return;
-        }
 
         let recv = match call.receiver() {
             Some(r) => r,
@@ -255,19 +264,41 @@ impl Cop for TimeZone {
         // Handle ConstantReadNode (Time) and ConstantPathNode (::Time) but NOT
         // qualified paths like Some::Time — only unqualified or root-qualified.
         // RuboCop: (const {nil? cbase} :Time)
-        if let Some(cr) = recv.as_constant_read_node() {
-            if cr.name().as_slice() != b"Time" {
-                return;
-            }
+        let is_time_receiver = if let Some(cr) = recv.as_constant_read_node() {
+            cr.name().as_slice() == b"Time"
         } else if let Some(cp) = recv.as_constant_path_node() {
             // ::Time — parent must be None (cbase), not Some::Time
-            if cp.parent().is_some() {
-                return;
-            }
-            if cp.name().map(|n| n.as_slice()) != Some(b"Time") {
-                return;
-            }
+            cp.parent().is_none() && cp.name().map(|n| n.as_slice()) == Some(b"Time")
         } else {
+            false
+        };
+        if !is_time_receiver {
+            return;
+        }
+
+        // Non-dangerous method on Time (e.g., Time.days_in_month) — check if it's
+        // inside a dangerous enclosing Time call. RuboCop's extract_method_chain walks
+        // up through ALL parents, and method_from_time_class? adds the enclosing method
+        // to the chain when the receiver traces to Time. So Time.zone.local(year, month,
+        // Time.days_in_month(month)) has chain [:days_in_month, :local] and :local is
+        // dangerous with no good method → offense.
+        if !is_unsafe_method {
+            let bytes = source.as_bytes();
+            let start = call.location().start_offset();
+            if let Some((dangerous_method, msg_loc)) =
+                in_dangerous_time_context(bytes, start, source)
+            {
+                let (line, column) = source.offset_to_line_col(msg_loc);
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Use `Time.zone.{}` instead of `Time.{}`.",
+                        dangerous_method, dangerous_method
+                    ),
+                ));
+            }
             return;
         }
 
@@ -561,7 +592,13 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
         return false;
     }
 
-    if SAFE_METHODS.contains(&method_name) {
+    // RuboCop's method_from_time_class? gate: only count the enclosing call as
+    // relevant when its receiver chain traces back to `Time`. This prevents
+    // `Duration.build(Time.now).seconds.to_i` from being suppressed (receiver
+    // is Duration, not Time). But `Time.utc(Time.now)` IS suppressed.
+    let receiver_is_time = receiver_traces_to_time(bytes, method_start);
+
+    if receiver_is_time && SAFE_METHODS.contains(&method_name) {
         return true;
     }
 
@@ -574,7 +611,9 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
     // Skip this check when there's a space between method name and `(`:
     // `schedule (Time.now - 60).to_f` — `.to_f` chains on the grouped
     // expression `(Time.now - 60)`, not on the `schedule` call.
-    if !is_spaced_paren {
+    //
+    // Only check when receiver traces to Time (method_from_time_class? gate).
+    if receiver_is_time && !is_spaced_paren {
         let closing_paren = find_matching_close_paren(bytes, paren_pos);
         if let Some(close_pos) = closing_paren {
             if chain_contains_tz_safe_method(bytes, close_pos + 1) {
@@ -666,6 +705,206 @@ fn find_matching_close_paren(bytes: &[u8], open_pos: usize) -> Option<usize> {
     None
 }
 
+/// Check if a non-dangerous Time method call (e.g., Time.days_in_month) is inside
+/// the argument list of a dangerous Time method (e.g., Time.zone.local). Returns
+/// the dangerous method name and the offset of the inner call's message_loc for
+/// the offense location.
+///
+/// RuboCop's extract_method_chain walks up ALL parents, and method_from_time_class?
+/// adds methods when receiver traces to Time. So Time.zone.local(year, month,
+/// Time.days_in_month(month)) has chain [:days_in_month, :local] — :local is
+/// dangerous with no good method → offense on the inner method selector.
+fn in_dangerous_time_context(
+    bytes: &[u8],
+    start: usize,
+    source: &SourceFile,
+) -> Option<(String, usize)> {
+    const DANGEROUS_METHODS: &[&[u8]] = &[b"now", b"parse", b"at", b"new", b"local"];
+    const GOOD_METHODS: &[&[u8]] = &[
+        b"utc",
+        b"getlocal",
+        b"in_time_zone",
+        b"iso8601",
+        b"xmlschema",
+        b"jisx0301",
+        b"rfc3339",
+        b"httpdate",
+        b"to_i",
+        b"to_f",
+        b"zone",
+        b"current",
+    ];
+
+    let paren_pos = find_enclosing_open_paren(bytes, start)?;
+    if paren_pos == 0 {
+        return None;
+    }
+
+    let mut i = paren_pos - 1;
+    // Skip whitespace
+    while i > 0 && bytes[i].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    // Read method name backwards
+    let end_of_method = i;
+    while i > 0
+        && (bytes[i].is_ascii_alphanumeric()
+            || bytes[i] == b'_'
+            || bytes[i] == b'?'
+            || bytes[i] == b'!')
+    {
+        i -= 1;
+    }
+    let method_start = if bytes[i].is_ascii_alphanumeric()
+        || bytes[i] == b'_'
+        || bytes[i] == b'?'
+        || bytes[i] == b'!'
+    {
+        i
+    } else {
+        i + 1
+    };
+    if method_start > end_of_method {
+        return None;
+    }
+    let method_name = &bytes[method_start..=end_of_method];
+
+    // Check gap for newlines/keywords (grouping paren detection)
+    let gap = &bytes[end_of_method + 1..paren_pos];
+    if gap.contains(&b'\n') {
+        return None;
+    }
+
+    // The enclosing method must be dangerous
+    if !DANGEROUS_METHODS.contains(&method_name) {
+        return None;
+    }
+
+    // The enclosing method's receiver must trace to Time
+    if !receiver_traces_to_time(bytes, method_start) {
+        return None;
+    }
+
+    // Check if the chain after the enclosing call's closing paren has a good method
+    // If it does, suppress (e.g., Time.zone.local(..., Time.days_in_month(month)).utc)
+    let closing_paren = find_matching_close_paren(bytes, paren_pos);
+    if let Some(close_pos) = closing_paren {
+        if chain_contains_tz_safe_method(bytes, close_pos + 1) {
+            return None;
+        }
+    }
+
+    // Find the message_loc — use the inner call's message_loc (the method selector
+    // of the non-dangerous method). `start` is the beginning of the inner `Time.XXX`
+    // call. We need to find the `.method_name` part — scan from start past `Time.`
+    // to find the method name.
+    let _ = source; // source not needed for offset calculation
+    let mut msg_pos = start;
+    // Skip past `Time` or `::Time`
+    if msg_pos < bytes.len() && bytes[msg_pos] == b':' {
+        msg_pos += 2; // skip `::`
+    }
+    // Skip `Time`
+    while msg_pos < bytes.len() && bytes[msg_pos].is_ascii_alphanumeric() {
+        msg_pos += 1;
+    }
+    // Skip `.`
+    if msg_pos < bytes.len() && bytes[msg_pos] == b'.' {
+        msg_pos += 1;
+    }
+    // msg_pos now points to the method name start
+
+    let dangerous_name = String::from_utf8_lossy(method_name).to_string();
+    Some((dangerous_name, msg_pos))
+}
+
+/// Check if the receiver chain before a method traces back to `Time` as the root.
+/// Starting at `method_start` (the first byte of the method name), scans backward
+/// past `.method` chains to find the root receiver. Returns true only if the root
+/// is `Time` (or `::Time`).
+///
+/// Examples:
+/// - `Time.utc(` → traces: `.utc` ← `Time` → true
+/// - `Time.zone.local(` → traces: `.local` ← `.zone` ← `Time` → true
+/// - `Duration.build(` → traces: `.build` ← `Duration` → false
+/// - `foo(` → no `.` before `foo` → false
+fn receiver_traces_to_time(bytes: &[u8], method_start: usize) -> bool {
+    if method_start == 0 {
+        return false;
+    }
+    let mut i = method_start - 1;
+
+    // Skip whitespace
+    while i > 0 && bytes[i].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    // Must see `.` before the method name to indicate a receiver chain
+    if bytes[i] != b'.' {
+        return false;
+    }
+
+    // Walk backward through `.method` segments
+    loop {
+        if i == 0 {
+            return false;
+        }
+        i -= 1; // skip the `.`
+
+        // Skip whitespace
+        while i > 0 && bytes[i].is_ascii_whitespace() {
+            i -= 1;
+        }
+
+        // Read identifier backwards
+        let end_of_ident = i;
+        while i > 0
+            && (bytes[i].is_ascii_alphanumeric()
+                || bytes[i] == b'_'
+                || bytes[i] == b'?'
+                || bytes[i] == b'!')
+        {
+            i -= 1;
+        }
+        let ident_start = if bytes[i].is_ascii_alphanumeric()
+            || bytes[i] == b'_'
+            || bytes[i] == b'?'
+            || bytes[i] == b'!'
+        {
+            i
+        } else {
+            i + 1
+        };
+
+        if ident_start > end_of_ident {
+            return false; // no identifier found
+        }
+        let ident = &bytes[ident_start..=end_of_ident];
+
+        // Check what precedes this identifier
+        let before = if ident_start > 0 {
+            bytes[ident_start - 1]
+        } else {
+            b'\0' // start of file
+        };
+
+        if before == b'.' {
+            // Another `.method` in the chain — continue walking
+            i = ident_start - 1;
+            continue;
+        }
+
+        // Check if this identifier is `Time`
+        if ident == b"Time" {
+            // Preceded by start-of-file, whitespace, `(`, `,`, `=`, `::`, operators, etc.
+            return true;
+        }
+        // Not `Time` and no more `.` chain — not a Time receiver
+        return false;
+    }
+}
+
 /// Scan forward through a method chain starting at `pos` in `bytes`, returning
 /// true if any method in the chain is a timezone-safe method. Handles chains
 /// like `.to_datetime.in_time_zone(...)` by following `.method(args)` segments.
@@ -695,15 +934,16 @@ fn chain_contains_tz_safe_method(bytes: &[u8], start: usize) -> bool {
             pos += 1;
         }
 
-        // Must see '.' or '&.' to continue the chain
+        // Must see '.' to continue the chain.
+        // Safe navigation `&.` (csend) breaks the chain — RuboCop's extract_method_chain
+        // uses `node.send_type?` which excludes csend nodes, so `Time.at(x)&.utc` does
+        // NOT see `utc` in the chain and still flags the offense.
         if pos >= bytes.len() || (bytes[pos] != b'.' && bytes[pos] != b'&') {
             return false;
         }
         if bytes[pos] == b'&' {
-            pos += 1;
-            if pos >= bytes.len() || bytes[pos] != b'.' {
-                return false;
-            }
+            // `&.` is safe navigation (csend) — stops the chain walk
+            return false;
         }
         pos += 1; // skip the '.'
 
