@@ -105,6 +105,15 @@ impl SourceFile {
         }
     }
 
+    /// Returns the byte offset of the start of a 1-indexed line.
+    /// Returns 0 if line is out of range.
+    pub fn line_start_offset(&self, line: usize) -> usize {
+        if line == 0 || line > self.line_starts.len() {
+            return 0;
+        }
+        self.line_starts[line - 1]
+    }
+
     pub fn path_str(&self) -> &str {
         self.path.to_str().unwrap_or("<non-utf8 path>")
     }

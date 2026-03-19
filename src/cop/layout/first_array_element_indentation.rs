@@ -502,17 +502,54 @@ fn is_multi_pair_hash(
     }
 
     // Check backward on the opening line: if there's a `,` before the hash key
-    // (after skipping whitespace), it means there's a preceding pair.
+    // (after skipping whitespace), it means there's a preceding pair — but only if
+    // the preceding token is also a hash value (not a positional argument).
+    // We verify by scanning past the preceding value to find another hash key
+    // pattern (ends with `:` for symbol keys, or `=>` for hash-rocket keys).
     if hash_key_col > 0 {
         let mut j = hash_key_col;
         while j > 0 && (open_line_bytes[j - 1] == b' ' || open_line_bytes[j - 1] == b'\t') {
             j -= 1;
         }
         if j > 0 && open_line_bytes[j - 1] == b',' {
-            return true;
+            // Found a comma. Scan backward past the preceding value to check
+            // if it's part of a hash key-value pair (not just a positional arg).
+            j -= 1; // skip the comma
+            while j > 0 && (open_line_bytes[j - 1] == b' ' || open_line_bytes[j - 1] == b'\t') {
+                j -= 1;
+            }
+            let has_preceding_key = has_hash_key_pattern_before(open_line_bytes, j);
+            if has_preceding_key {
+                return true;
+            }
         }
     }
 
+    false
+}
+
+/// Check if there's a hash key pattern (`key:` or `key =>`) somewhere in the
+/// line bytes before position `end`. This is a heuristic to detect whether
+/// content before a comma is part of a hash key-value pair.
+fn has_hash_key_pattern_before(line_bytes: &[u8], end: usize) -> bool {
+    let end = end.min(line_bytes.len());
+    let mut i = end;
+    while i > 0 {
+        i -= 1;
+        if line_bytes[i] == b':'
+            && i > 0
+            && (line_bytes[i - 1].is_ascii_alphanumeric()
+                || line_bytes[i - 1] == b'_'
+                || line_bytes[i - 1] == b'?'
+                || line_bytes[i - 1] == b'!')
+            && (i + 1 >= end || line_bytes[i + 1] != b':')
+        {
+            return true;
+        }
+        if line_bytes[i] == b'>' && i > 0 && line_bytes[i - 1] == b'=' {
+            return true;
+        }
+    }
     false
 }
 
