@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus FN=2 fix: the cop was rejecting bare method calls (CallNode with no
+/// call_operator_loc, e.g. `path`, `options`) as receivers, matching only dotted
+/// calls like `foo.bar`. RuboCop's `(send ...)` pattern matches both bare calls
+/// `(send nil :name)` and dotted calls `(send recv :name)`. Fixed by allowing
+/// CallNode receivers with no call operator (bare method calls) in addition to
+/// dotted calls. Safe navigation chains (`&.`) on the receiver are still excluded.
 pub struct SafeNavigationWithEmpty;
 
 impl Cop for SafeNavigationWithEmpty {
@@ -69,18 +75,20 @@ impl Cop for SafeNavigationWithEmpty {
             None => return,
         };
 
-        // RuboCop only flags when receiver is a regular method call (send node with `.`)
-        // Pattern: (if (csend (send ...) :empty?) ...)
-        // Variables (lvar), ivars, constants, and safe navigation chains (csend) are excluded.
+        // RuboCop pattern: (if (csend (send ...) :empty?) ...)
+        // Receiver must be a send node (CallNode in Prism). This includes both
+        // dotted calls (foo.bar) and bare method calls (path, options) which are
+        // (send nil :name) in RuboCop's AST. Excludes local variables (lvar),
+        // ivars, constants, and safe navigation chains (csend).
         let recv_call = match receiver.as_call_node() {
             Some(c) => c,
             None => return, // receiver is a variable/constant, not a method call
         };
-        // Must be a regular `.` call, not safe navigation `&.`
-        match recv_call.call_operator_loc() {
-            Some(op) if op.as_slice() == b"&." => return, // safe nav chain, skip
-            None => return, // no call operator (e.g., functional call like `foo()`)
-            _ => {}         // regular `.` call — proceed to flag
+        // Exclude safe navigation chains — receiver must be a regular send, not csend
+        if let Some(op) = recv_call.call_operator_loc() {
+            if op.as_slice() == b"&." {
+                return; // safe nav chain (csend), skip
+            }
         }
 
         let loc = call.location();
