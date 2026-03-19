@@ -12,6 +12,17 @@ fn first_non_whitespace_column(line: &[u8]) -> usize {
         .count()
 }
 
+/// Convert a byte offset within a line to a character (codepoint) offset.
+/// Counts non-continuation bytes (bytes where (b & 0xC0) != 0x80) in the
+/// range [0, byte_col). For ASCII-only lines, byte_col == char_col.
+fn byte_col_to_char_col(line_bytes: &[u8], byte_col: usize) -> usize {
+    let end = byte_col.min(line_bytes.len());
+    line_bytes[..end]
+        .iter()
+        .filter(|&&b| (b & 0xC0) != 0x80)
+        .count()
+}
+
 /// Layout/FirstArrayElementIndentation cop.
 ///
 /// ## Investigation findings (2026-03-15)
@@ -75,6 +86,30 @@ fn first_non_whitespace_column(line: &[u8]) -> usize {
 ///    multi-pair hashes. Fix: `is_multi_pair_hash()` checks for `,` + another key
 ///    after `]` or before the hash key on the opening line.
 ///    This fixed ~16 FNs (discourse single-key patterns like `requires_login except: [...]`).
+///
+/// **FP/FN root cause #6 (2026-03-19, 6 FP fixed):** Three sub-causes:
+/// a) Grouping parens misidentified as method call parens: `assert_equal ({...})`
+///    and `([...])` have `(` not preceded by a method name (preceded by space, `{`,
+///    or line start). Fix: `is_grouping_paren` flag in `ParenScanResult` checks
+///    the character before `(`.
+/// b) Ternary `?` between `(` and `[`: `(flag ? [...] : nil)` has a ternary
+///    operator at depth 0. Fix: `?` added to binary operator detection.
+/// c) Byte-vs-char column mismatch: `open_col` was character-based but used as
+///    byte index in `find_left_paren_on_line` and `find_hash_key_column`. For
+///    multi-byte UTF-8 chars (e.g., `á` in oga repo), the byte scan started at
+///    the wrong position, missing the `(`. Fix: compute `open_byte_col` from
+///    byte offset arithmetic; convert results back with `byte_col_to_char_col`.
+/// d) Hash-value array closing bracket: for arrays that are hash values, RuboCop
+///    accepts the closing bracket at line-indent level even when paren-relative
+///    is used for elements. Fix: added exemption.
+///
+/// **Remaining FNs (12):** Multi-pair hash arrays (ManageIQ, puppetlabs) where
+/// RuboCop requires hash-key-relative as PRIMARY indentation but nitrocop uses
+/// line/paren-relative. Making hash-key-relative primary caused ~600 FPs in the
+/// corpus (many cases where paren-relative takes precedence). Empty array closing
+/// bracket checks (markevans, gel-rb, jruby, natalie) caused similar FP regression.
+/// These patterns need a more nuanced approach to `is_multi_pair_hash` that
+/// distinguishes same-line vs cross-line closing bracket + next pair layouts.
 pub struct FirstArrayElementIndentation;
 
 /// Describes what the expected indentation is relative to.
@@ -96,9 +131,13 @@ struct ParenScanResult {
     /// indicating the array is nested inside a hash literal.
     has_unmatched_brace: bool,
     /// Whether there is a binary operator (`+`, `-`, `*`, `/`, `|`, `&`, `^`)
-    /// at depth 0 between `(` and `[`, indicating the `(` is a grouping
-    /// paren and the array is part of an expression (e.g., `(CONST + [...])`).
+    /// or ternary `?` at depth 0 between `(` and `[`, indicating the `(` is a
+    /// grouping paren and the array is part of an expression.
     has_binary_operator_at_depth_zero: bool,
+    /// Whether the `(` is a grouping paren (not preceded by a method name).
+    /// True when `(` is preceded by a non-word character (space, `{`, operator,
+    /// start of line) rather than an identifier char.
+    is_grouping_paren: bool,
 }
 
 /// Scan backwards from `bracket_col` on `line_bytes` to find an unmatched `(`
@@ -139,10 +178,26 @@ fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> ParenScanRe
             b')' => paren_depth += 1,
             b'(' => {
                 if paren_depth == 0 {
+                    // Check if `(` is a grouping paren by examining what precedes it.
+                    // A method call paren is preceded by a word char (identifier).
+                    // A grouping paren is preceded by a non-word char (space, `{`, operator, etc.)
+                    // or is at the start of the line.
+                    let is_grouping = if i == 0 {
+                        true
+                    } else {
+                        let prev = line_bytes[i - 1];
+                        !(prev.is_ascii_alphanumeric()
+                            || prev == b'_'
+                            || prev == b'!'
+                            || prev == b'?'
+                            || prev == b']'
+                            || prev == b')')
+                    };
                     return ParenScanResult {
                         paren_col: Some(i),
                         has_unmatched_brace,
                         has_binary_operator_at_depth_zero: has_binary_op,
+                        is_grouping_paren: is_grouping,
                     };
                 }
                 paren_depth -= 1;
@@ -161,9 +216,10 @@ fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> ParenScanRe
                     has_unmatched_brace = true;
                 }
             }
-            // Detect binary operators at depth 0 (not inside nested parens/brackets/braces).
-            // These indicate the `(` is a grouping paren, e.g., `(CONST + [...])`.
-            b'+' | b'/' | b'|' | b'&' | b'^'
+            // Detect binary/ternary operators at depth 0 (not inside nested parens/brackets/braces).
+            // These indicate the `(` is a grouping paren, e.g., `(CONST + [...])` or
+            // `(flag ? [...] : nil)`.
+            b'+' | b'/' | b'|' | b'&' | b'^' | b'?'
                 if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
             {
                 has_binary_op = true;
@@ -191,6 +247,7 @@ fn find_left_paren_on_line(line_bytes: &[u8], bracket_col: usize) -> ParenScanRe
         paren_col: None,
         has_unmatched_brace,
         has_binary_operator_at_depth_zero: has_binary_op,
+        is_grouping_paren: false,
     }
 }
 
@@ -492,16 +549,13 @@ impl Cop for FirstArrayElementIndentation {
             return;
         }
 
-        let first_element = &elements[0];
-
         let (open_line, _) = source.offset_to_line_col(opening_loc.start_offset());
-        let first_loc = first_element.location();
-        let (elem_line, elem_col) = source.offset_to_line_col(first_loc.start_offset());
 
-        // Skip if first element is on same line as opening bracket
-        if elem_line == open_line {
-            return;
-        }
+        // Compute byte offset within the line for the opening bracket.
+        // This is needed because find_left_paren_on_line and find_hash_key_column
+        // operate on bytes, but offset_to_line_col returns character columns.
+        // For multi-byte UTF-8 chars, char_col < byte_col.
+        let open_byte_col = opening_loc.start_offset() - source.line_start_offset(open_line);
 
         let style = config.get_str("EnforcedStyle", "special_inside_parentheses");
         let width = config.get_usize("IndentationWidth", 2);
@@ -512,52 +566,9 @@ impl Cop for FirstArrayElementIndentation {
         let (_, open_col) = source.offset_to_line_col(opening_loc.start_offset());
 
         // Check if `[` is preceded by a hash key on the same line.
-        let hash_key_col = find_hash_key_column(open_line_bytes, open_col);
-
-        // Compute the indent base column (before adding width) and its type.
-        // The first element should be at `indent_base + width`.
-        // The closing bracket should be at `indent_base`.
-        let (indent_base, base_type) = match style {
-            "consistent" => (open_line_indent, IndentBaseType::StartOfLine),
-            "align_brackets" => (open_col, IndentBaseType::LeftBracket),
-            _ => {
-                // "special_inside_parentheses" (default):
-                let closing_end = array_node
-                    .closing_loc()
-                    .map(|loc| loc.end_offset())
-                    .unwrap_or(0);
-
-                let paren_scan = find_left_paren_on_line(open_line_bytes, open_col);
-                if let Some(paren_col) = paren_scan.paren_col {
-                    // If the `[` is on the same line as a method call's `(`,
-                    // indent relative to the position after `(`, unless:
-                    // - The `[` is preceded by a `%` operator
-                    // - There's a binary operator between `(` and `[` at depth 0
-                    //   (indicating grouping parens, not method call parens)
-                    // - The array (or enclosing hash) is part of a chain or expression
-                    let use_paren_relative =
-                        !is_preceded_by_percent_operator(open_line_bytes, open_col)
-                            && !paren_scan.has_binary_operator_at_depth_zero
-                            && is_direct_argument(
-                                source.as_bytes(),
-                                closing_end,
-                                paren_scan.has_unmatched_brace,
-                            );
-                    if use_paren_relative {
-                        (
-                            paren_col + 1,
-                            IndentBaseType::FirstColumnAfterLeftParenthesis,
-                        )
-                    } else {
-                        (open_line_indent, IndentBaseType::StartOfLine)
-                    }
-                } else {
-                    (open_line_indent, IndentBaseType::StartOfLine)
-                }
-            }
-        };
-
-        let expected_elem = indent_base + width;
+        // Uses byte offset for scanning; converts result to char offset.
+        let hash_key_byte_col = find_hash_key_column(open_line_bytes, open_byte_col);
+        let hash_key_col = hash_key_byte_col.map(|bc| byte_col_to_char_col(open_line_bytes, bc));
 
         // Compute closing_end for multi-pair hash detection
         let closing_end_offset = array_node
@@ -565,39 +576,86 @@ impl Cop for FirstArrayElementIndentation {
             .map(|loc| loc.end_offset())
             .unwrap_or(0);
 
-        if elem_col != expected_elem {
-            // Check if indentation matches hash-key-relative style.
-            // RuboCop accepts elements indented relative to the parent
-            // hash key when the array is a hash value, but ONLY for
-            // multi-pair hashes (not single-pair like `method key: [...]`).
-            let matches_hash_key = hash_key_col.is_some_and(|key_col| {
-                elem_col == key_col + width
-                    && is_multi_pair_hash(
-                        source.as_bytes(),
-                        closing_end_offset,
-                        open_line_bytes,
-                        key_col,
-                    )
-            });
-            if !matches_hash_key {
-                let base_description = match base_type {
-                    IndentBaseType::LeftBracket => "the position of the opening bracket",
-                    IndentBaseType::FirstColumnAfterLeftParenthesis => {
-                        "the first position after the preceding left parenthesis"
+        // Compute the indent base column (before adding width) and its type.
+        let (indent_base, base_type) = {
+            match style {
+                "consistent" => (open_line_indent, IndentBaseType::StartOfLine),
+                "align_brackets" => (open_col, IndentBaseType::LeftBracket),
+                _ => {
+                    // "special_inside_parentheses" (default):
+                    let paren_scan = find_left_paren_on_line(open_line_bytes, open_byte_col);
+                    if let Some(paren_byte_col) = paren_scan.paren_col {
+                        let paren_col = byte_col_to_char_col(open_line_bytes, paren_byte_col);
+                        let use_paren_relative =
+                            !is_preceded_by_percent_operator(open_line_bytes, open_byte_col)
+                                && !paren_scan.has_binary_operator_at_depth_zero
+                                && !paren_scan.is_grouping_paren
+                                && is_direct_argument(
+                                    source.as_bytes(),
+                                    closing_end_offset,
+                                    paren_scan.has_unmatched_brace,
+                                );
+                        if use_paren_relative {
+                            (
+                                paren_col + 1,
+                                IndentBaseType::FirstColumnAfterLeftParenthesis,
+                            )
+                        } else {
+                            (open_line_indent, IndentBaseType::StartOfLine)
+                        }
+                    } else {
+                        (open_line_indent, IndentBaseType::StartOfLine)
                     }
-                    IndentBaseType::StartOfLine => {
-                        "the start of the line where the left square bracket is"
+                }
+            }
+        };
+
+        // Check first element indentation (only if array has elements)
+        if !elements.is_empty() {
+            let first_element = &elements[0];
+            let first_loc = first_element.location();
+            let (elem_line, elem_col) = source.offset_to_line_col(first_loc.start_offset());
+
+            // Skip if first element is on same line as opening bracket
+            if elem_line != open_line {
+                let expected_elem = indent_base + width;
+
+                if elem_col != expected_elem {
+                    // Check if indentation matches hash-key-relative style.
+                    // RuboCop accepts elements indented relative to the parent
+                    // hash key when the array is a hash value in a multi-pair hash.
+                    let matches_hash_key = hash_key_col.is_some_and(|key_col| {
+                        elem_col == key_col + width
+                            && hash_key_byte_col.is_some_and(|key_bc| {
+                                is_multi_pair_hash(
+                                    source.as_bytes(),
+                                    closing_end_offset,
+                                    open_line_bytes,
+                                    key_bc,
+                                )
+                            })
+                    });
+                    if !matches_hash_key {
+                        let base_description = match base_type {
+                            IndentBaseType::LeftBracket => "the position of the opening bracket",
+                            IndentBaseType::FirstColumnAfterLeftParenthesis => {
+                                "the first position after the preceding left parenthesis"
+                            }
+                            IndentBaseType::StartOfLine => {
+                                "the start of the line where the left square bracket is"
+                            }
+                        };
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            elem_line,
+                            elem_col,
+                            format!(
+                                "Use {} spaces for indentation in an array, relative to {}.",
+                                width, base_description
+                            ),
+                        ));
                     }
-                };
-                diagnostics.push(self.diagnostic(
-                    source,
-                    elem_line,
-                    elem_col,
-                    format!(
-                        "Use {} spaces for indentation in an array, relative to {}.",
-                        width, base_description
-                    ),
-                ));
+                }
             }
         }
 
@@ -605,12 +663,22 @@ impl Cop for FirstArrayElementIndentation {
         if let Some(closing_loc) = array_node.closing_loc() {
             let (close_line, close_col) = source.offset_to_line_col(closing_loc.start_offset());
 
-            // Only check if the closing bracket is on its own line
-            // (no non-whitespace characters before it on that line)
+            // Only check if the closing bracket is on a different line from
+            // the opening bracket and on its own line (only whitespace before it)
+            if close_line == open_line {
+                return;
+            }
+
+            // For empty arrays, also skip if closing is on the line right after opening
+            // and elements exist on the same line as opening (handled by elem_line == open_line above)
             let close_line_bytes = source.lines().nth(close_line - 1).unwrap_or(b"");
             let only_whitespace_before = close_line_bytes[..close_col.min(close_line_bytes.len())]
                 .iter()
                 .all(|&b| b == b' ' || b == b'\t');
+
+            if !only_whitespace_before {
+                return;
+            }
 
             // For StartOfLine, compare using first_non_whitespace_column instead
             // of character column — this matches RuboCop's `source_line =~ /\S/`
@@ -620,17 +688,36 @@ impl Cop for FirstArrayElementIndentation {
                 _ => close_col,
             };
 
-            if only_whitespace_before && effective_close_col != indent_base {
+            if effective_close_col != indent_base {
+                // For single-pair hash value arrays, accept closing bracket at
+                // line-indent level. RuboCop doesn't flag closing brackets for
+                // arrays that are single-pair hash values.
+                let is_multi_pair = hash_key_byte_col.is_some_and(|key_bc| {
+                    is_multi_pair_hash(
+                        source.as_bytes(),
+                        closing_end_offset,
+                        open_line_bytes,
+                        key_bc,
+                    )
+                });
+                if hash_key_col.is_some()
+                    && !is_multi_pair
+                    && effective_close_col == open_line_indent
+                {
+                    return;
+                }
                 // Check if closing bracket matches hash-key-relative style
                 // (only for multi-pair hashes).
                 let matches_hash_key = hash_key_col.is_some_and(|key_col| {
                     effective_close_col == key_col
-                        && is_multi_pair_hash(
-                            source.as_bytes(),
-                            closing_end_offset,
-                            open_line_bytes,
-                            key_col,
-                        )
+                        && hash_key_byte_col.is_some_and(|key_bc| {
+                            is_multi_pair_hash(
+                                source.as_bytes(),
+                                closing_end_offset,
+                                open_line_bytes,
+                                key_bc,
+                            )
+                        })
                 });
                 if !matches_hash_key {
                     let msg = match base_type {

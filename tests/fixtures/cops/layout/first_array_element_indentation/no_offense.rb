@@ -161,3 +161,26 @@ List.new(:BULLET, *[
            ListItem.new(nil, Paragraph.new('l1')),
            ListItem.new(nil, Paragraph.new('l2'))
          ])
+
+# FP fix: Grouping paren with space before ( — hash value array (line-relative)
+assert_equal ({ "attributes" => [
+  { "key" => "content", "value" => "old" },
+  { "key" => "title",   "value" => "old" }
+] }), record.data
+
+# FP fix: Ternary ? between ( and [ — grouping paren (line-relative)
+result = (flag ? [
+  { name: item, path: resolve(item) }.compact
+] : nil)
+
+# FP fix: Grouping paren ([ — no method name before paren (line-relative)
+    handler { ([
+      { token: 'user', email: 'user@test.com' },
+      { token: 'admin', email: 'admin@test.com' }
+    ]) }
+
+# FP fix: Single-pair hash value — closing bracket at line indent accepted
+expect(client.search body: [
+         { index: 'foo', query: { match_all: {} } },
+         { index: 'bar', query: { match: { foo: 'bar' } } }
+])
