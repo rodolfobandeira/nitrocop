@@ -10,6 +10,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-19): 3 FP fixed.
+/// - 2 FP from `n.times { create(:factory, key:) }` where `key:` is Ruby 3.1+
+///   value omission. RuboCop skips these because `create_list` can't preserve
+///   the shorthand syntax. Fix: skip when any trailing arg has value omission.
+/// - 1 FP from array literal `[create(...), create(...) { block }]` where one
+///   element has a block and the other doesn't. These aren't truly identical calls.
+///   Fix: check consistent block presence across all array elements.
 pub struct CreateList;
 
 impl Cop for CreateList {
@@ -105,6 +112,15 @@ impl CreateList {
                 return Vec::new();
             }
             create_calls.push(call);
+        }
+
+        // All create calls must have consistent block presence (all or none)
+        let first_has_block = create_calls[0].block().is_some();
+        if create_calls[1..]
+            .iter()
+            .any(|c| c.block().is_some() != first_has_block)
+        {
+            return Vec::new();
         }
 
         // All create calls must have the same source representation of arguments
@@ -210,11 +226,10 @@ impl CreateList {
             return Vec::new();
         }
 
-        // Check if arguments include value omission (Ruby 3.1+ `key:` shorthand).
-        // Keep RuboCop parity by allowing the simple single-key omission form
-        // (e.g., `create(:role_appointment, person:)`) while skipping broader
-        // omission patterns that still diverge in corpus.
-        if should_skip_for_value_omission(&arg_list) {
+        // Check if arguments include any value omission (Ruby 3.1+ `key:` shorthand).
+        // RuboCop skips n.times blocks when create args use value omission because
+        // create_list can't preserve the shorthand syntax correctly.
+        if has_any_value_omission(&arg_list[1..]) {
             return Vec::new();
         }
 
@@ -468,29 +483,6 @@ fn contains_send_node(node: &ruby_prism::Node<'_>) -> bool {
     }
 
     false
-}
-
-/// Return true when value omission should suppress an offense.
-///
-/// RuboCop flags the simple single-key omission form:
-///   create(:role_appointment, person:)
-/// but still skips broader omission forms mixed with other keys.
-fn should_skip_for_value_omission(args: &[ruby_prism::Node<'_>]) -> bool {
-    let trailing = &args[1..];
-    if trailing.len() != 1 {
-        return has_any_value_omission(trailing);
-    }
-
-    let Some((assoc_count, implicit_count)) = hash_assoc_counts(&trailing[0]) else {
-        return has_any_value_omission(trailing);
-    };
-
-    if implicit_count == 0 {
-        return false;
-    }
-
-    // Keep only the narrow single-implicit-key form as offense.
-    !(assoc_count == 1 && implicit_count == 1)
 }
 
 fn has_any_value_omission(args: &[ruby_prism::Node<'_>]) -> bool {

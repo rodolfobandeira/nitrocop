@@ -21,3 +21,11 @@ end
 # Array.new with create containing array args with method calls
 records = Array.new(3) { FactoryBot.create(:record, :tag_ids => [@tag.id]) }
 items = Array.new(5) { create(:item, names: [user.name]) }
+# n.times with value omission should not be flagged
+3.times { create(:subscription, customer:) }
+2.times { create(:subscription, customer:) }
+2.times.map do
+  create(:role_appointment, person:)
+end
+# Array with create calls where one has a block and the other does not
+[create(:invoice, organization:), create(:invoice, organization:) { |i| create(:metadata, invoice: i) }]
