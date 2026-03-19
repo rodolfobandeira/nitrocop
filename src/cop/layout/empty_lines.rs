@@ -90,41 +90,33 @@ use crate::parse::source::SourceFile;
 ///    fire. Fix: removed `|| *line == [b'\r']` from the `is_blank` check.
 ///    Only truly empty lines (zero bytes after splitting on `\n`) are blank.
 ///
-/// ## Corpus investigation (2026-03-18, FN=19 remaining)
+/// ## Corpus investigation (2026-03-19, FP=13 + FN=21 fix)
 ///
-/// Two root causes identified:
+/// Two root causes:
 ///
-/// 1. **`__END__` marker not in token set** (~4 FN from danlucraft/redcar,
-///    rubyworks/facets). RuboCop's Parser gem includes `__END__` as a
-///    `k__END__` token, so its line is in the token set. nitrocop's
-///    `last_token_line` didn't include the `__END__` line, causing blank
-///    lines between code and `__END__` to be skipped.
-///    Fix: include `parse_result.data_loc()` start line in `last_token_line`.
+/// 1. **FP=13: `__END__` included in `last_token_line`**. All 13 FPs were
+///    consecutive blank lines between last code and `__END__`. The previous
+///    fix included `__END__` (via `data_loc`) in `last_token_line`, but
+///    RuboCop 1.84.2 with Prism does NOT include `__END__` as a token in
+///    `processed_source.tokens`. Blank lines before `__END__` are past the
+///    last token and are never checked.
+///    Fix: removed `end_marker_line` from `last_token_line`.
 ///
-/// 2. **`=begin`/`=end` embdoc handling** (~11 FN from eventmachine,
-///    danlucraft, louismullie, urbanadventurer, facets). Previous fix
-///    (2026-03-17 "FP=173") unconditionally skipped all lines inside
-///    `=begin`/`=end` blocks via `in_embdoc` tracking. But RuboCop's
-///    `processed_source.tokens` does NOT include `=begin`/`=end` content
-///    (embdoc is captured separately, not as tokens). When there's code
-///    both before AND after a `=begin`/`=end` block, the token gap spans
-///    the block, and `previous_and_current_lines_empty?` fires on
-///    consecutive blank lines inside. When there's NO code after `=end`,
-///    the block falls past the last token line and is naturally skipped.
-///    Fix: removed `in_embdoc` tracking. Excluded `=begin`/`=end` comments
-///    from `last_comment_line` (since they're not in the Parser gem's token
-///    stream). The `last_token_line` check now naturally handles both cases.
-///    Note: the previous "FP=173" investigation incorrectly concluded
-///    that RuboCop never flags inside `=begin`/`=end`. The 125 FPs were
-///    from files with NO code after `=end` (where the embdoc comment
-///    extended `last_token_line` incorrectly), not from the embdoc skip.
+/// 2. **FN=20: `=begin` excluded from `last_comment_line`**. Previous code
+///    excluded `=begin` block comments from `last_comment_line`. But the
+///    `=begin` line extends the token range, so blank lines between code
+///    and `=begin` should be checked.
+///    Fix: include the `=begin` START line in `last_comment_line`. Track
+///    `in_embdoc` state during line iteration to skip lines inside
+///    `=begin`/`=end` blocks. Tested including embdoc end lines (to check
+///    blanks inside), but this caused 141 new FPs — so embdoc interiors
+///    remain skipped.
 ///
-/// Remaining ~4 FN: louismullie agnostic.rb:108 (inside `=begin`/`=end`
-/// with no code after final `=end`), BubbleWrap player_spec.rb:44,
-/// and possibly WhatWeb minify.rb entries where the Parser gem may
-/// tokenize `=begin`/`=end` content differently than Prism. These
-/// require further investigation into Parser gem vs Prism comment
-/// handling differences.
+/// Remaining FN=1: louismullie/treat agnostic.rb:108. Blank line between
+/// code tokens that are inside a large `=begin`/`=end` block (lines 89-183).
+/// The embdoc skip prevents checking interior blank lines. RuboCop handles
+/// this differently (possibly via individual embdoc line tokens), but
+/// including embdoc end lines regresses 141 other locations.
 pub struct EmptyLines;
 
 impl Cop for EmptyLines {
@@ -151,13 +143,15 @@ impl Cop for EmptyLines {
         // tokens at all get early return, and blank lines after the last
         // token line are never checked.
         //
-        // IMPORTANT: `=begin`/`=end` (embdoc) block comments are NOT in the
-        // Parser gem's token stream — they're captured separately as
-        // `Parser::Source::Comment` objects. So embdoc lines are NOT
-        // token-bearing. This means blank lines inside `=begin`/`=end` are
-        // checked only if they fall within a gap between code token lines.
-        // If there's no code after `=end`, the block's blank lines are
-        // naturally skipped because they're past the last token line.
+        // With Prism (used by RuboCop 1.84.2+), `=begin`/`=end` blocks produce
+        // EMBDOC tokens. The `=begin` line extends the token range, so blank
+        // lines between code and `=begin` are checked. Interior lines are
+        // skipped via `in_embdoc` tracking — including embdoc end lines in
+        // `last_token_line` causes 141 FPs in the corpus.
+        //
+        // `__END__` is NOT a token in Prism's lexer, so it does not extend
+        // the token range. Blank lines before `__END__` are past the last
+        // token and are never checked.
         let program_node = parse_result.node();
         let program_loc = program_node.location();
 
@@ -171,38 +165,33 @@ impl Cop for EmptyLines {
             0
         };
 
-        // Find the last inline (#) comment line (1-indexed), or 0 if none.
-        // Exclude =begin/=end block comments — they don't produce tokens in
-        // RuboCop's Parser gem and should not extend the token range.
+        // Find the last comment line (1-indexed), or 0 if none.
+        // For inline (#) comments, use the end offset (they're single-line).
+        // For =begin/=end block comments, use the START offset (the =begin line).
+        // Prism produces EMBDOC_BEGIN/EMBDOC_LINE/EMBDOC_END tokens for these,
+        // so the =begin line IS in the token set. Using the start line extends
+        // last_token_line just enough to check blank lines before =begin, while
+        // interior/=end lines are handled by in_embdoc tracking.
         let mut last_comment_line: usize = 0;
         for comment in parse_result.comments() {
             let loc = comment.location();
-            // Skip =begin/=end block comments (embdoc).
-            if loc.as_slice().starts_with(b"=begin") {
-                continue;
-            }
-            let (line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+            let line = if loc.as_slice().starts_with(b"=begin") {
+                // Use start line for embdoc blocks.
+                let (l, _) = source.offset_to_line_col(loc.start_offset());
+                l
+            } else {
+                let (l, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+                l
+            };
             if line > last_comment_line {
                 last_comment_line = line;
             }
         }
 
-        // Find the __END__ marker line (1-indexed), or 0 if no __END__.
-        // In RuboCop's Parser gem, `__END__` is a `k__END__` token, so its
-        // line is in the token set. Blank lines between code/comments and
-        // `__END__` are checked for consecutive blanks.
-        let end_marker_line = if let Some(data_loc) = parse_result.data_loc() {
-            // data_loc starts at `__END__\n`, so the line of the marker itself
-            // is at the start offset.
-            let (line, _) = source.offset_to_line_col(data_loc.start_offset());
-            line
-        } else {
-            0
-        };
-
-        // The last token line is the max of code, inline comment, and __END__ lines.
-        // If all are 0, there are no tokens at all — early return.
-        let last_token_line = last_code_line.max(last_comment_line).max(end_marker_line);
+        // The last token line is the max of code and comment lines.
+        // __END__ is NOT a token in Prism's lexer, so it's excluded.
+        // If both are 0, there are no tokens at all — early return.
+        let last_token_line = last_code_line.max(last_comment_line);
         if last_token_line == 0 {
             return;
         }
@@ -214,12 +203,59 @@ impl Cop for EmptyLines {
         let lines: Vec<&[u8]> = source.lines().collect();
         let total_lines = lines.len();
         let mut seen_non_blank = false;
+        let mut in_embdoc = false;
         // Track byte offsets of leading blank lines for deferred emission.
         let mut leading_blank_offsets: Vec<(usize, usize, usize)> = Vec::new();
 
         for (i, line) in lines.iter().enumerate() {
             let line_len = line.len() + 1; // +1 for newline
             let current_line = i + 1; // 1-indexed
+
+            // Track =begin/=end (embdoc) blocks. Skip all lines inside.
+            // The =begin START line extends last_token_line (so blank lines
+            // before =begin are checked), but interior and =end lines are
+            // skipped because including them causes FPs (141 excess offenses
+            // in corpus when embdoc end lines extend last_token_line).
+            if in_embdoc {
+                if line.starts_with(b"=end") {
+                    in_embdoc = false;
+                    // Reset consecutive_blanks: the embdoc block acts as a
+                    // non-blank separator between lines before and after.
+                    consecutive_blanks = 0;
+                }
+                byte_offset += line_len;
+                continue;
+            }
+            if line.starts_with(b"=begin") {
+                // Before entering embdoc, handle deferred leading blank emission
+                // if this is the first non-blank content.
+                if !seen_non_blank && consecutive_blanks >= max + 2 {
+                    for &(ln, off, ll) in &leading_blank_offsets[1..] {
+                        let mut diag = self.diagnostic(
+                            source,
+                            ln,
+                            0,
+                            "Extra blank line detected.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: off,
+                                end: off + ll,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                }
+                seen_non_blank = true;
+                consecutive_blanks = 0;
+                in_embdoc = true;
+                byte_offset += line_len;
+                continue;
+            }
 
             // A line is "blank" only if it's truly empty (zero bytes after \n).
             // RuboCop's quick check `raw_source.include?("\n\n\n")` fails for
@@ -489,53 +525,35 @@ mod tests {
     }
 
     #[test]
-    fn fire_blanks_in_begin_end_with_code_after() {
-        // =begin/=end blocks are NOT in RuboCop's token stream (they're
-        // captured separately as Parser::Source::Comment objects). When there's
-        // code after =end, the gap between prev_line=1 and the first code
-        // token after =end exceeds LINE_OFFSET, so the interior lines are
-        // checked. Consecutive blank lines inside the block ARE flagged.
+    fn skip_blanks_inside_begin_end_with_code_after() {
+        // Embdoc blocks are skipped entirely. Blank lines inside =begin/=end
+        // do not fire, even with code after. Including embdoc end lines in
+        // last_token_line causes 141 FPs in the corpus, so we skip them.
         let source = b"=begin\nsome docs\n\n\nmore docs\n=end\nx = 1\n";
-        let diags = run_cop_full(&EmptyLines, source);
-        assert_eq!(
-            diags.len(),
-            1,
-            "Should fire on consecutive blank lines inside =begin/=end when code follows: {:?}",
-            diags
-        );
-    }
-
-    #[test]
-    fn skip_single_blank_in_begin_end_block() {
-        // Single blank line inside =begin/=end is fine (not consecutive).
-        let source = b"=begin\nsome docs\n\nmore docs\n=end\nx = 1\n";
         let diags = run_cop_full(&EmptyLines, source);
         assert!(
             diags.is_empty(),
-            "Should not fire on single blank line inside =begin/=end: {:?}",
+            "Should NOT fire on blank lines inside =begin/=end: {:?}",
             diags
         );
     }
 
     #[test]
-    fn fire_many_blanks_in_begin_end_with_code_after() {
+    fn skip_many_blanks_inside_begin_end_with_code_after() {
         // Multiple consecutive blank lines inside =begin/=end with code after.
-        // RuboCop checks interior lines via the token gap and fires on each
-        // pair where both prev and current lines are empty.
+        // All embdoc interior lines are skipped.
         let source = b"=begin\n\n\n\n\n=end\nx = 1\n";
         let diags = run_cop_full(&EmptyLines, source);
-        assert_eq!(
-            diags.len(),
-            3,
-            "Should fire 3 times on 4 blank lines inside =begin/=end with code after: {:?}",
+        assert!(
+            diags.is_empty(),
+            "Should NOT fire on blank lines inside =begin/=end with code after: {:?}",
             diags
         );
     }
 
     #[test]
     fn skip_blanks_in_begin_end_no_code_after() {
-        // When there's no code after =end, the entire block is past the
-        // last token line and blank lines are not checked.
+        // Embdoc blocks are skipped entirely. Blank lines inside are not checked.
         let source = b"x = 1\n=begin\n\n\n\n\n=end\n";
         let diags = run_cop_full(&EmptyLines, source);
         assert!(
@@ -557,6 +575,33 @@ mod tests {
     }
 
     #[test]
+    fn fire_blanks_before_begin_end() {
+        // Consecutive blank lines between code and =begin should fire.
+        // The =begin line is a token in Prism, extending the token range.
+        let source = b"x = 1\n\n\n=begin\nsome docs\n=end\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should fire on consecutive blank lines before =begin: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn fire_many_blanks_before_begin_end() {
+        // Multiple consecutive blanks before =begin, no code after =end.
+        let source = b"x = 1\n\n\n\n=begin\nmore docs\n=end\n";
+        let diags = run_cop_full(&EmptyLines, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "Should fire 2 times on 3 blank lines before =begin: {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn skip_blanks_crlf_line_endings() {
         // RuboCop's quick check `raw_source.include?("\n\n\n")` fails for
         // CRLF files because blank lines are `\r\n\r\n` (no triple \n).
@@ -572,15 +617,14 @@ mod tests {
     }
 
     #[test]
-    fn fire_blanks_before_end_marker() {
-        // RuboCop's parser gem includes `__END__` as a `k__END__` token,
-        // so its line number is in the token set. Blank lines between the
-        // last code/comment and `__END__` are checked for consecutive blanks.
+    fn skip_blanks_before_end_marker() {
+        // __END__ is NOT a token in Prism's lexer. Blank lines before it
+        // are past the last token line and are never checked.
         let source = b"x = 1\n\n\n__END__\ndata here\n";
         let diags = run_cop_full(&EmptyLines, source);
         assert!(
-            !diags.is_empty(),
-            "Should fire on consecutive blank lines before __END__: {:?}",
+            diags.is_empty(),
+            "Should NOT fire on blank lines before __END__: {:?}",
             diags
         );
     }
@@ -593,18 +637,6 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not fire on blank lines inside __END__ data: {:?}",
-            diags
-        );
-    }
-
-    #[test]
-    fn fire_single_blank_ok_before_end_marker() {
-        // Single blank line before __END__ is fine (not consecutive).
-        let source = b"x = 1\n\n__END__\ndata\n";
-        let diags = run_cop_full(&EmptyLines, source);
-        assert!(
-            diags.is_empty(),
-            "Should not fire on single blank line before __END__: {:?}",
             diags
         );
     }

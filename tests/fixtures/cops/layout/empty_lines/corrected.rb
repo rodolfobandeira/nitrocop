@@ -18,16 +18,16 @@ b = 2
 
 # Another comment
 
-# Consecutive blank lines inside =begin/=end with code after =end
-=begin
-docs
-
-more docs
-=end
+# Consecutive blank lines before =begin (FN fix)
 c = 3
 
-# Consecutive blank lines before __END__ marker
+=begin
+some docs
+=end
+
+# Consecutive blank lines before =begin, no code after =end
 d = 4
 
-__END__
-data after end marker
+=begin
+more docs
+=end

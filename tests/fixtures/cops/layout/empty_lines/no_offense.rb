@@ -38,3 +38,10 @@ puts "last code"
 # Blank lines after the LAST token (including comments) are not checked.
 # This comment is the last token line in the file.
 puts "done"
+
+# Blank lines before __END__ are not flagged.
+e = 5
+
+
+__END__
+data section here
