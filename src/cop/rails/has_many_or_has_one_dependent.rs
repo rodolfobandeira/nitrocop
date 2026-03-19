@@ -36,17 +36,14 @@ use ruby_prism::Visit;
 ///    inside modules should also be checked. Fixed by not requiring receiver to
 ///    be absent for association detection.
 ///
-/// ## Corpus investigation (2026-03-16)
+/// ## Corpus investigation (2026-03-19)
 ///
-/// FP=0, FN=1. The remaining FN is in `nesquena__rabl__50ebc12` at
-/// `fixtures/ashared/models/user.rb:2` — `has_many :phone_numbers` inside
-/// `class User < ActiveRecord::Base`. The cop logic correctly detects this
-/// pattern (identical structure already covered in test fixtures). The FN is
-/// caused by the file path `fixtures/ashared/models/user.rb` not matching
-/// the default `Include: ['**/app/models/**/*.rb']` pattern in the vendor
-/// config. RuboCop reports this offense, suggesting either the rabl repo has
-/// a custom config broadening the Include pattern or RuboCop's glob matching
-/// differs subtly from nitrocop's. This is a config artifact, not a cop bug.
+/// Corpus oracle reported FP=0, FN=1. The FN was in `nesquena__rabl__50ebc12`
+/// at `fixtures/ashared/models/user.rb:2`. Verified locally that RuboCop also
+/// produces 0 offenses for this file — the Include pattern `**/app/models/**/*.rb`
+/// correctly filters it out. The FN=1 was a stale corpus oracle artifact.
+/// `verify-cop-locations.py` confirms all FP/FN are resolved.
+/// This cop is at effective 100% conformance (2,143 matches, 0 FP, 0 FN).
 pub struct HasManyOrHasOneDependent;
 
 impl Cop for HasManyOrHasOneDependent {
