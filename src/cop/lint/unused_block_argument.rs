@@ -77,6 +77,16 @@ use ruby_prism::Visit;
 ///   Fixed by adding `collect_multi_target_params` for destructured params, and
 ///   handling `params.keyword_rest()` and `params.block()` in both param collection
 ///   and shadowing name collection.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FN=3: Lambdas used as default parameter values in method definitions
+/// (e.g., `def foo(scope: ->(row) { true })`) were not visited by
+/// `BlockVisitor` because `visit_def_node` only recursed into the method
+/// body, not the parameters. Lambda nodes in optional parameter defaults
+/// are children of `OptionalKeywordParameterNode.value()` or
+/// `OptionalParameterNode.value()` under `ParametersNode`. Fixed by
+/// adding `self.visit_parameters_node(&params)` in `visit_def_node`.
 pub struct UnusedBlockArgument;
 
 impl Cop for UnusedBlockArgument {
@@ -151,6 +161,11 @@ impl<'pr> Visit<'pr> for BlockVisitor<'_, '_> {
     // at all nesting levels. The scope boundary for variable references
     // is handled by VarRefFinder, not here.
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        // Visit parameters to find lambdas in default values
+        // (e.g., `def foo(callback: ->(row) { true })`)
+        if let Some(params) = node.parameters() {
+            self.visit_parameters_node(&params);
+        }
         if let Some(body) = node.body() {
             self.visit(&body);
         }

@@ -130,3 +130,11 @@ end
 do_something do |val, **options|
   handle(val, options)
 end
+
+# Lambda as default param: argument IS used
+def call_node?(node, receiver: ->(node) { node.type == :CONST })
+end
+
+# Stabby lambda default with used param
+def example(callback: ->(row) { row.valid? })
+end

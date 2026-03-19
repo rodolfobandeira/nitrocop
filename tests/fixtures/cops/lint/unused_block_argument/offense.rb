@@ -135,3 +135,17 @@ do_something do |val, **options|
                         ^^^^^^^ Lint/UnusedBlockArgument: Unused block argument - `options`.
   puts val
 end
+
+# Lambda as default parameter value in method def: unused `row`
+def has_many(association_name, model:, foreign_key:, scope: ->(row) { true })
+                                                               ^^^ Lint/UnusedBlockArgument: Unused block argument - `row`.
+end
+
+# Stabby lambda as default param with unused `b`
+def one_opt_with_stabby(a = -> b { true }); end
+                               ^ Lint/UnusedBlockArgument: Unused block argument - `b`.
+
+# Lambda in keyword default with unused `node` in args param
+def call_node?(node, name:, args: ->(node) { true })
+                                     ^^^^ Lint/UnusedBlockArgument: Unused block argument - `node`.
+end
