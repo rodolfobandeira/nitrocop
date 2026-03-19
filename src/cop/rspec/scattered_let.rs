@@ -8,6 +8,15 @@ use crate::parse::source::SourceFile;
 
 /// RSpec/ScatteredLet checks for let/let! declarations scattered across an example group.
 ///
+/// ## Corpus investigation (2026-03-18) — FN=5
+///
+/// Root cause: when receiver was `RSpec`, only `describe` was matched as an
+/// example group. `RSpec.feature`, `RSpec.context`, etc. were not recognized.
+/// 4 of 5 FNs were from avo-hq using `RSpec.feature`; 1 from rubocop-rspec's
+/// smoke test file (excluded by AllCops.Exclude in that project).
+/// Fix: use `is_rspec_example_group()` for receiver-qualified calls too,
+/// matching the same pattern used in LetBeforeExamples (commit 7158fd2b).
+///
 /// FP root cause (43 FPs): The cop was running inside shared_examples/shared_examples_for/
 /// shared_context blocks. RuboCop's `example_group_with_body?` matcher only matches
 /// ExampleGroups (describe/context/feature), NOT SharedGroups. Fixed by skipping
@@ -63,7 +72,9 @@ impl Cop for ScatteredLet {
         }
 
         let is_example_group = if let Some(recv) = call.receiver() {
-            util::constant_name(&recv).is_some_and(|n| n == b"RSpec") && method_name == b"describe"
+            util::constant_name(&recv).is_some_and(|n| n == b"RSpec")
+                && is_rspec_example_group(method_name)
+                && !is_rspec_shared_group(method_name)
         } else {
             is_rspec_example_group(method_name)
         };

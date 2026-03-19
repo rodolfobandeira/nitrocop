@@ -19,3 +19,10 @@ describe Comment do
   let!(:b) { create(:b) }
   ^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredLet: Group all let/let! blocks in the example group together.
 end
+
+RSpec.feature "Widgets" do
+  let(:widget) { create(:widget) }
+  it { expect(widget).to be_valid }
+  let(:other) { create(:other) }
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredLet: Group all let/let! blocks in the example group together.
+end
