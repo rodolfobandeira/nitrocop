@@ -288,3 +288,75 @@ describe SomeClass do
     expect(data).to eq([1, 2, 3])
   end
 end
+
+# Variable assigned inside iterator block, shadowed by block param in later iterator
+# (openproject pattern: schema_name assigned in .each block, then used in a different
+# .each block where schema_name is a block parameter — the block param shadows the var)
+describe SomeClass do
+  items.each do |item|
+    schema_name = item.name
+    registry[schema_name] = item
+  end
+
+  registry.each do |schema_name, item|
+    describe schema_name do
+      let(:schema) { load_schema(schema_name) }
+
+      it "validates #{schema_name}" do
+        expect(item).to match_schema(schema)
+      end
+    end
+  end
+end
+
+# Variable assigned inside non-RSpec DSL method block (rswag pattern)
+# post/response/path are DSL methods, not RSpec example groups or scopes.
+# Variables assigned inside them and used only at the same DSL scope level
+# (not inside example scopes) should not be flagged.
+describe SomeClass do
+  path "/api/resource" do
+    post "Create resource" do
+      expected_schema = load_schema("create_request")
+      parameter name: :params, in: :body, schema: expected_schema
+
+      response "200", "success" do
+        expected_schema = load_schema("create_response")
+        schema expected_schema
+
+        xit
+      end
+    end
+  end
+end
+
+# File-level variable used in non-describe-block scope (Capybara::SpecHelper.spec)
+# The spec method with a receiver is NOT an RSpec example group.
+# Variables assigned inside it blocks should not be collected as file-level vars.
+Capybara::SpecHelper.spec '#ancestor' do
+  before do
+    @session.visit('/with_html')
+  end
+
+  it 'should find the element' do
+    el = @session.find(:css, '#child')
+    expect(el.ancestor('//p')).to have_text('Lorem ipsum')
+  end
+
+  it 'should raise on multiple matches' do
+    el = @session.find(:css, '#child')
+    expect { el.ancestor('//div') }.to raise_error(Capybara::Ambiguous)
+  end
+end
+
+# Variable assigned inside .each at group scope, used only in example description
+# (jruby pattern: format = "%" + f, used in it "supports #{format}")
+describe SomeClass do
+  %w(d i).each do |f|
+    format = "%" + f
+
+    it "supports integer formats using #{format}" do
+      ("%#{f}" % 10).should == "10"
+    end
+  end
+end
+

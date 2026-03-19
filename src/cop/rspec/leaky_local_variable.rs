@@ -154,6 +154,45 @@ use crate::parse::source::SourceFile;
 ///   unconditional writes.
 /// - 75 FNs: VariableForce's comprehensive scope tracking across all Ruby
 ///   scope boundaries that our AST-walking approach doesn't replicate.
+///
+/// ## Investigation (FP=38, FN=286, 2026-03-19)
+///
+/// **FP fix: block parameter shadowing in reference checks**
+/// `stmt_example_scope_var_interaction`, `check_var_used_in_example_scopes`,
+/// and `check_var_used_in_describe_blocks` all recurse into "other calls with
+/// blocks" (e.g., `.each do |x| ... end`) without checking if the block has a
+/// parameter that shadows the variable. This caused FPs when a variable
+/// assigned in one `.each` block was referenced in a later `.each` block where
+/// the same name was a block parameter (openproject pattern: `schema_name`
+/// assigned in first `.each`, shadowed by block param in second `.each`).
+/// Fix: added `block_has_param` check before recursing into block bodies.
+///
+/// **FP fix: `collect_file_level_assignments` stopping at example scopes**
+/// The function recursed into example scope methods (`it`, `before`, `let`,
+/// `subject`, etc.) collecting assignments inside them as "file-level" vars.
+/// This caused FPs for non-describe-block wrappers like
+/// `Capybara::SpecHelper.spec` where `it` blocks with local vars were
+/// incorrectly collected as file-level assignments.
+/// Fix: added `is_example_scope` and `is_includes_method` checks.
+///
+/// **FP fix: dead file-level assignment filtering**
+/// File-level variables assigned multiple times (e.g., `flags = parse(...)`,
+/// `flags ||= ''`, `flags = flags.split(' ')`) were all flagged when only the
+/// last unconditional assignment's value reaches examples. Added
+/// `filter_dead_file_level_assignments` using `is_unconditional` tracking on
+/// `VarAssign` to mark `||=`, `&&=`, and `+=`-style writes as conditional.
+/// Earlier assignments with a later unconditional assignment (and no
+/// describe-block reference between them) are filtered as dead.
+///
+/// **Remaining FP gaps (estimate ~20-25 remaining):**
+/// - rswag/discourse FPs: variables inside `post`/`response` DSL blocks are
+///   collected as group-level assignments. A full fix requires either
+///   recognizing rswag DSL methods or implementing per-assignment reference
+///   tracking like VariableForce.
+/// - jruby `platform_is` conditional reassignment: variables conditionally
+///   reassigned inside `platform_is :windows do ... end` blocks need
+///   VariableForce-style branching analysis.
+/// - 286 FNs from VariableForce scope tracking gaps.
 pub struct LeakyLocalVariable;
 
 impl Cop for LeakyLocalVariable {
@@ -229,6 +268,10 @@ impl Cop for LeakyLocalVariable {
 struct VarAssign {
     name: Vec<u8>,
     offset: usize,
+    /// Whether this is an unconditional write (`x = expr` or multi-write),
+    /// as opposed to conditional/compound writes (`x ||= expr`, `x &&= expr`,
+    /// `x += expr`). Used for dead assignment filtering.
+    is_unconditional: bool,
 }
 
 /// Check for file-level variable assignments that leak into describe blocks.
@@ -259,9 +302,18 @@ fn check_file_level_vars(
         return;
     }
 
-    // For each file-level assignment, check if the variable is referenced
+    // Filter dead file-level assignments: if a variable is assigned multiple
+    // times at file level and a later unconditional assignment exists with no
+    // describe-block example-scope reference between them, the earlier
+    // assignment is dead (its value never reaches any example).
+    // This uses assignment-list-based filtering (checking collected assignments
+    // by byte offset) rather than statement-tree-based filtering, so it works
+    // for assignments nested inside non-RSpec blocks (e.g., `control do ... end`).
+    let live_assigns = filter_dead_file_level_assignments(&file_level_assigns, &stmts);
+
+    // For each live file-level assignment, check if the variable is referenced
     // inside any example scope within any describe block in the file
-    for assign in &file_level_assigns {
+    for assign in &live_assigns {
         let mut used = false;
         for stmt in stmts.body().iter() {
             if check_var_used_in_describe_blocks(&stmt, &assign.name) {
@@ -292,6 +344,7 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
         assigns.push(VarAssign {
             name: lw.name().as_slice().to_vec(),
             offset: lw.location().start_offset(),
+            is_unconditional: true,
         });
         return;
     }
@@ -301,6 +354,7 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
         assigns.push(VarAssign {
             name: ow.name().as_slice().to_vec(),
             offset: ow.location().start_offset(),
+            is_unconditional: false, // conditional write
         });
         return;
     }
@@ -310,6 +364,7 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
         assigns.push(VarAssign {
             name: aw.name().as_slice().to_vec(),
             offset: aw.location().start_offset(),
+            is_unconditional: false, // conditional write
         });
         return;
     }
@@ -319,6 +374,7 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
         assigns.push(VarAssign {
             name: ow.name().as_slice().to_vec(),
             offset: ow.location().start_offset(),
+            is_unconditional: false, // reads then writes
         });
         return;
     }
@@ -330,13 +386,14 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
                 assigns.push(VarAssign {
                     name: lt.name().as_slice().to_vec(),
                     offset: lt.location().start_offset(),
+                    is_unconditional: true,
                 });
             }
         }
         return;
     }
 
-    // Stop at describe blocks, classes, modules, defs - these are scope boundaries
+    // Stop at describe blocks, example scopes, classes, modules, defs
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         let no_recv = call.receiver().is_none()
@@ -344,6 +401,11 @@ fn collect_file_level_assignments(node: &ruby_prism::Node<'_>, assigns: &mut Vec
                 .receiver()
                 .is_some_and(|r| util::constant_name(&r).is_some_and(|n| n == b"RSpec")));
         if no_recv && is_rspec_example_group(name) {
+            return;
+        }
+        // Stop at example scopes (it, before, let, subject, etc.)
+        // Variables assigned inside example scopes are not file-level leaks.
+        if call.receiver().is_none() && (is_example_scope(name) || is_includes_method(name)) {
             return;
         }
         // For other calls (e.g., iterators), recurse into block body
@@ -424,14 +486,16 @@ fn check_var_used_in_describe_blocks(node: &ruby_prism::Node<'_>, var_name: &[u8
             return false;
         }
 
-        // For other calls with blocks, recurse
+        // For other calls with blocks, recurse (respect block param shadowing)
         if let Some(blk) = call.block() {
             if let Some(bn) = blk.as_block_node() {
-                if let Some(body) = bn.body() {
-                    if let Some(stmts) = body.as_statements_node() {
-                        for s in stmts.body().iter() {
-                            if check_var_used_in_describe_blocks(&s, var_name) {
-                                return true;
+                if !block_has_param(&bn, var_name) {
+                    if let Some(body) = bn.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            for s in stmts.body().iter() {
+                                if check_var_used_in_describe_blocks(&s, var_name) {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -696,9 +760,12 @@ fn stmt_example_scope_var_interaction(
             return VarInteraction::None;
         }
 
-        // Other calls with blocks: recurse into block body
+        // Other calls with blocks: recurse into block body, respecting block param shadowing
         if let Some(blk) = call.block() {
             if let Some(bn) = blk.as_block_node() {
+                if block_has_param(&bn, var_name) {
+                    return VarInteraction::None; // shadowed by block param
+                }
                 if let Some(body) = bn.body() {
                     if let Some(stmts) = body.as_statements_node() {
                         let mut result = VarInteraction::None;
@@ -912,6 +979,82 @@ fn is_dead_assignment(assign: &VarAssign, stmts: &ruby_prism::StatementsNode<'_>
     false
 }
 
+/// Filter dead file-level assignments using assignment-list-based analysis.
+/// An assignment to variable X is dead if there's a later collected assignment
+/// to X (by byte offset) that is an unconditional write (`x = expr` but not
+/// `x ||= expr` or `x += expr`), and no describe-block example-scope reference
+/// to X exists between the two assignments' byte offsets in the source.
+///
+/// This works for assignments nested inside non-RSpec blocks (e.g.,
+/// `control do ... end`) because it compares byte offsets rather than walking
+/// the statement tree.
+fn filter_dead_file_level_assignments<'a>(
+    assignments: &'a [VarAssign],
+    stmts: &ruby_prism::StatementsNode<'_>,
+) -> Vec<&'a VarAssign> {
+    if assignments.is_empty() {
+        return Vec::new();
+    }
+
+    let mut live: Vec<&VarAssign> = Vec::new();
+
+    for (i, assign) in assignments.iter().enumerate() {
+        // Check if there's a later collected unconditional assignment to the
+        // same variable. We use is_unconditional based on the assignment type.
+        let has_later_unconditional = assignments[i + 1..].iter().any(|later| {
+            later.name == assign.name && later.is_unconditional && later.offset > assign.offset
+        });
+
+        if has_later_unconditional {
+            // Check that no describe-block example-scope reference exists
+            // between this assignment and the next unconditional one.
+            // For simplicity, we just check if the assignment is dead at
+            // the file level using the stmts tree.
+            let next_unconditional_offset = assignments[i + 1..]
+                .iter()
+                .find(|a| a.name == assign.name && a.is_unconditional && a.offset > assign.offset)
+                .map(|a| a.offset);
+
+            if let Some(next_offset) = next_unconditional_offset {
+                // Check if any describe block between assign.offset and
+                // next_offset references the variable in an example scope.
+                if !describe_ref_between_offsets(stmts, &assign.name, assign.offset, next_offset) {
+                    continue; // dead assignment
+                }
+            }
+        }
+
+        live.push(assign);
+    }
+
+    live
+}
+
+/// Check if any describe block between two byte offsets references the variable
+/// in an example scope. Recursively searches the statement tree.
+fn describe_ref_between_offsets(
+    stmts: &ruby_prism::StatementsNode<'_>,
+    var_name: &[u8],
+    start_offset: usize,
+    end_offset: usize,
+) -> bool {
+    for stmt in stmts.body().iter() {
+        let loc = stmt.location();
+        // Skip statements entirely before or after the range
+        if loc.end_offset() <= start_offset {
+            continue;
+        }
+        if loc.start_offset() >= end_offset {
+            continue;
+        }
+        // This statement overlaps the range — check for describe-block refs
+        if check_var_used_in_describe_blocks(&stmt, var_name) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if a statement contains a byte offset (for locating an assignment in the stmt list).
 fn stmt_contains_offset(node: &ruby_prism::Node<'_>, offset: usize) -> bool {
     let loc = node.location();
@@ -947,6 +1090,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
         assigns.push(VarAssign {
             name: lw.name().as_slice().to_vec(),
             offset: lw.location().start_offset(),
+            is_unconditional: true,
         });
         return;
     }
@@ -956,6 +1100,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
         assigns.push(VarAssign {
             name: ow.name().as_slice().to_vec(),
             offset: ow.location().start_offset(),
+            is_unconditional: false,
         });
         return;
     }
@@ -965,6 +1110,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
         assigns.push(VarAssign {
             name: aw.name().as_slice().to_vec(),
             offset: aw.location().start_offset(),
+            is_unconditional: false,
         });
         return;
     }
@@ -974,6 +1120,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
         assigns.push(VarAssign {
             name: ow.name().as_slice().to_vec(),
             offset: ow.location().start_offset(),
+            is_unconditional: false,
         });
         return;
     }
@@ -985,6 +1132,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
                 assigns.push(VarAssign {
                     name: lt.name().as_slice().to_vec(),
                     offset: lt.location().start_offset(),
+                    is_unconditional: true,
                 });
             }
         }
@@ -995,6 +1143,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
                         assigns.push(VarAssign {
                             name: lt.name().as_slice().to_vec(),
                             offset: lt.location().start_offset(),
+                            is_unconditional: true,
                         });
                     }
                 }
@@ -1005,6 +1154,7 @@ fn collect_assignments_in_scope(node: &ruby_prism::Node<'_>, assigns: &mut Vec<V
                 assigns.push(VarAssign {
                     name: lt.name().as_slice().to_vec(),
                     offset: lt.location().start_offset(),
+                    is_unconditional: true,
                 });
             }
         }
@@ -1304,13 +1454,16 @@ fn check_var_used_in_example_scopes(node: &ruby_prism::Node<'_>, var_name: &[u8]
         }
 
         // For other calls with blocks (e.g., `each do ... end`), recurse
+        // but respect block parameter shadowing
         if let Some(blk) = call.block() {
             if let Some(bn) = blk.as_block_node() {
-                if let Some(body) = bn.body() {
-                    if let Some(stmts) = body.as_statements_node() {
-                        for s in stmts.body().iter() {
-                            if check_var_used_in_example_scopes(&s, var_name) {
-                                return true;
+                if !block_has_param(&bn, var_name) {
+                    if let Some(body) = bn.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            for s in stmts.body().iter() {
+                                if check_var_used_in_example_scopes(&s, var_name) {
+                                    return true;
+                                }
                             }
                         }
                     }

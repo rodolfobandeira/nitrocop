@@ -220,3 +220,16 @@ describe SomeClass do
     expect('foobar').to match(/#{pattern}/)
   end
 end
+
+# Dead file-level assignments are NOT flagged; only the last unconditional
+# assignment before the describe-block reference is live. (dev-sec pattern)
+flags = parse_config('/proc/cpuinfo').flags
+flags ||= ''
+flags = flags.split(' ')
+^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+describe '/proc/cpuinfo' do
+  it 'Flags should include NX' do
+    expect(flags).to include('nx')
+  end
+end
