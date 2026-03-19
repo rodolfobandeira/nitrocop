@@ -68,11 +68,14 @@ use crate::parse::source::SourceFile;
 /// `call.block()` vs block_pass in parser gem's send children). Applied
 /// arg-count gate for `add_column` (requires 3-4 parser-gem args).
 ///
-/// REVERTED create_table arg-count gate (1-2 args): this gate filtered out
-/// 2,314 correct detections to fix only 17 FP — a bad tradeoff. The 17 FP
-/// come from non-migration `create_table` calls (test helpers, Sequel, etc.).
-/// The proper fix is a `within_change_method_or_block?` context check (like
-/// RuboCop's), not arg-count filtering. FP=17 remain as a known gap.
+/// REVERTED create_table arg-count gate (1-2 args): this gate was tried twice
+/// (2026-03-18 and 2026-03-19, commits reverted both times). It filtered out
+/// ~2,500 correct detections to fix only 17 FP — a bad tradeoff. The gate
+/// removes ALL offenses for a filtered `create_table` (both table-level AND
+/// column-level), so even a small number of false rejections causes massive FN.
+/// The 17 FP come from non-migration `create_table` calls (test helpers,
+/// Sequel, etc.). The proper fix is a `within_change_method_or_block?` context
+/// check (like RuboCop's), not arg-count filtering. FP=17 remain as a known gap.
 pub struct SchemaComment;
 
 const TABLE_MSG: &str = "New database table without `comment`.";

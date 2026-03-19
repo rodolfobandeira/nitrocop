@@ -41,6 +41,17 @@
 ///   not detected. When inner_remaining is empty in a block, used outer_has_render instead of
 ///   the implicit render check (!outer_has_redirect). Fixed to match RuboCop's
 ///   context.right_siblings.empty? && !use_redirect_to?(context.parent) logic.
+///
+/// ## Investigation (2026-03-19): FP=0, FN=6 — attempted fix reverted
+///
+/// Three FN root causes identified (def-with-rescue body handling, multi-statement
+/// block implicit render, nested single-child if with parent else render). Fix
+/// addressed 5/6 FN but introduced 5 NEW false positives (102 total vs RuboCop's 97).
+/// Reverted due to FP regression. The remaining 1 FN (browsermedia portlet.rb:228)
+/// is a RuboCop over-match: `Cms::Portlet < ActiveRecord::Base` is not a controller
+/// but RuboCop matches because ActionController::Base appears elsewhere in the class.
+/// A correct fix needs more targeted def-rescue handling without broadening the
+/// offense scope.
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
