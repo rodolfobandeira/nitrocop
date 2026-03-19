@@ -13,3 +13,7 @@
 
 "split #{value.split("\\").last}"
                      ^^^^ Style/StringLiteralsInInterpolation: Prefer single-quoted strings inside interpolations.
+
+# Double-quoted string inside interpolation nested within a backtick xstr
+`cmd #{items.map { |item| "#{item["id"]}" }.join(" ")}`
+                                  ^^^^ Style/StringLiteralsInInterpolation: Prefer single-quoted strings inside interpolations.

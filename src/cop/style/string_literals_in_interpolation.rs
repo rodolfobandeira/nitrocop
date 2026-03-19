@@ -9,20 +9,32 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Investigation findings (2026-03-15)
 ///
-/// **FPs (65):** All FPs came from string literals inside `%x()` or backtick
-/// (`` ` ``) interpolation. RuboCop's `inside_interpolation?` only checks for
-/// strings inside `:dstr` (double-quoted), `:dsym` (symbol), or `:regexp`
-/// interpolation — NOT `:xstr` (command strings). In Prism, `%x()` and
-/// backtick strings parse as `InterpolatedXStringNode`, so we skip recursion
-/// into those nodes entirely.
+/// **FPs (65→0):** Original FPs came from string literals inside `%x()` or
+/// backtick interpolation. RuboCop only checks `:dstr`, `:dsym`, `:regexp`
+/// — NOT `:xstr`. Fixed by not setting `in_interpolation` for xstr embedded
+/// statements, while still recursing to find nested regular interpolated strings.
 ///
-/// **FNs (24):** The `needs_double_quotes` function incorrectly treated `\\`
-/// (escaped backslash) and `\"` (escaped double quote) as requiring double
-/// quotes. In Ruby, `\\` is valid in single-quoted strings (`'\\'`), and `\"`
-/// inside a double-quoted string doesn't need escaping in single quotes.
-/// Fixed to match RuboCop's `double_quotes_required?` which only requires
-/// double quotes for escape sequences not expressible in single-quoted
-/// strings (e.g., `\n`, `\t`, `\x`, `\u`).
+/// **FNs (24→0):** Fixed `needs_double_quotes` to only allow `\\` and `\"` as
+/// safe-to-convert escapes. All other `\X` sequences (including unrecognized
+/// escapes like `\.`, `\/`, `\#`) produce different results in single vs
+/// double quotes, so they require double quotes.
+///
+/// ## Investigation findings (2026-03-19)
+///
+/// **FPs (6):** Three root causes:
+/// 1. Unrecognized escapes (`\.`, `\/`, `\#`) — in double quotes `"\."` → `.`,
+///    but in single quotes `'\.'` → `\.` (two chars). Must require double quotes.
+/// 2. `\'` escape hides a literal single quote — `needs_double_quotes` skipped
+///    it because `'` appeared after `\`, never reaching the bare `'` check.
+/// 3. Both fixed by simplifying: after `\`, only `\\` and `\"` are safe to
+///    convert; everything else requires double quotes.
+///
+/// **FNs (1):** String `"id"` inside `#{item["id"]}` nested within a backtick
+/// xstr. The previous fix skipped xstr nodes entirely, missing strings inside
+/// regular interpolated strings nested within xstr. Fixed by tracking `in_xstr`
+/// separately: xstr embedded statements don't set `in_interpolation`, but
+/// entering a nested `InterpolatedStringNode` resets `in_xstr` so its
+/// embedded statements correctly set `in_interpolation`.
 pub struct StringLiteralsInInterpolation;
 
 impl Cop for StringLiteralsInInterpolation {
@@ -47,6 +59,7 @@ impl Cop for StringLiteralsInInterpolation {
             diagnostics: Vec::new(),
             enforced_style,
             in_interpolation: false,
+            in_xstr: false,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -59,23 +72,40 @@ struct InterpStringVisitor<'a> {
     diagnostics: Vec<Diagnostic>,
     enforced_style: String,
     in_interpolation: bool,
+    in_xstr: bool,
 }
 
 impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
     fn visit_embedded_statements_node(&mut self, node: &ruby_prism::EmbeddedStatementsNode<'pr>) {
         let was = self.in_interpolation;
-        self.in_interpolation = true;
+        // Only set in_interpolation for dstr/dsym/regexp — NOT xstr.
+        if !self.in_xstr {
+            self.in_interpolation = true;
+        }
         ruby_prism::visit_embedded_statements_node(self, node);
         self.in_interpolation = was;
     }
 
     // RuboCop only checks strings inside dstr, dsym, and regexp — NOT xstr.
-    // Skip backtick and %x() command execution strings entirely.
+    // We still recurse into xstr to find nested regular interpolated strings,
+    // but xstr's own embedded statements don't set in_interpolation.
     fn visit_interpolated_x_string_node(
         &mut self,
-        _node: &ruby_prism::InterpolatedXStringNode<'pr>,
+        node: &ruby_prism::InterpolatedXStringNode<'pr>,
     ) {
-        // Don't recurse — strings inside xstr interpolation are not flagged.
+        let was = self.in_xstr;
+        self.in_xstr = true;
+        ruby_prism::visit_interpolated_x_string_node(self, node);
+        self.in_xstr = was;
+    }
+
+    // When entering a regular interpolated string (even nested inside xstr),
+    // reset in_xstr so its embedded statements correctly set in_interpolation.
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        let was_xstr = self.in_xstr;
+        self.in_xstr = false;
+        ruby_prism::visit_interpolated_string_node(self, node);
+        self.in_xstr = was_xstr;
     }
 
     fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
@@ -128,26 +158,28 @@ impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
 fn needs_double_quotes(content: &[u8]) -> bool {
     let mut i = 0;
     while i < content.len() {
-        // If the content contains a single quote, it can't use single-quoted style
+        // If the content contains a bare single quote, it can't use single-quoted style
         if content[i] == b'\'' {
             return true;
         }
         if content[i] == b'\\' && i + 1 < content.len() {
             match content[i + 1] {
-                // These escape sequences only work in double-quoted strings
-                b'n' | b't' | b'r' | b'0' | b'a' | b'b' | b'e' | b'f' | b's' | b'v' => {
-                    return true;
+                // \\ and \" are safe to convert to single quotes:
+                // \\ is valid in single-quoted strings ('\\' → \)
+                // \" is only needed in double quotes; single quotes write " directly
+                b'\\' | b'"' => {
+                    i += 2;
+                    continue;
                 }
-                b'x' | b'u' => return true,
-                // \\ is valid in single-quoted strings too ('\\' is a literal backslash)
-                // \" is only needed inside double quotes; single quotes don't escape "
-                b'\\' | b'"' => {}
-                _ => {}
+                // Everything else requires double quotes:
+                // - Recognized escapes (\n, \t, etc.) only work in double quotes
+                // - \' hides a literal single quote
+                // - Unrecognized escapes (\., \/, \#) produce just the char in
+                //   double quotes but \char (two chars) in single quotes
+                _ => return true,
             }
-            i += 2;
-        } else {
-            i += 1;
         }
+        i += 1;
     }
     false
 }
