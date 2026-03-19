@@ -28,6 +28,14 @@ use crate::parse::source::SourceFile;
 /// `describe` and `context`, but RuboCop's `Examples.all` does NOT include them —
 /// those are ExampleGroups, not examples. Fixed by removing `describe` and `context`
 /// from `is_example_method`.
+///
+/// ## Corpus investigation (2026-03-19)
+///
+/// FN=5: All five false negatives had `RSpec.` receiver prefix
+/// (e.g., `RSpec.shared_examples "a software" do`). The cop was returning early
+/// when `call.receiver().is_some()`, skipping all receiver-qualified calls.
+/// RuboCop's `#rspec?` predicate accepts both receiverless calls and `RSpec.`
+/// prefixed calls. Fixed by allowing `RSpec` constant receiver.
 pub struct SharedContext;
 
 impl Cop for SharedContext {
@@ -61,8 +69,14 @@ impl Cop for SharedContext {
             None => return,
         };
 
-        if call.receiver().is_some() {
-            return;
+        // Accept receiverless calls or RSpec. receiver (matches RuboCop's #rspec? predicate)
+        if let Some(recv) = call.receiver() {
+            let is_rspec = recv
+                .as_constant_read_node()
+                .is_some_and(|c| c.name().as_slice() == b"RSpec");
+            if !is_rspec {
+                return;
+            }
         }
 
         let name = call.name().as_slice();

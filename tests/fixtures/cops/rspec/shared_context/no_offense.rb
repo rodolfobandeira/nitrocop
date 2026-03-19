@@ -76,3 +76,26 @@ shared_context 'with digest algorithms' do
     end
   end
 end
+
+# RSpec. receiver prefix — no offense when used correctly
+RSpec.shared_examples 'a software' do |name = "chefdk"|
+  it 'installs the software' do
+  end
+end
+
+RSpec.shared_context 'common setup' do
+  let(:user) { create(:user) }
+  before { login(user) }
+end
+
+RSpec.shared_examples_for 'parser type registration' do
+  it 'registers the type' do
+  end
+end
+
+# RSpec.shared_examples with block param and both setup + examples (no offense)
+RSpec.shared_examples('common spaceship login') do |skip_tunes_login|
+  let(:flag) { skip_tunes_login }
+  it 'logs in' do
+  end
+end
