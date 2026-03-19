@@ -2,6 +2,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Extended corpus FN investigation (2026-03-19):
+/// - 2 FN from multi-line gem declarations (git:, glob: continuation lines
+///   were resetting prev_gem). Fixed by skipping continuation lines.
+/// - 8 FN from inline conditional gem calls (e.g., `if cond; gem 'x' else gem 'y', path: 'z' end`).
+///   These are rare edge cases where gem calls appear mid-line after `if`/`else`.
+///   RuboCop detects these via AST-based gem node search. Our line-based approach
+///   would need significant rework to handle these. Not fixed (8 FN remain).
 pub struct OrderedGems;
 
 impl Cop for OrderedGems {
@@ -66,10 +73,11 @@ impl Cop for OrderedGems {
 
                 if let Some((ref prev_name, ref prev_key)) = prev_gem {
                     if sort_key < *prev_key {
+                        let col = line_str.len() - line_str.trim_start().len();
                         diagnostics.push(self.diagnostic(
                             source,
                             line_num,
-                            0,
+                            col,
                             format!(
                                 "Gems should be sorted in an alphabetical order within their section of the Gemfile. Gem `{}` should appear before `{}`.",
                                 gem_name, prev_name
@@ -79,12 +87,42 @@ impl Cop for OrderedGems {
                 }
 
                 prev_gem = Some((gem_name.to_string(), sort_key));
+            } else if is_continuation_line(trimmed) {
+                // Continuation lines of multi-line gem declarations (e.g., git:, glob:,
+                // version constraints) — skip without resetting the group
             } else {
-                // Non-gem declaration resets the group
+                // Non-gem declaration resets the group (group, source, platforms, etc.)
                 prev_gem = None;
             }
         }
     }
+}
+
+/// Check if a trimmed line looks like a continuation of a multi-line gem declaration.
+/// Continuation lines are typically keyword arguments (git:, path:, glob:, require:),
+/// version strings ('0.1.1'), or other argument content that follows a trailing comma.
+fn is_continuation_line(trimmed: &str) -> bool {
+    // Starts with a quoted string (version constraint like '0.1.1')
+    if trimmed.starts_with('\'') || trimmed.starts_with('"') {
+        return true;
+    }
+    // Starts with a symbol like :development
+    if trimmed.starts_with(':') {
+        return true;
+    }
+    // Keyword argument (e.g., git:, path:, glob:, require:, platforms:, group:)
+    // These look like `word:` possibly followed by a space
+    if let Some(colon_pos) = trimmed.find(':') {
+        let before_colon = &trimmed[..colon_pos];
+        if !before_colon.is_empty()
+            && before_colon
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extract the gem name from literal first-argument forms:
