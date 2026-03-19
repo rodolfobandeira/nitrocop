@@ -8,3 +8,8 @@ foo&.to_i&.zero?
 foo&.to_a&.zero?
 foo&.to_h&.zero?
 foo.bar
+foo&.to_s || 'Default string'
+foo&.to_i || 1
+foo&.to_f || 1.0
+foo&.to_a || [1]
+foo&.to_h || { a: 1 }

@@ -1,12 +1,28 @@
 use crate::cop::node_type::{
     ARRAY_NODE, BLOCK_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, FALSE_NODE,
-    FLOAT_NODE, HASH_NODE, INTEGER_NODE, KEYWORD_HASH_NODE, REGULAR_EXPRESSION_NODE, SELF_NODE,
-    STRING_NODE, SYMBOL_NODE, TRUE_NODE,
+    FLOAT_NODE, HASH_NODE, INTEGER_NODE, KEYWORD_HASH_NODE, OR_NODE, REGULAR_EXPRESSION_NODE,
+    SELF_NODE, STRING_NODE, SYMBOL_NODE, TRUE_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for redundant safe navigation calls.
+///
+/// ## Conversion with default literal (Case 6)
+/// Detects `foo&.to_h || {}`, `foo&.to_a || []`, `foo&.to_i || 0`,
+/// `foo&.to_f || 0.0`, `foo&.to_s || ''` patterns. These are redundant because
+/// nil.to_h/to_a/to_i/to_f/to_s already return the same default values.
+/// Also handles block form: `foo&.to_h { |k, v| [k, v] } || {}`.
+///
+/// The RuboCop `conversion_with_default?` node matcher checks that the default
+/// value matches the nil-conversion result exactly (e.g., `to_i || 0` yes,
+/// `to_i || 1` no; `to_s || ''` yes, `to_s || 'default'` no).
+///
+/// ### Root cause of 182 FN (corpus)
+/// The cop was missing the `on_or` handler entirely. It only visited `CallNode`
+/// but the conversion-with-default pattern requires visiting `OrNode` and
+/// checking if the LHS is a safe-nav conversion call with a matching default RHS.
 pub struct RedundantSafeNavigation;
 
 /// Methods guaranteed to exist on every instance (their receivers can't be nil)
@@ -43,6 +59,7 @@ impl Cop for RedundantSafeNavigation {
             HASH_NODE,
             INTEGER_NODE,
             KEYWORD_HASH_NODE,
+            OR_NODE,
             REGULAR_EXPRESSION_NODE,
             SELF_NODE,
             STRING_NODE,
@@ -60,6 +77,12 @@ impl Cop for RedundantSafeNavigation {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Case 6: conversion with default literal (foo&.to_h || {})
+        if let Some(or_node) = node.as_or_node() {
+            self.check_conversion_with_default(source, &or_node, diagnostics);
+            return;
+        }
+
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -134,6 +157,97 @@ impl Cop for RedundantSafeNavigation {
         // Note: We'd need parent context to check if the call is in a condition.
         // For now, we only handle the simpler cases above.
         let _ = is_allowed;
+    }
+}
+
+impl RedundantSafeNavigation {
+    /// Check for `foo&.to_h || {}`, `foo&.to_a || []`, `foo&.to_i || 0`,
+    /// `foo&.to_f || 0.0`, `foo&.to_s || ''`, and block form `foo&.to_h { ... } || {}`.
+    fn check_conversion_with_default(
+        &self,
+        source: &SourceFile,
+        or_node: &ruby_prism::OrNode<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let lhs = or_node.left();
+        let rhs = or_node.right();
+
+        // LHS must be a CallNode (foo&.to_h or foo&.to_h { ... })
+        // In Prism, the block is a child of CallNode, so both forms are CallNode
+        let csend = match lhs.as_call_node() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Must use safe navigation (&.)
+        let op_loc = match csend.call_operator_loc() {
+            Some(loc) if loc.as_slice() == b"&." => loc,
+            _ => return,
+        };
+
+        let method_name = csend.name().as_slice();
+
+        // Check method is a conversion method and RHS is its matching default
+        let is_match = match method_name {
+            b"to_h" => is_empty_hash(&rhs),
+            b"to_a" => is_empty_array(&rhs),
+            b"to_i" => is_integer_zero(&rhs),
+            b"to_f" => is_float_zero(&rhs),
+            b"to_s" => is_empty_string(&rhs),
+            _ => false,
+        };
+
+        if is_match {
+            // Offense at the &. operator position
+            let (line, column) = source.offset_to_line_col(op_loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Redundant safe navigation with default literal detected.".to_string(),
+            ));
+        }
+    }
+}
+
+fn is_empty_hash(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(hash) = node.as_hash_node() {
+        hash.elements().is_empty()
+    } else {
+        false
+    }
+}
+
+fn is_empty_array(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(arr) = node.as_array_node() {
+        arr.elements().is_empty()
+    } else {
+        false
+    }
+}
+
+fn is_integer_zero(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(int) = node.as_integer_node() {
+        let src = int.location().as_slice();
+        src == b"0"
+    } else {
+        false
+    }
+}
+
+fn is_float_zero(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(float) = node.as_float_node() {
+        float.value() == 0.0
+    } else {
+        false
+    }
+}
+
+fn is_empty_string(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(s) = node.as_string_node() {
+        s.unescaped().is_empty()
+    } else {
+        false
     }
 }
 
