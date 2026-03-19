@@ -24,6 +24,17 @@ use ruby_prism::Visit;
 /// real-world usage. Fixed by letting the visitor recurse into these scopes while
 /// resetting `in_begin_assignment` to false, so nested scopes start fresh but
 /// assignments within methods are properly checked.
+///
+/// ## FP=19 fix (2026-03-19)
+///
+/// 19 FPs from `return` inside implicit `BeginNode` from rescue clauses in
+/// `def`/block/lambda bodies within assignment contexts. Prism uses `BeginNode`
+/// for both explicit `begin..end` (kwbegin) and implicit rescue-wrapping. The
+/// visitor was treating all `BeginNode` inside assignment values as kwbegin.
+/// Fix: check `begin_keyword_loc().is_some()` to distinguish explicit from
+/// implicit — only explicit `begin..end` triggers `in_begin_assignment`.
+/// Patterns: `var = items.find do |i| ... rescue ... end`, `CONST = lambda do
+/// ... rescue ... end`, `def foo ... rescue ... end` nested inside assignments.
 pub struct NoReturnInBeginEndBlocks;
 
 impl Cop for NoReturnInBeginEndBlocks {
@@ -262,11 +273,12 @@ impl<'pr> Visit<'pr> for NoReturnVisitor<'_, '_> {
         self.check_assignment_value(&node.value());
     }
 
-    // When traversing an assignment value subtree, any BeginNode (kwbegin)
-    // sets in_begin_assignment for its descendants. This matches RuboCop's
-    // `node.each_node(:kwbegin)` which finds begin blocks at ANY depth.
+    // When traversing an assignment value subtree, only EXPLICIT begin..end
+    // blocks (kwbegin, i.e. begin_keyword_loc is Some) set in_begin_assignment.
+    // Implicit BeginNode from rescue clauses in def/block/lambda bodies must
+    // NOT trigger this — those are not assignment-context begin blocks.
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
-        if self.in_assignment_value {
+        if self.in_assignment_value && node.begin_keyword_loc().is_some() {
             let old = self.in_begin_assignment;
             self.in_begin_assignment = true;
             ruby_prism::visit_begin_node(self, node);

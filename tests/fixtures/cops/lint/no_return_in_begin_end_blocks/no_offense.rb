@@ -75,3 +75,55 @@ def normal_method
     compute
   end
 end
+
+# FP fix: return inside a method with rescue (implicit BeginNode, not kwbegin)
+def timeout
+  return @validated_timeout if @validated_timeout
+  @validated_timeout = Integer(@timeout)
+rescue ArgumentError
+  puts "error"
+end
+
+# FP fix: return unless in method with rescue
+def validate_url
+  return unless url.to_s == ''
+  raise InvalidUrl, url
+rescue URI::InvalidURIError
+  raise InvalidUrl, url
+end
+
+# FP fix: block with rescue inside assignment — implicit BeginNode from rescue
+result = items.find do |item|
+  return true if item.valid?
+  urls = item.urls.reject { |u| u.host == "example.com" }
+  return true unless urls.empty?
+rescue
+  false
+end
+
+# FP fix: lambda with rescue assigned to constant
+TRANSFORMER = lambda do |env|
+  return unless env[:node_name] == "img" && env[:node]["src"]
+  env[:node]["src"] = URI.join(base_url, env[:node]["src"])
+rescue URI::InvalidURIError
+  nil
+end
+
+# FP fix: def with rescue inside a begin..end assignment
+@instance ||= begin
+  def helper_method
+    return 42 if cached?
+    compute_value
+  rescue StandardError
+    nil
+  end
+  MyClass.new
+end
+
+# FP fix: method call block with rescue inside assignment
+result = benchmark("query") do
+  Problem.find(params[:id])
+rescue Mongoid::Errors::DocumentNotFound
+  head :not_found
+  return false
+end
