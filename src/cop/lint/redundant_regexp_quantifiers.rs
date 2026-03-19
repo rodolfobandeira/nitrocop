@@ -52,6 +52,12 @@ impl Cop for RedundantRegexpQuantifiers {
         // Find redundant quantifiers: (?:...Q1)Q2 where both are greedy quantifiers
         // and the group contains only a single element with quantifier Q1
         check_redundant_quantifiers(self, source, content_str, &regexp, diagnostics);
+
+        // Find interval quantifiers followed by `?` where the interval normalizes
+        // to a simple quantifier (e.g., `{0,1}?`, `{1,}?`, `{0,}?`).
+        // regexp_parser treats these as implicit non-capturing groups, so RuboCop
+        // flags them as redundant quantifier pairs.
+        check_interval_with_reluctant(self, source, content_str, &regexp, diagnostics);
     }
 }
 
@@ -395,6 +401,91 @@ fn find_single_element_quantifier(inner: &[u8]) -> Option<(Quantifier, usize)> {
     }
 
     Some((q, q_end))
+}
+
+/// Check for interval quantifiers followed by `?` where the interval normalizes
+/// to a simple quantifier. For example, `s{0,1}?` is treated by regexp_parser as
+/// an implicit `(?:s{0,1})?` group, and RuboCop flags it as redundant.
+/// Only normalizable intervals are flagged: `{0,1}` (→ `?`), `{1,}` (→ `+`), `{0,}` (→ `*`).
+fn check_interval_with_reluctant(
+    cop: &RedundantRegexpQuantifiers,
+    source: &SourceFile,
+    pattern: &str,
+    regexp: &ruby_prism::RegularExpressionNode<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let bytes = pattern.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+
+        // Skip character classes
+        if bytes[i] == b'[' {
+            i += 1;
+            if i < len && bytes[i] == b'^' {
+                i += 1;
+            }
+            if i < len && bytes[i] == b']' {
+                i += 1;
+            }
+            while i < len && bytes[i] != b']' {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < len {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip non-quantifier characters — we're looking for `{` that starts an interval
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+
+        // Try to parse an interval quantifier at position i
+        if let Some((Quantifier::Interval(min, max), q_end)) = parse_quantifier(bytes, i) {
+            // Check if followed by `?`
+            if q_end < len && bytes[q_end] == b'?' {
+                // Check if the interval normalizes to a simple quantifier
+                let normalized = normalize_quantifier(&Quantifier::Interval(min, max));
+                if !matches!(normalized, Quantifier::Interval(_, _)) {
+                    let inner_display = quantifier_display(&Quantifier::Interval(min, max));
+                    let outer_display = "?".to_string();
+                    let combined = combine_quantifiers(&normalized, &Quantifier::Question);
+                    let combined_display = quantifier_display(&combined);
+
+                    let loc = regexp.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(cop.diagnostic(
+                        source,
+                        line,
+                        column,
+                        format!(
+                            "Replace redundant quantifiers `{}` and `{}` with a single `{}`.",
+                            inner_display, outer_display, combined_display
+                        ),
+                    ));
+                }
+            }
+            // Advance past the quantifier (and any modifier)
+            i = q_end;
+            if i < len && (bytes[i] == b'?' || bytes[i] == b'+') {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
 }
 
 fn contains_capture_group(pattern: &str) -> bool {
