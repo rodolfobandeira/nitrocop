@@ -1,8 +1,8 @@
-use crate::cop::node_type::CALL_NODE;
-use crate::cop::util::{self, RSPEC_DEFAULT_INCLUDE, has_rspec_focus_metadata, is_rspec_focused};
+use crate::cop::util::{self, RSPEC_DEFAULT_INCLUDE, is_rspec_focused};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// RSpec/Focus: Checks if examples are focused.
 ///
@@ -85,42 +85,68 @@ impl Cop for Focus {
         RSPEC_DEFAULT_INCLUDE
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
+        let mut visitor = FocusVisitor {
+            cop: self,
+            source,
+            diagnostics,
+            def_depth: 0,
         };
+        visitor.visit(&parse_result.node());
+    }
+}
 
+struct FocusVisitor<'a> {
+    cop: &'a Focus,
+    source: &'a SourceFile,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    /// Depth inside method definitions (def/defs). When > 0, skip flagging.
+    /// Matches RuboCop's `node.each_ancestor(:any_def).any?`.
+    def_depth: u32,
+}
+
+impl<'pr> Visit<'pr> for FocusVisitor<'_> {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        self.def_depth += 1;
+        ruby_prism::visit_def_node(self, node);
+        self.def_depth -= 1;
+    }
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // Skip focus detection inside method definitions
+        if self.def_depth == 0 {
+            self.check_focus(node);
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+impl FocusVisitor<'_> {
+    fn check_focus(&mut self, call: &ruby_prism::CallNode<'_>) {
         let method_name = call.name().as_slice();
 
         // Check for f-prefixed methods (fit, fdescribe, fcontext, etc.)
-        // Also matches bare `focus` calls from Ruby 3.1+ shorthand `focus:` (which
-        // desugars to `focus: focus` where the value is `(send nil? :focus)`).
+        // Also matches bare `focus` calls from Ruby 3.1+ shorthand `focus:`.
         if is_rspec_focused(method_name) {
-            // Only flag receiverless calls (fit, fdescribe, focus, etc.).
-            // Calls like analyzer.fit(x) have a receiver and are not RSpec focus.
-            if call.receiver().is_none() && !is_chained_call(source, &call) {
+            // Only flag receiverless calls. Calls like analyzer.fit(x) have a
+            // receiver and are not RSpec focus.
+            if call.receiver().is_none() && !is_chained_call(self.source, call) {
                 let loc = call.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(Diagnostic {
-                    path: source.path_str().to_string(),
+                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                self.diagnostics.push(Diagnostic {
+                    path: self.source.path_str().to_string(),
                     location: crate::diagnostic::Location { line, column },
                     severity: Severity::Convention,
-                    cop_name: self.name().to_string(),
+                    cop_name: self.cop.name().to_string(),
                     message: "Focused spec found.".to_string(),
-
                     corrected: false,
                 });
             }
@@ -128,7 +154,6 @@ impl Cop for Focus {
         }
 
         // Check for focus metadata on RSpec methods
-        // Must be a recognized RSpec method OR RSpec.describe / ::RSpec.describe
         let is_rspec_method = if call.receiver().is_none() {
             is_focusable_method(method_name)
         } else if let Some(recv) = call.receiver() {
@@ -143,16 +168,45 @@ impl Cop for Focus {
         }
 
         // Check for focus: true or :focus in arguments
-        if let Some((line, col, _offset, _len)) = has_rspec_focus_metadata(source, node) {
-            diagnostics.push(Diagnostic {
-                path: source.path_str().to_string(),
-                location: crate::diagnostic::Location { line, column: col },
-                severity: Severity::Convention,
-                cop_name: self.name().to_string(),
-                message: "Focused spec found.".to_string(),
-
-                corrected: false,
-            });
+        if let Some(args) = call.arguments() {
+            for arg in args.arguments().iter() {
+                // Check for :focus symbol in arguments
+                if let Some(sym) = arg.as_symbol_node() {
+                    if sym.unescaped() == b"focus" {
+                        let loc = sym.location();
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        self.diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Focused spec found.".to_string(),
+                        ));
+                        return;
+                    }
+                }
+                // Check for focus: true in hash arguments
+                if let Some(hash) = arg.as_keyword_hash_node() {
+                    for elem in hash.elements().iter() {
+                        if let Some(pair) = elem.as_assoc_node() {
+                            if let Some(key) = pair.key().as_symbol_node() {
+                                if key.unescaped() == b"focus" {
+                                    if pair.value().as_true_node().is_some() {
+                                        let start = key.location().start_offset();
+                                        let (line, column) = self.source.offset_to_line_col(start);
+                                        self.diagnostics.push(self.cop.diagnostic(
+                                            self.source,
+                                            line,
+                                            column,
+                                            "Focused spec found.".to_string(),
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

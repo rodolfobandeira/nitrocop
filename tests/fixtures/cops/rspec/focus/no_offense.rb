@@ -12,3 +12,11 @@ let(:copied) { Marshal.load(Marshal.dump(analyzer.fit(x))) }
 expect { dummy_class.fit }.to raise_error(NotImplementedError)
 thing.focus
 obj.fdescribe(arg)
+# focus inside a method definition is not RSpec focus
+def set_value(field_name, value)
+  focus(field_name)
+  field(field_name).set_value(value)
+end
+def self.create_focused
+  fit(params)
+end
