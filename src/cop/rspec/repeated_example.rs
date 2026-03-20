@@ -236,6 +236,18 @@ use std::collections::HashMap;
 /// definitions (like `def self.impersonates_a(klass); it { ... }; end`) were not found
 /// because the recursive example collection didn't recurse into method bodies.
 /// Fix: added `DefNode` case to `iter_child_nodes`.
+///
+/// **Investigation (2026-03-20):** 0 FPs and 8 FNs remaining.
+///
+/// FN root cause: `ClassNode` and `ModuleNode` not handled in `iter_child_nodes`.
+/// Examples inside class bodies (e.g., `class SomeSpec < Minitest::Spec` inside a
+/// `before(:context)` block) and module bodies (e.g., `module ActsLikeAJob` containing
+/// `def self.included(base); base.class_eval do; it "test" do; ...`) were not found
+/// because the recursive example collection didn't recurse into class/module bodies.
+/// DataDog/datadog-ci-rb: 6 FNs from `it "does not fail"` repeated inside class body
+/// within `before(:context)` block. que-rb/que: 2 FNs from `it` blocks with identical
+/// bodies inside `module > def > class_eval` chain.
+/// Fix: added `ClassNode` and `ModuleNode` cases to `iter_child_nodes`.
 pub struct RepeatedExample;
 
 impl Cop for RepeatedExample {
@@ -541,6 +553,24 @@ fn iter_child_nodes<'a>(node: &ruby_prism::Node<'a>) -> Vec<ruby_prism::Node<'a>
     if let Some(def_node) = node.as_def_node() {
         let mut children = Vec::new();
         if let Some(body) = def_node.body() {
+            children.push(body);
+        }
+        return children;
+    }
+    // For ClassNode: examples inside class bodies (e.g., `class Spec < Minitest::Spec`
+    // inside a `before(:context)` block) should be found. RuboCop's `find_all_in_scope`
+    // recurses into class bodies since they're not scope changes.
+    if let Some(class_node) = node.as_class_node() {
+        let mut children = Vec::new();
+        if let Some(body) = class_node.body() {
+            children.push(body);
+        }
+        return children;
+    }
+    // For ModuleNode: same as ClassNode — recurse into module bodies.
+    if let Some(module_node) = node.as_module_node() {
+        let mut children = Vec::new();
+        if let Some(body) = module_node.body() {
             children.push(body);
         }
         return children;
@@ -1549,6 +1579,69 @@ end
             diags.len(),
             2,
             "implicit keyword hash and explicit hash should be duplicates: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn class_body_inside_before_block() {
+        // Examples inside class bodies within before(:context) blocks should
+        // be detected as repeated. RuboCop recurses into class bodies.
+        let source = br#"
+describe "minitest" do
+  before(:context) do
+    class SomeSpec < Minitest::Spec
+      it "does not fail" do
+      end
+      minitest_describe "in context" do
+        it "does not fail" do
+        end
+      end
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "repeated 'it' inside class body should be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn module_body_with_class_eval() {
+        // Examples inside module -> def -> class_eval should be detected.
+        // This matches the que-rb pattern.
+        let source = br#"
+describe "job" do
+  module ActsLikeAJob
+    def self.included(base)
+      base.class_eval do
+        it "first" do
+          call(a: 1, b: 2)
+          execute
+          assert_equal([], $args)
+          assert_equal({ a: 1, b: 2 }, $result)
+        end
+
+        it "second" do
+          call(a: 1, b: 2)
+          execute
+          assert_equal([], $args)
+          assert_equal({a: 1, b: 2}, $result)
+        end
+      end
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&RepeatedExample, source);
+        assert_eq!(
+            diags.len(),
+            2,
+            "repeated examples in module/class_eval body should be flagged: {:?}",
             diags
         );
     }

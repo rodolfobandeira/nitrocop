@@ -134,3 +134,21 @@ describe 'keyword hash vs explicit hash' do
     cleaner.strategy = :truncation, { param: "one" }
   end
 end
+
+# Examples inside class bodies within before(:context) blocks should be detected.
+# RuboCop recursively searches into class bodies for examples.
+describe "minitest spec inside before" do
+  before(:context) do
+    class SomeSpec < Minitest::Spec
+      it "does not fail" do
+      ^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 122.
+      end
+
+      minitest_describe "in context" do
+        it "does not fail" do
+        ^^^^^^^^^^^^^^^^^^^^^ RSpec/RepeatedExample: Don't repeat examples within an example group. Repeated on line(s) 118.
+        end
+      end
+    end
+  end
+end

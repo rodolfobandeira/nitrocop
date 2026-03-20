@@ -388,3 +388,15 @@ describe 'nesting structure differences' do
     end.should raise_error(RuntimeError)
   end
 end
+
+# Examples with hash literal spacing differences but same AST are duplicates,
+# so the no_offense case is when they have DIFFERENT hash content
+describe "hash spacing no offense" do
+  it "first" do
+    assert_equal({ a: 1, b: 2 }, $result)
+  end
+
+  it "second" do
+    assert_equal({a: 1, b: 3}, $result)
+  end
+end
