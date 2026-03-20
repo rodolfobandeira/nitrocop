@@ -99,6 +99,7 @@ Style/ConstantVisibility:
   Enabled: true
 Style/Copyright:
   Enabled: true
+  AutocorrectNotice: '# Copyright (c) 2024 Acme Inc.'
 Style/DateTime:
   Enabled: true
 Style/DisableCopsWithinSourceCodeDirective:
