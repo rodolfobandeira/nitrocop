@@ -77,6 +77,20 @@ use crate::parse::source::SourceFile;
 ///
 /// **Remaining gaps:** Some edge cases with heredocs inside conditions
 /// (e.g., `return true if <<~TEXT.length > bar`) may still differ.
+///
+/// ## Corpus conformance investigation (2026-03-20)
+///
+/// A remaining FN pattern came from lines like:
+/// `return 'Object' if duck_type?` followed by
+/// `return condition ? a : b`.
+///
+/// The previous `is_ternary_guard_line` helper worked on raw text and treated
+/// any next line containing a ternary with a guard keyword somewhere on the
+/// line as if the next sibling were a ternary guard clause. RuboCop's AST-level
+/// check only suppresses offenses when the next sibling itself is an `if`/`unless`
+/// node (including ternary `IfNode`), not when a bare `return` statement happens
+/// to contain a ternary expression in its value. Fix: reject ternary-guard
+/// suppression when the line itself starts with a guard keyword.
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.
@@ -924,6 +938,17 @@ fn find_line_index_from(lines: &[&[u8]], from_idx: usize, content: &[u8]) -> Opt
 /// ` ? ` (question mark preceded by non-`?` and followed by space) that is NOT
 /// inside a string literal, plus a `:` separator.
 fn is_ternary_guard_line(content: &[u8]) -> bool {
+    // RuboCop only suppresses when the next sibling itself is a ternary IfNode.
+    // Lines that START with `return`/`raise`/`next`/`break` are bare guard
+    // statements whose value happens to contain a ternary expression, not
+    // ternary guard siblings.
+    if GUARD_METHODS
+        .iter()
+        .any(|keyword| starts_with_keyword(content, keyword))
+    {
+        return false;
+    }
+
     // Look for ` ? ` pattern outside of string literals.
     // A Ruby ternary looks like: `expr ? true_branch : false_branch`
     // Method calls ending in `?` look like: `foo.bar?` or `bar?(args)`

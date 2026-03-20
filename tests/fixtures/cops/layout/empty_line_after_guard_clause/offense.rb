@@ -211,3 +211,9 @@ def test_login
   assert(s.is_a?(String), "must return a String or nil")
 end
 
+# FN fix: bare return with ternary value is not a ternary guard sibling
+def namespace
+  return 'Object' if duck_type?
+  ^ Layout/EmptyLineAfterGuardClause: Add empty line after guard clause.
+  return (name == 'Class' || name == 'Module') && !subtypes.empty? ? subtypes.first.name : name
+end
