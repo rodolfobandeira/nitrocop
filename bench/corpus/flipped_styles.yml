@@ -392,7 +392,7 @@ Style/LambdaCall:
   EnforcedStyle: braces  # default: call
 
 Style/MagicCommentFormat:
-  EnforcedStyle: lowercase  # default: snake_case
+  EnforcedStyle: kebab_case  # default: snake_case
 
 Style/MethodCallWithArgsParentheses:
   EnforcedStyle: omit_parentheses  # default: require_parentheses
