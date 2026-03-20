@@ -142,6 +142,28 @@ use crate::parse::source::SourceFile;
 /// line before the following statement. Fix: keep handling ternaries
 /// separately, but do not reject ordinary `if` nodes just because they have
 /// `elsif`/`else` branches.
+///
+/// **Reverted experiment (2026-03-20): UTF-8 same-line slicing and raw-text
+/// guard-keyword boundary tightening**
+/// - Attempted fix: commit `b6471854` (reverted in `74be9231`) fixed real FN
+///   patterns where modifier guards contained UTF-8 bytes (`"✓"`, `"✅"`) and
+///   where the next sibling line merely contained guard-like method names such
+///   as `::Kernel.raise`, `fail!`, or `next!`.
+/// - Acceptance gate before the experiment:
+///   `check-cop.py --verbose --rerun` reported `expected=21,085 actual=21,124
+///   excess=39 missing=0`, and `verify-cop-locations.py` was at `FN 16 remain`.
+/// - Acceptance gate after the experiment:
+///   `check-cop.py --verbose --rerun` reported `expected=21,085 actual=21,134
+///   excess=49 missing=0`, while `verify-cop-locations.py` improved to
+///   `FN 10 remain`.
+/// - Effect: the change fixed 6 known oracle FN locations, but introduced 10
+///   additional aggregate excess offenses elsewhere in the corpus.
+/// - Root cause of regression: the raw-text sibling classification became
+///   broader/narrower in ways that improved known examples but changed
+///   guard-line suppression behavior on previously-unseen repo patterns.
+/// - A correct future fix needs repo-level identification of those new excess
+///   offenses first; do not reland the reverted boundary-tightening approach
+///   without isolating the regressions.
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.
