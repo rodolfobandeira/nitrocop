@@ -170,7 +170,7 @@ fn check_and(
 
     for subject in &subjects {
         if let Some(ref parent_text) = subject.parent_text {
-            if subject_texts.iter().any(|t| *t == parent_text.as_str()) {
+            if subject_texts.contains(&parent_text.as_str()) {
                 let loc = whole_node.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(cop.diagnostic(
