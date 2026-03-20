@@ -154,3 +154,16 @@ describe SomeClass do
     puts ITER_CONST
   end
 end
+
+# Constants inside Class.new block body within hooks (FN=4 from ffi repos)
+describe "functions with custom parameter types" do
+  before :each do
+    Custom_enum = Class.new do
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+      ToNativeMap = { :a => 1, :b => 2 }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+      FromNativeMap = { 1 => :a, 2 => :b }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyConstantDeclaration: Stub constant instead of declaring explicitly.
+    end
+  end
+end

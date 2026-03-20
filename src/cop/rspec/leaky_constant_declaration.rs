@@ -47,9 +47,13 @@ use ruby_prism::Visit;
 ///    Also handles splatted constant targets in the `rest()` position.
 /// 2. `ForNode` with constant iterator (2 FNs): `for CONST in collection` uses a
 ///    ConstantTargetNode as the loop index variable.
-/// 3. Remaining 4 FNs from ffi repos (`ToNativeMap= {...}` inside `Class.new do ... end`)
-///    appear to be Ruby parsing edge cases — the no-space-before-`=` syntax may be parsed
-///    as a method call rather than constant assignment by Prism.
+///
+/// **Root cause of FN=4 (round 6):** Constant write visitors (`visit_constant_write_node`, etc.)
+/// did not recurse into their children. When `Custom_enum = Class.new do...end` was visited,
+/// the outer `ConstantWriteNode` was flagged but the `Class.new` block body (containing
+/// `ToNativeMap` and `FromNativeMap` assignments) was never traversed.
+/// Fix: added `ruby_prism::visit_constant_*_write_node(self, node)` calls to all four
+/// constant write visitors so they recurse into their value expressions.
 pub struct LeakyConstantDeclaration;
 
 impl Cop for LeakyConstantDeclaration {
@@ -143,6 +147,9 @@ impl Visit<'_> for LeakyVisitor<'_> {
                 "Stub constant instead of declaring explicitly.".to_string(),
             ));
         }
+        // Recurse into the value — it may contain blocks (e.g., Class.new do...end)
+        // with more constant assignments inside.
+        ruby_prism::visit_constant_write_node(self, node);
     }
 
     fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'_>) {
@@ -156,6 +163,7 @@ impl Visit<'_> for LeakyVisitor<'_> {
                 "Stub constant instead of declaring explicitly.".to_string(),
             ));
         }
+        ruby_prism::visit_constant_or_write_node(self, node);
     }
 
     fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'_>) {
@@ -169,6 +177,7 @@ impl Visit<'_> for LeakyVisitor<'_> {
                 "Stub constant instead of declaring explicitly.".to_string(),
             ));
         }
+        ruby_prism::visit_constant_and_write_node(self, node);
     }
 
     fn visit_constant_operator_write_node(
@@ -185,6 +194,7 @@ impl Visit<'_> for LeakyVisitor<'_> {
                 "Stub constant instead of declaring explicitly.".to_string(),
             ));
         }
+        ruby_prism::visit_constant_operator_write_node(self, node);
     }
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'_>) {
