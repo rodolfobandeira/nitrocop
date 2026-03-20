@@ -411,12 +411,18 @@ impl<'pr> Visit<'pr> for SuperArgumentsVisitor<'_> {
                     return;
                 }
             }
-            // Also skip anonymous rest (*) and anonymous block (&) — Ruby 3.2+
+            // Also skip anonymous rest (*) — Ruby 3.2+
             if let Some(rest) = params.rest() {
                 if rest
                     .as_rest_parameter_node()
                     .is_some_and(|r| r.name().is_none())
                 {
+                    return;
+                }
+            }
+            // Skip anonymous block (&) — Ruby 3.1+
+            if let Some(block) = params.block() {
+                if block.name().is_none() {
                     return;
                 }
             }

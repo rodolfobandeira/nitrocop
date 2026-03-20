@@ -86,3 +86,8 @@ end
 describe 'example' do
   subject { super() }
 end
+
+# Anonymous block param (&) — super has different forwarding semantics
+def create(promise = nil, &)
+  super(promise)
+end
