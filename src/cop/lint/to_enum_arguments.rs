@@ -29,6 +29,12 @@
 /// iterate over each def parameter (excluding block), advance a positional
 /// index for required/optional/rest params, and verify source text matches.
 /// Keyword params check the KeywordHashNode for matching `key: key` pairs.
+///
+/// 5. **Ruby 3.1 shorthand hash syntax**: `enum_for(__method__, prefix:)`
+///    uses value omission where `prefix:` means `prefix: prefix`. Prism
+///    wraps the value in an `ImplicitNode` containing a `LocalVariableReadNode`.
+///    Fix: unwrap `ImplicitNode` in `assoc_value_matches_param` before checking
+///    the local variable name.
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -230,6 +236,22 @@ fn arguments_match(call_args: &[ruby_prism::Node<'_>], params: &[ParamKind]) -> 
     true
 }
 
+/// Check if the value of an AssocNode is a local variable read matching `param_name`.
+/// Handles both explicit `key: key` and Ruby 3.1+ shorthand `key:` (ImplicitNode wrapper).
+fn assoc_value_matches_param(value: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
+    // Direct local variable read: `key: key`
+    if let Some(lvar) = value.as_local_variable_read_node() {
+        return lvar.name().as_slice() == param_name;
+    }
+    // Ruby 3.1+ shorthand `key:` — Prism wraps the value in an ImplicitNode
+    if let Some(implicit) = value.as_implicit_node() {
+        if let Some(lvar) = implicit.value().as_local_variable_read_node() {
+            return lvar.name().as_slice() == param_name;
+        }
+    }
+    false
+}
+
 /// Check if any call argument is a hash containing a `name: name` pair.
 fn any_call_arg_has_keyword_pair(call_args: &[ruby_prism::Node<'_>], param_name: &[u8]) -> bool {
     for arg in call_args {
@@ -238,13 +260,10 @@ fn any_call_arg_has_keyword_pair(call_args: &[ruby_prism::Node<'_>], param_name:
                 if let Some(assoc) = elem.as_assoc_node() {
                     // Check key is a symbol matching param_name
                     if let Some(sym_key) = assoc.key().as_symbol_node() {
-                        if sym_key.unescaped() == param_name {
-                            // Check value is a local variable read with same name
-                            if let Some(lvar) = assoc.value().as_local_variable_read_node() {
-                                if lvar.name().as_slice() == param_name {
-                                    return true;
-                                }
-                            }
+                        if sym_key.unescaped() == param_name
+                            && assoc_value_matches_param(&assoc.value(), param_name)
+                        {
+                            return true;
                         }
                     }
                 }
@@ -255,12 +274,10 @@ fn any_call_arg_has_keyword_pair(call_args: &[ruby_prism::Node<'_>], param_name:
             for elem in h.elements().iter() {
                 if let Some(assoc) = elem.as_assoc_node() {
                     if let Some(sym_key) = assoc.key().as_symbol_node() {
-                        if sym_key.unescaped() == param_name {
-                            if let Some(lvar) = assoc.value().as_local_variable_read_node() {
-                                if lvar.name().as_slice() == param_name {
-                                    return true;
-                                }
-                            }
+                        if sym_key.unescaped() == param_name
+                            && assoc_value_matches_param(&assoc.value(), param_name)
+                        {
+                            return true;
                         }
                     }
                 }

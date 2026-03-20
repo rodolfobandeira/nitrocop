@@ -49,3 +49,13 @@ end
 def convert(x)
   return to_enum(:other) unless block_given?
 end
+
+# Ruby 3.1 shorthand hash syntax (prefix: is equivalent to prefix: prefix)
+def each_key(prefix: nil, &)
+  return enum_for(__method__, prefix:) unless block_given?
+end
+
+# Ruby 3.1 shorthand hash syntax with multiple keywords
+def search(name:, limit: 10)
+  return to_enum(:search, name:, limit:) unless block_given?
+end
