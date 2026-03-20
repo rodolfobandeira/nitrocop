@@ -34,6 +34,16 @@ use crate::parse::source::SourceFile;
 /// returns None. Previously the exemption fired because `!in_array_literal`
 /// was true. Now the exemption requires being in a method call context
 /// (either `(` bracket or `[]` method call bracket).
+///
+/// ## FN=2 fix: `*Array.new(...)` patterns
+///
+/// RuboCop also flags `*Array.new(n)` and `*Array.new(n) { block }` as
+/// redundant splat expansions via the `array_new?` / `literal_expansion`
+/// matchers. Exemptions mirror RuboCop: `when`/`rescue` clauses skip,
+/// multi-element array literals (`[1, *Array.new(n), 2]`) skip, but
+/// assignments, method args, single-element arrays, and `[]` method
+/// calls are flagged. In Prism, both `Array.new(n)` and
+/// `Array.new(n) { block }` are `CallNode`s (block is a child).
 pub struct RedundantSplatExpansion;
 
 impl Cop for RedundantSplatExpansion {
@@ -84,7 +94,43 @@ impl Cop for RedundantSplatExpansion {
             || child.as_float_node().is_some()
             || child.as_interpolated_string_node().is_some();
 
-        if !is_literal {
+        // Check if the splat is on Array.new(...) or Array.new(...) { block }
+        let is_array_new = is_array_new_call(&child);
+
+        if !is_literal && !is_array_new {
+            return;
+        }
+
+        // Array.new has special exemption rules from RuboCop:
+        // - NOT flagged in `when` or `rescue` clauses
+        // - NOT flagged in multi-element array literals (`[1, *Array.new(n), 2]`)
+        // - Flagged in assignments, method args, and single-element array literals
+        if is_array_new {
+            let bytes = source.as_bytes();
+            let start = splat.location().start_offset();
+
+            // Check if inside a multi-element array literal (exempt)
+            if is_array_new_inside_multi_element_array(source, &splat) {
+                return;
+            }
+
+            // Check if in when/rescue context (exempt)
+            if is_preceded_by_keyword(bytes, start) {
+                return;
+            }
+
+            // For Array.new not in when/rescue/multi-array, check if in a
+            // non-assignment context. RuboCop exempts Array.new in non-assignment
+            // grandparent contexts (e.g., standalone expressions) but does flag
+            // them in method call arguments and assignments.
+            // We flag: assignments, method args, single-element array literals.
+            // The is_preceded_by_keyword check above handles when/rescue.
+            // Method args and assignments pass through.
+
+            let loc = splat.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            let message = "Replace splat expansion with comma separated values.";
+            diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
             return;
         }
 
@@ -126,6 +172,91 @@ impl Cop for RedundantSplatExpansion {
 
         diagnostics.push(self.diagnostic(source, line, column, message.to_string()));
     }
+}
+
+/// Check if a node is an `Array.new(...)` or `::Array.new(...)` call,
+/// including with a block: `Array.new(...) { ... }`.
+/// In Prism, `Array.new(5) { block }` is a CallNode with a block child,
+/// so both forms are CallNodes.
+fn is_array_new_call(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        return is_array_new_send(&call);
+    }
+    false
+}
+
+/// Check if a CallNode is `Array.new` or `::Array.new`.
+fn is_array_new_send(call: &ruby_prism::CallNode<'_>) -> bool {
+    if call.name().as_slice() != b"new" {
+        return false;
+    }
+    if let Some(receiver) = call.receiver() {
+        // `Array.new` — receiver is ConstantReadNode "Array"
+        if let Some(const_read) = receiver.as_constant_read_node() {
+            return const_read.name().as_slice() == b"Array";
+        }
+        // `::Array.new` — receiver is ConstantPathNode with nil parent and "Array" name
+        if let Some(const_path) = receiver.as_constant_path_node() {
+            if const_path.parent().is_none() {
+                return const_path
+                    .name()
+                    .is_some_and(|n| n.as_slice() == b"Array");
+            }
+        }
+    }
+    false
+}
+
+/// Check if a splat containing Array.new is inside a multi-element array literal.
+/// `[1, *Array.new(n), 2]` → exempt (true); `[*Array.new(n)]` → not exempt (false).
+fn is_array_new_inside_multi_element_array(
+    source: &SourceFile,
+    splat: &ruby_prism::SplatNode<'_>,
+) -> bool {
+    let bytes = source.as_bytes();
+    let start = splat.location().start_offset();
+    match find_enclosing_bracket(bytes, start) {
+        Some((b'[', bracket_pos)) => {
+            if is_method_call_bracket(bytes, bracket_pos) {
+                // This is Foo[*Array.new(n)] — a method call, not an array literal
+                return false;
+            }
+            // It's an array literal. Check if there are other elements (commas outside the splat).
+            has_sibling_elements(bytes, bracket_pos, start, splat.location().end_offset())
+        }
+        _ => false,
+    }
+}
+
+/// Check if there are sibling elements in the array literal (i.e., commas outside the splat).
+/// `bracket_pos` is the position of `[`, `splat_start`..`splat_end` is the splat range.
+fn has_sibling_elements(
+    bytes: &[u8],
+    bracket_pos: usize,
+    splat_start: usize,
+    splat_end: usize,
+) -> bool {
+    // Look for a comma between `[` and the splat start
+    let before = &bytes[bracket_pos + 1..splat_start];
+    if before.contains(&b',') {
+        return true;
+    }
+    // Look for a comma after the splat end, scanning until we find `]`
+    let mut depth = 0i32;
+    for &b in &bytes[splat_end..] {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Check if an array node is a percent literal (%w, %W, %i, %I).

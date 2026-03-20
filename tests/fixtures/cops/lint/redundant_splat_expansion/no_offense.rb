@@ -15,3 +15,19 @@ NoteSet[*%w[C D E]]
 Hash[*%w[hello world]]
 obj[*%w[a b c]]
 @cmd[*%w[test roar]]
+
+# Array.new in multi-element array literal — not flagged
+[1, 2, *Array.new(foo), 6]
+
+# Array.new in when clause — not flagged
+case foo
+when *Array.new(3) { 42 }
+  bar
+end
+
+# Array.new in rescue clause — not flagged
+begin
+  foo
+rescue *Array.new(3) { 42 }
+  bar
+end
