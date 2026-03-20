@@ -13,4 +13,19 @@ RSpec.describe 'test' do
     expect(42).to eq(42)
     ^^^^^^^^^^^^^^^^^^^^ RSpec/IdenticalEqualityAssertion: Identical expressions on both sides of the equality may indicate a flawed test.
   end
+
+  it 'compares dot vs constant path for lowercase method' do
+    expect(Obj.method_name).to eq(Obj::method_name)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IdenticalEqualityAssertion: Identical expressions on both sides of the equality may indicate a flawed test.
+  end
+
+  it 'compares empty array literals' do
+    expect(%i{}).to eq([])
+    ^^^^^^^^^^^^^^^^^^^^^^ RSpec/IdenticalEqualityAssertion: Identical expressions on both sides of the equality may indicate a flawed test.
+  end
+
+  it 'compares regex with equivalent escapes' do
+    expect(/[\§]/).to eq(/[§]/)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/IdenticalEqualityAssertion: Identical expressions on both sides of the equality may indicate a flawed test.
+  end
 end
