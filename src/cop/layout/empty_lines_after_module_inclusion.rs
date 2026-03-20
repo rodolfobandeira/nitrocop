@@ -210,7 +210,7 @@ fn is_allowed_following_line(trimmed: &[u8], allow_grouped_inclusions: bool) -> 
         || trimmed.starts_with(b"]")
 }
 
-fn trailing_code_after<'a>(source: &'a SourceFile, end_offset: usize) -> &'a [u8] {
+fn trailing_code_after(source: &SourceFile, end_offset: usize) -> &[u8] {
     let bytes = source.as_bytes();
     let end = end_offset.min(bytes.len());
     let line_end = bytes[end..]
