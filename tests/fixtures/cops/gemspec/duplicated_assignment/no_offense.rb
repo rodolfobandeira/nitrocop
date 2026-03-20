@@ -6,4 +6,6 @@ Gem::Specification.new do |spec|
   spec.authors = ['Author']
   spec.files = Dir['lib/**/*']
   spec.homepage = 'https://example.com'
+  spec.metadata['allowed_push_host'] = 'https://rubygems.org'
+  spec.metadata['changelog_uri'] = 'https://example.com/changelog'
 end

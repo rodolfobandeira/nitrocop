@@ -36,11 +36,10 @@ impl Cop for DuplicatedAssignment {
                 continue;
             }
 
-            // Match patterns like `spec.name = ...` or `s.version = ...`
-            // but not `spec.requirements <<` (append) or method calls without `=`
-            if let Some(attr) = extract_assignment_attr(trimmed) {
-                let line_num = line_idx + 1;
-                match seen.entry(attr) {
+            let line_num = line_idx + 1;
+            let attrs = extract_assignment_attrs(trimmed);
+            for attr in &attrs {
+                match seen.entry(attr.clone()) {
                     std::collections::hash_map::Entry::Occupied(e) => {
                         // Find the position of the attribute in the original line
                         let dot_pos = line_str.find('.').unwrap_or(0);
@@ -64,36 +63,71 @@ impl Cop for DuplicatedAssignment {
     }
 }
 
-/// Extract the attribute name from a line like `spec.name = 'foo'`.
-/// Returns None for non-assignment lines or append operations (<<).
-fn extract_assignment_attr(trimmed: &str) -> Option<String> {
-    // Look for pattern: <identifier>.<attribute> = ...
-    // Must have a dot, then an identifier, then ` = ` or `= `
-    let dot_pos = trimmed.find('.')?;
-    let after_dot = &trimmed[dot_pos + 1..];
+/// Extract all assignment attribute names from a line like `spec.name = 'foo'`.
+/// Returns empty vec for non-assignment lines or append operations (<<).
+/// Returns multiple entries for self-assignment patterns like `spec.name = spec.name = 'foo'`.
+fn extract_assignment_attrs(trimmed: &str) -> Vec<String> {
+    let mut attrs = Vec::new();
+    let mut search_from = 0;
 
-    // Extract attribute name (alphanumeric + underscore)
-    let attr_end = after_dot
-        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .unwrap_or(after_dot.len());
-    if attr_end == 0 {
-        return None;
-    }
-    let attr = &after_dot[..attr_end];
-    let rest = after_dot[attr_end..].trim_start();
+    while search_from < trimmed.len() {
+        let remaining = &trimmed[search_from..];
+        let rel_dot_pos = match remaining.find('.') {
+            Some(p) => p,
+            None => break,
+        };
+        let after_dot = &remaining[rel_dot_pos + 1..];
 
-    // Must be followed by `=` but not `==` or `<<`
-    if rest.starts_with("= ") || rest.starts_with("=\n") || rest == "=" {
-        // But not `==`
-        if rest.starts_with("==") {
-            return None;
+        // Extract attribute name (alphanumeric + underscore)
+        let attr_end = after_dot
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(after_dot.len());
+        if attr_end == 0 {
+            search_from += rel_dot_pos + 1;
+            continue;
         }
-        Some(attr.to_string())
-    } else if rest.starts_with('=') && rest.len() > 1 && rest.as_bytes()[1] != b'=' {
-        Some(attr.to_string())
-    } else {
-        None
+        let attr_name = &after_dot[..attr_end];
+        let after_attr = &after_dot[attr_end..];
+
+        // Check for bracket-style access: spec.metadata['key'] = val
+        let (full_attr, rest_str) = if after_attr.starts_with('[') {
+            if let Some(bracket_end) = after_attr.find(']') {
+                let bracket_part = &after_attr[..=bracket_end];
+                let full = format!("{}{}", attr_name, bracket_part);
+                let after_bracket = after_attr[bracket_end + 1..].trim_start();
+                (full, after_bracket)
+            } else {
+                search_from += rel_dot_pos + 1 + attr_end;
+                continue;
+            }
+        } else {
+            (attr_name.to_string(), after_attr.trim_start())
+        };
+
+        // Must be followed by `=` but not `==` or `<<`
+        let is_assignment = if rest_str.starts_with("==") {
+            false
+        } else if rest_str.starts_with("= ") || rest_str.starts_with("=\n") || rest_str == "=" {
+            true
+        } else {
+            rest_str.starts_with('=') && rest_str.len() > 1 && rest_str.as_bytes()[1] != b'='
+        };
+
+        if is_assignment {
+            attrs.push(full_attr);
+            // Continue searching after `=` for self-assignment patterns
+            let abs_dot = search_from + rel_dot_pos;
+            if let Some(eq_offset) = trimmed[abs_dot..].find('=') {
+                search_from = abs_dot + eq_offset + 1;
+            } else {
+                break;
+            }
+        } else {
+            search_from += rel_dot_pos + 1 + attr_end;
+        }
     }
+
+    attrs
 }
 
 #[cfg(test)]
