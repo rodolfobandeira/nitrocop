@@ -1,3 +1,5 @@
+use ruby_prism::Visit;
+
 use crate::cop::node_type::{
     CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, MODULE_NODE, STATEMENTS_NODE,
 };
@@ -13,6 +15,13 @@ use crate::parse::source::SourceFile;
 /// ::RSpec.describe ...` was missed because the class wrapper was not traversed.
 /// Fix: refactored to a deep recursive search through both module and class bodies.
 /// `::RSpec.describe` (ConstantPathNode with parent=None) was already handled.
+///
+/// Corpus FN=2 root cause: deep search only recursed into `ModuleNode` and
+/// `ClassNode` but not other wrapper types like `SingletonClassNode` (`class << self`)
+/// or `DefNode` (method definitions). The capybara pattern has `RSpec.describe` nested
+/// inside `class << self` → `def specs` which was missed.
+/// Fix: use `ruby_prism::Visit` for unrestricted deep descendant search, matching
+/// RuboCop's `def_node_search` behavior.
 pub struct DescribedClassModuleWrapping;
 
 impl Cop for DescribedClassModuleWrapping {
@@ -76,58 +85,43 @@ fn contains_rspec_describe(module_node: ruby_prism::ModuleNode<'_>) -> bool {
         Some(b) => b,
         None => return false,
     };
-    body_contains_rspec_describe(&body)
+    let mut finder = RSpecDescribeFinder { found: false };
+    finder.visit(&body);
+    finder.found
 }
 
-fn body_contains_rspec_describe(node: &ruby_prism::Node<'_>) -> bool {
-    if let Some(stmts) = node.as_statements_node() {
-        for stmt in stmts.body().iter() {
-            if node_contains_rspec_describe(&stmt) {
-                return true;
+/// Visitor that does an unrestricted deep search for `RSpec.describe` calls,
+/// matching RuboCop's `def_node_search` which traverses ALL descendants.
+struct RSpecDescribeFinder {
+    found: bool,
+}
+
+impl<'pr> Visit<'pr> for RSpecDescribeFinder {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if !self.found {
+            let name = node.name().as_slice();
+            if name == b"describe" {
+                if let Some(recv) = node.receiver() {
+                    if let Some(cr) = recv.as_constant_read_node() {
+                        if cr.name().as_slice() == b"RSpec" {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                    if let Some(cp) = recv.as_constant_path_node() {
+                        if cp.name().is_some_and(|n| n.as_slice() == b"RSpec")
+                            && cp.parent().is_none()
+                        {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                }
             }
+            // Continue visiting children
+            ruby_prism::visit_call_node(self, node);
         }
     }
-    false
-}
-
-fn node_contains_rspec_describe(node: &ruby_prism::Node<'_>) -> bool {
-    if is_rspec_describe(node) {
-        return true;
-    }
-    // Recurse into nested modules
-    if let Some(nested_module) = node.as_module_node() {
-        if let Some(body) = nested_module.body() {
-            return body_contains_rspec_describe(&body);
-        }
-    }
-    // Recurse into nested classes
-    if let Some(class_node) = node.as_class_node() {
-        if let Some(body) = class_node.body() {
-            return body_contains_rspec_describe(&body);
-        }
-    }
-    false
-}
-
-fn is_rspec_describe(node: &ruby_prism::Node<'_>) -> bool {
-    let call = match node.as_call_node() {
-        Some(c) => c,
-        None => return false,
-    };
-    let name = call.name().as_slice();
-    if name != b"describe" {
-        return false;
-    }
-    // Check for RSpec receiver
-    if let Some(recv) = call.receiver() {
-        if let Some(cr) = recv.as_constant_read_node() {
-            return cr.name().as_slice() == b"RSpec";
-        }
-        if let Some(cp) = recv.as_constant_path_node() {
-            return cp.name().is_some_and(|n| n.as_slice() == b"RSpec") && cp.parent().is_none();
-        }
-    }
-    false
 }
 
 #[cfg(test)]

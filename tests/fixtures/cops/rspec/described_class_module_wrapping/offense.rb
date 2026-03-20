@@ -34,3 +34,23 @@ module VCR
     end
   end
 end
+
+# RSpec.describe deeply nested inside class << self and method defs (capybara pattern)
+module Capybara
+^^^^^^^^^^^^^^^ RSpec/DescribedClassModuleWrapping: Avoid opening modules and defining specs within them.
+  module SpecHelper
+  ^^^^^^^^^^^^^^^^^ RSpec/DescribedClassModuleWrapping: Avoid opening modules and defining specs within them.
+    class << self
+      def configure(config)
+        config.before { reset! }
+      end
+
+      def specs
+        RSpec.describe "Session" do
+          it "works" do
+          end
+        end
+      end
+    end
+  end
+end
