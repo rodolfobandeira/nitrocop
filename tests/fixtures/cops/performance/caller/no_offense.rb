@@ -11,3 +11,6 @@ caller[0..10]
 caller[2..-1]
 caller[2, 10]
 caller(1, 1)[1]
+caller_locations&.first
+caller_locations.first(4).last
+caller.first(3).find { |s| s =~ /pattern/ }

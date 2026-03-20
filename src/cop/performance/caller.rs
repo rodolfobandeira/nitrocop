@@ -3,6 +3,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Performance/Caller — flags `caller.first`, `caller[n]`, `caller_locations.first`,
+/// `caller_locations[n]` and suggests `caller(n..n).first` instead.
+///
+/// ## Investigation (2026-03-20)
+/// FP=5 in extended corpus from two patterns:
+/// 1. `caller_locations&.first` — safe navigation `&.` not matched by RuboCop (uses `send` not `csend`)
+/// 2. `caller.first(n)` / `caller_locations.first(n)` — `first` with arguments returns an array,
+///    not a single element. RuboCop's pattern `(send #slow_caller? :first)` only matches
+///    zero-argument `first`.
+/// Fixed by checking `call_operator_loc()` for `&.` and rejecting `first` with arguments.
 pub struct Caller;
 
 impl Cop for Caller {
@@ -47,15 +57,30 @@ impl Cop for Caller {
                     }
                 }
 
+                let outer_call = node.as_call_node().unwrap();
+
+                // Skip safe navigation: caller_locations&.first is not flagged by RuboCop
+                if outer_call
+                    .call_operator_loc()
+                    .is_some_and(|loc| loc.as_slice() == b"&.")
+                {
+                    return;
+                }
+
                 let is_first = chain.outer_method == b"first";
                 let is_bracket = chain.outer_method == b"[]";
 
                 if is_first {
-                    // caller.first or caller(n).first — flagged
+                    // caller.first — flagged, but caller.first(n) returns an array — skip
+                    let has_args = outer_call
+                        .arguments()
+                        .is_some_and(|args| !args.arguments().is_empty());
+                    if has_args {
+                        return;
+                    }
                 } else if is_bracket {
                     // caller[n] — only flag when the argument is a single integer
                     // caller[0..10], caller[2..-1], caller[2, 10] should NOT be flagged
-                    let outer_call = node.as_call_node().unwrap();
                     let is_single_integer = outer_call.arguments().is_some_and(|args| {
                         let a = args.arguments();
                         a.len() == 1 && a.iter().next().unwrap().as_integer_node().is_some()
