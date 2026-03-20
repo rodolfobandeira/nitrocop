@@ -79,3 +79,28 @@ describe 'multiple' do
          ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
   end
 end
+
+# Custom method (its_call) with is_expected inside a lambda-subject group
+# RuboCop flags is_expected in ANY block within an example group that has a lambda subject,
+# not just blocks of known example methods like it/specify.
+describe 'custom method block' do
+  subject { -> { process(input) } }
+  its_call('value') { is_expected.to ret([result]) }
+                      ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
+end
+
+# Custom method with should inside lambda-subject group
+describe 'custom should' do
+  subject { -> { run_action } }
+  its_call('arg') { should change { counter }.by(1) }
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
+end
+
+# Custom method inheriting lambda subject from parent group
+describe 'inherited subject' do
+  subject { -> { execute } }
+  context 'nested' do
+    its_call('test') { is_expected.to terminate }
+                       ^^^^^^^^^^^ RSpec/ImplicitBlockExpectation: Avoid implicit block expectations.
+  end
+end

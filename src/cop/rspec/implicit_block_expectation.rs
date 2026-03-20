@@ -1,4 +1,4 @@
-use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example, is_rspec_example_group};
+use crate::cop::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -28,6 +28,14 @@ use ruby_prism::Visit;
 /// Also fixed FPs: standalone `is_expected.to change { ... }` outside any
 /// example group was incorrectly flagged by the old block-matcher heuristic.
 /// RuboCop only flags when a lambda subject is in scope.
+///
+/// Additional FN fix (FN=12→0): the cop previously only checked blocks of
+/// known RSpec example methods (it/specify/etc.) for is_expected. RuboCop's
+/// implementation uses `on_send` for is_expected and walks UP through all
+/// block ancestors, so it flags is_expected in ANY block within an example
+/// group that has a lambda subject — including custom methods like `its_call`.
+/// Fixed by checking all non-subject, non-example-group child blocks when a
+/// lambda subject is in scope, matching RuboCop's ancestor-walking behavior.
 pub struct ImplicitBlockExpectation;
 
 impl Cop for ImplicitBlockExpectation {
@@ -131,17 +139,24 @@ impl ImplicitBlockVisitor<'_> {
             if let Some(call) = stmt.as_call_node() {
                 let name = call.name().as_slice();
 
-                // Example block (it/specify/etc.)
-                if call.receiver().is_none() && is_rspec_example(name) && has_lambda_subject {
-                    if let Some(bn) = call.block().and_then(|b| b.as_block_node()) {
-                        self.check_example_body(&bn);
-                    }
-                }
-
-                // Nested example group (context/describe)
-                if call.receiver().is_none() && is_rspec_example_group(name) {
-                    if let Some(bn) = call.block().and_then(|b| b.as_block_node()) {
-                        self.process_example_group(&bn, has_lambda_subject);
+                if call.receiver().is_none() {
+                    // Nested example group (context/describe) — recurse
+                    if is_rspec_example_group(name) {
+                        if let Some(bn) = call.block().and_then(|b| b.as_block_node()) {
+                            self.process_example_group(&bn, has_lambda_subject);
+                        }
+                    } else if has_lambda_subject {
+                        // Any block within a lambda-subject group: check for
+                        // is_expected/should/should_not. RuboCop walks UP from
+                        // is_expected through all block ancestors, so it flags
+                        // is_expected in ANY block (it, specify, its_call, custom
+                        // methods, etc.), not just known RSpec example methods.
+                        if let Some(bn) = call.block().and_then(|b| b.as_block_node()) {
+                            // Skip subject/subject! definitions
+                            if name != b"subject" && name != b"subject!" {
+                                self.check_example_body(&bn);
+                            }
+                        }
                     }
                 }
             }
