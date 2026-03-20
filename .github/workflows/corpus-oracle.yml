@@ -550,6 +550,13 @@ jobs:
           name: synthetic-results
           path: synthetic-dl/
 
+      - name: Download stress results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stress-results
+          path: stress-dl/
+
       - name: Place synthetic results
         run: cp synthetic-dl/synthetic-results.json bench/synthetic/synthetic-results.json
 
@@ -570,6 +577,21 @@ jobs:
             --output-md corpus-results.md \
             ${COP_LIST:+--cop-list "$COP_LIST"} \
             $CONTEXT_DIR
+
+      - name: Merge stress results
+        run: |
+          if [ -f stress-dl/stress-results.json ]; then
+            python3 scripts/stress-report.py \
+              --corpus corpus-results.json \
+              --stress stress-dl/stress-results.json \
+              --summary
+            python3 scripts/stress-report.py \
+              --corpus corpus-results.json \
+              --stress stress-dl/stress-results.json \
+              --md corpus-results.md
+          else
+            echo "No stress results to merge"
+          fi
 
       - name: Generate tiers.json
         run: |
