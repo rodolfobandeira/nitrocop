@@ -14,6 +14,11 @@ use crate::parse::source::SourceFile;
 /// Investigation: 7 FNs were all `.chars.length` patterns. Added support for
 /// `length`, `size`, `empty?`, `take`, and `slice` outer methods to match
 /// RuboCop's full detection set.
+///
+/// FP=3 fix: Safe navigation chains (`&.chars&.first`, `.chars&.first`,
+/// `&.chars.first`) are now skipped. RuboCop doesn't flag these because
+/// the receiver might be nil, and the replacement `str[0]` would also
+/// need safe navigation.
 pub struct RedundantStringChars;
 
 impl Cop for RedundantStringChars {
@@ -48,7 +53,24 @@ impl Cop for RedundantStringChars {
             return;
         }
 
+        // Skip safe navigation chains (&.chars&.first, &.chars.first, .chars&.first)
+        // RuboCop doesn't flag these because the receiver might be nil.
+        if chain
+            .inner_call
+            .call_operator_loc()
+            .is_some_and(|op| op.as_slice() == b"&.")
+        {
+            return;
+        }
+
         let outer_call = node.as_call_node().unwrap();
+
+        if outer_call
+            .call_operator_loc()
+            .is_some_and(|op| op.as_slice() == b"&.")
+        {
+            return;
+        }
         let has_args = outer_call.arguments().is_some();
 
         let message = match chain.outer_method {

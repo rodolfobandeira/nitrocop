@@ -10,3 +10,8 @@ str.chars.max
 str.chars.drop(2)
 chars.size
 str.chars[0, 2]
+# safe navigation chains — RuboCop skips these
+x&.chars&.first
+x.chars&.first
+x&.chars.first
+x&.chars&.last
