@@ -35,4 +35,18 @@ RSpec.describe 'test' do
       block.call
     end
   end
+
+  it 'flags receive chained with .with in do-end block' do
+    expect(active_support).to receive(:subscribe).with(name) do |&block|
+                                                             ^^^^^^^^^^^ RSpec/Yield: Use `.and_yield`.
+      block.call("noop", 10, 20, "noop", data)
+    end
+  end
+
+  it 'flags receive chained with .with and .once in do-end block' do
+    allow(foo).to receive(:bar).with(anything).once do |&block|
+                                                    ^^^^^^^^^^^ RSpec/Yield: Use `.and_yield`.
+      block.call(1)
+    end
+  end
 end

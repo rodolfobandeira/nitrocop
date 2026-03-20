@@ -19,6 +19,14 @@ use crate::parse::source::SourceFile;
 /// called but the actual function was renamed to `call_chain_or_args_includes_receive`
 /// (which checks `receive` in both receiver chain and arguments, needed for `do...end`
 /// blocks where the block attaches to `.to` rather than `receive`). Fixed 2026-03-18.
+///
+/// ## Corpus investigation (2026-03-20)
+///
+/// FN=2: Both from honeybadger-ruby. Pattern: `expect(x).to receive(:foo).with(bar) do |&block|`
+/// where `receive` is chained with `.with(...)`. The `do...end` block attaches to `.to`,
+/// so `receive(:foo).with(bar)` becomes an argument to `.to`. The argument-checking code
+/// only looked at the top-level argument name (which was `with`, not `receive`). Fixed by
+/// recursively walking the argument's receiver chain via `call_chain_includes_receive_shallow`.
 pub struct Yield;
 
 /// Flags `receive(:method) { |&block| block.call }` — should use `.and_yield` instead.
@@ -174,11 +182,13 @@ fn call_chain_or_args_includes_receive(call: &ruby_prism::CallNode<'_>) -> bool 
     }
 
     // Check arguments for `receive` (handles `do...end` blocks on `.to` where
-    // `receive(:method)` is an argument rather than receiver)
+    // `receive(:method)` is an argument rather than receiver).
+    // The argument may be chained, e.g. `receive(:foo).with(bar)`, so we
+    // recursively walk the argument's receiver chain too.
     if let Some(args) = call.arguments() {
         for arg in args.arguments().iter() {
             if let Some(arg_call) = arg.as_call_node() {
-                if arg_call.name().as_slice() == b"receive" {
+                if call_chain_includes_receive_shallow(&arg_call) {
                     return true;
                 }
             }
@@ -192,6 +202,19 @@ fn call_chain_or_args_includes_receive(call: &ruby_prism::CallNode<'_>) -> bool 
         }
     }
 
+    false
+}
+
+/// Walk a call chain checking if any call in the chain is `receive`.
+fn call_chain_includes_receive_shallow(call: &ruby_prism::CallNode<'_>) -> bool {
+    if call.name().as_slice() == b"receive" {
+        return true;
+    }
+    if let Some(recv) = call.receiver() {
+        if let Some(recv_call) = recv.as_call_node() {
+            return call_chain_includes_receive_shallow(&recv_call);
+        }
+    }
     false
 }
 
