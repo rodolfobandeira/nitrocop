@@ -207,3 +207,36 @@ RSpec.shared_examples_for "multiple errors" do
   subject { errors.inject({}) { |h, d| h.merge(d) } }
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
 end
+
+RSpec.describe User do
+  if enabled?
+    describe "protected methods" do
+      let(:params) { build(:params) }
+
+      subject { described_class.new(params) }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+    end
+  end
+end
+
+RSpec.describe User do
+  unless ENV["CI"]
+    context "with local setup" do
+      after(:each) { subject.close }
+
+      let(:host) { "127.0.0.1" }
+      subject { described_class.new(hostname: host) }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `after` declarations.
+    end
+  end
+end
+
+RSpec.describe User do
+  unless skip_tests?
+    context "with config" do
+      let(:config) { build(:config) }
+      subject { described_class.new(config) }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeadingSubject: Declare `subject` above any other `let` declarations.
+    end
+  end
+end

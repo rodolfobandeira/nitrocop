@@ -81,6 +81,16 @@ use crate::parse::source::SourceFile;
 /// The commit c0bc7a5 estimated "fixes 43 of 72 (29 remain)" but actual verification
 /// shows all 72 patterns are handled. The "29 remain" was a conservative estimate;
 /// the CI oracle simply hasn't re-run to confirm.
+///
+/// ## Investigation (2026-03-20)
+///
+/// **Root cause of 3 FNs:** `if`/`unless` control flow nodes wrapping spec groups
+/// (e.g., `if linux?`, `unless ENV["CI"]`) were not traversed during block body
+/// iteration. The cop only looked at `CallNode` children, so `describe`/`context`
+/// blocks inside conditionals were invisible. Fixed by adding
+/// `recurse_into_conditional()` which walks `IfNode`/`UnlessNode` bodies (including
+/// elsif/else branches) and recurses into any block-bearing call nodes found within.
+/// All 3 FN repos (guard/listen, bunny, vcr) use this pattern.
 pub struct LeadingSubject;
 
 impl Cop for LeadingSubject {
@@ -165,6 +175,14 @@ impl LeadingSubject {
         let mut first_relevant_name: Option<&[u8]> = None;
 
         for stmt in stmts.body().iter() {
+            // Handle if/unless nodes: recurse into their bodies to find
+            // spec groups, matching RuboCop's on_block which fires on ALL
+            // blocks regardless of wrapping control flow.
+            if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() {
+                self.recurse_into_conditional(source, &stmt, diagnostics);
+                continue;
+            }
+
             if let Some(c) = stmt.as_call_node() {
                 let name = c.name().as_slice();
 
@@ -243,6 +261,56 @@ impl LeadingSubject {
                     // are NOT offending but we must recurse into their blocks
                     // to check subject ordering within, matching RuboCop's
                     // on_block behavior that fires on ALL blocks.
+                    self.check_block_body(source, &stmt, diagnostics);
+                }
+            }
+        }
+    }
+
+    /// Recurse into if/unless node bodies looking for call nodes that should
+    /// be checked (spec groups, arbitrary blocks, etc.). This matches RuboCop's
+    /// behavior where `on_block` fires on all blocks regardless of wrapping
+    /// control flow like `if linux?` or `unless ENV["CI"]`.
+    fn recurse_into_conditional(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if let Some(if_node) = node.as_if_node() {
+            if let Some(stmts) = if_node.statements() {
+                self.recurse_conditional_stmts(source, &stmts, diagnostics);
+            }
+            if let Some(subsequent) = if_node.subsequent() {
+                self.recurse_into_conditional(source, &subsequent, diagnostics);
+            }
+        } else if let Some(unless_node) = node.as_unless_node() {
+            if let Some(stmts) = unless_node.statements() {
+                self.recurse_conditional_stmts(source, &stmts, diagnostics);
+            }
+            if let Some(else_clause) = unless_node.else_clause() {
+                if let Some(stmts) = else_clause.statements() {
+                    self.recurse_conditional_stmts(source, &stmts, diagnostics);
+                }
+            }
+        } else if let Some(else_node) = node.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                self.recurse_conditional_stmts(source, &stmts, diagnostics);
+            }
+        }
+    }
+
+    fn recurse_conditional_stmts(
+        &self,
+        source: &SourceFile,
+        stmts: &ruby_prism::StatementsNode<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for stmt in stmts.body().iter() {
+            if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() {
+                self.recurse_into_conditional(source, &stmt, diagnostics);
+            } else if let Some(c) = stmt.as_call_node() {
+                if c.block().is_some() {
                     self.check_block_body(source, &stmt, diagnostics);
                 }
             }

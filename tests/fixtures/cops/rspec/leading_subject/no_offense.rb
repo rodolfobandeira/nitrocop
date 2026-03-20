@@ -148,3 +148,21 @@ RSpec.describe User do
     end
   end
 end
+
+RSpec.describe User do
+  if enabled?
+    describe "protected methods" do
+      subject { described_class.new }
+      let(:params) { build(:params) }
+    end
+  end
+end
+
+RSpec.describe User do
+  unless ENV["CI"]
+    context "with local setup" do
+      subject { described_class.new }
+      let(:host) { "127.0.0.1" }
+    end
+  end
+end
