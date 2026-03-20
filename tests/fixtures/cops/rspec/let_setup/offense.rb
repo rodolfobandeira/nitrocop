@@ -90,3 +90,23 @@ describe Widget do
     end
   end
 end
+
+# let! with trailing if modifier — should still be detected
+describe Widget do
+  let!(:projects) { create_list(:project, 3) } if config[:projects]
+  ^^^^^^^^^^ RSpec/LetSetup: Do not use `let!` to setup objects not referenced in tests.
+
+  it 'does something' do
+    expect(true).to be true
+  end
+end
+
+# let! with trailing unless modifier — should still be detected
+describe Widget do
+  let!(:record) { create(:record) } unless skip_setup
+  ^^^^^^^^^^ RSpec/LetSetup: Do not use `let!` to setup objects not referenced in tests.
+
+  it 'does something' do
+    expect(true).to be true
+  end
+end

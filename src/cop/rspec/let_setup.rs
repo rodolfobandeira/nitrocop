@@ -136,6 +136,27 @@ impl<'pr> LetSetupVisitor<'_> {
         decls: &mut Vec<(Vec<u8>, usize, usize)>,
         scope_names: &mut HashSet<Vec<u8>>,
     ) {
+        // Unwrap trailing if/unless modifiers: `let!(:foo) { } if cond` parses as
+        // IfNode/UnlessNode wrapping the CallNode. Recurse into the body statement(s).
+        if let Some(if_node) = node.as_if_node() {
+            if let Some(stmts) = if_node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.collect_let_bangs_in_scope(&stmt, decls, scope_names);
+                }
+            }
+            if let Some(subsequent) = if_node.subsequent() {
+                self.collect_let_bangs_in_scope(&subsequent, decls, scope_names);
+            }
+            return;
+        }
+        if let Some(unless_node) = node.as_unless_node() {
+            if let Some(stmts) = unless_node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.collect_let_bangs_in_scope(&stmt, decls, scope_names);
+                }
+            }
+            return;
+        }
         if let Some(c) = node.as_call_node() {
             let m = c.name().as_slice();
             // If it's a let! call, record it

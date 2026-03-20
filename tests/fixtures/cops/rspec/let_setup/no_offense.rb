@@ -117,3 +117,12 @@ describe Widget do
     expect(order).to be_valid
   end
 end
+
+# let! with trailing if modifier — referenced, so no offense
+describe Widget do
+  let!(:projects) { create_list(:project, 3) } if config[:projects]
+
+  it 'uses projects' do
+    expect(projects).not_to be_empty
+  end
+end
