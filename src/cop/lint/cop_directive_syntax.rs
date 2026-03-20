@@ -38,6 +38,13 @@ use crate::parse::source::SourceFile;
 ///
 /// Fixed by replacing `has_colon_separator` with `has_invalid_cop_name` that validates
 /// each cop name token contains only `[A-Za-z0-9/_]` and doesn't start/end with `/`.
+///
+/// ## Corpus investigation (2026-03-20)
+///
+/// FN=1: `Dir.chdir("#{__dir__}/..") # rubocop:disable Discourse/NoChdir because ...`
+/// `find_directive_start` treated `#` in `"#{__dir__}"` as a comment start, setting
+/// `first_hash_seen = true`, which caused the real directive to be rejected. Fix:
+/// skip `#` followed by `{` (string interpolation) when setting `first_hash_seen`.
 pub struct CopDirectiveSyntax;
 
 impl Cop for CopDirectiveSyntax {
@@ -192,7 +199,10 @@ fn find_directive_start(line: &str) -> Option<usize> {
 
         // This `#` starts a comment but is NOT a rubocop directive.
         // Any subsequent `# rubocop:` on this line is inside the comment text.
-        if !first_hash_seen {
+        // Exception: `#` followed by `{` is string interpolation (e.g., "#{foo}"),
+        // not a comment start — don't count it.
+        let next_char = line.as_bytes().get(abs_pos + 1).copied();
+        if next_char != Some(b'{') && !first_hash_seen {
             first_hash_seen = true;
         }
 
