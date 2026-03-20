@@ -8,6 +8,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-20)
+///
+/// Extended corpus oracle reported FP=3, FN=0.
+///
+/// FP=3: All from `travel_to(time, &ex)` — travel method with both a time
+/// argument and a block pass. RuboCop's `extract_travel_with_block_pass` pattern
+/// `(send _ TRAVEL (block_pass $lvar))` requires the block_pass to be the ONLY
+/// child (no other arguments). `travel_to(time, &ex)` has an extra argument
+/// and is not trivially convertible to a `before` block.
+/// Fixed by only flagging block_pass pattern when `node.arguments().is_none()`.
 pub struct TravelAround;
 
 const TRAVEL_METHODS: &[&[u8]] = &[b"freeze_time", b"travel", b"travel_to"];
@@ -124,8 +134,11 @@ impl<'pr> Visit<'pr> for TravelFinder {
                     }
                 }
 
-                // Pattern 2: travel_method(&example)
-                if travel_block.as_block_argument_node().is_some() {
+                // Pattern 2: travel_method(&example) — only when there are no other arguments.
+                // RuboCop's pattern `(send _ TRAVEL (block_pass $lvar))` requires block_pass
+                // to be the only child. `travel_to(time, &ex)` is NOT flagged because the
+                // time argument makes it non-trivially convertible to a `before` block.
+                if travel_block.as_block_argument_node().is_some() && node.arguments().is_none() {
                     self.offsets.push(node.location().start_offset());
                 }
             }
