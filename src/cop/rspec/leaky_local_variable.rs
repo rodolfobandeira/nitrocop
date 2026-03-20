@@ -356,6 +356,87 @@ fn check_file_level_vars(
             );
         }
     }
+
+    // Also check def method bodies for variables that leak into describe blocks
+    check_def_level_vars(source, &stmts, diagnostics, cop);
+}
+
+/// Check for variables inside `def` method bodies that leak into describe blocks.
+/// RuboCop's VariableForce processes def scopes, finding variables assigned before
+/// describe blocks that are referenced in example scopes within those describes.
+fn check_def_level_vars(
+    source: &SourceFile,
+    stmts: &ruby_prism::StatementsNode<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    cop: &LeakyLocalVariable,
+) {
+    for stmt in stmts.body().iter() {
+        check_def_level_vars_in_node(&stmt, source, diagnostics, cop);
+    }
+}
+
+/// Recursively search for `def` nodes that contain describe blocks.
+fn check_def_level_vars_in_node(
+    node: &ruby_prism::Node<'_>,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    cop: &LeakyLocalVariable,
+) {
+    if let Some(def_node) = node.as_def_node() {
+        if let Some(body) = def_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                // Collect assignments in the def body (stopping at describe blocks)
+                let mut assigns: Vec<VarAssign> = Vec::new();
+                for s in stmts.body().iter() {
+                    collect_file_level_assignments(&s, &mut assigns, false);
+                }
+                if !assigns.is_empty() {
+                    let live = filter_dead_file_level_assignments(&assigns, &stmts);
+                    for assign in &live {
+                        let mut used = false;
+                        for s in stmts.body().iter() {
+                            if check_var_used_in_describe_blocks(&s, &assign.name) {
+                                used = true;
+                                break;
+                            }
+                        }
+                        if used {
+                            let (line, column) = source.offset_to_line_col(assign.offset);
+                            diagnostics.push(cop.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Do not use local variables defined outside of examples inside of them."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        return; // don't recurse into nested defs
+    }
+
+    // Recurse into class/module bodies to find defs
+    if let Some(class_node) = node.as_class_node() {
+        if let Some(body) = class_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for s in stmts.body().iter() {
+                    check_def_level_vars_in_node(&s, source, diagnostics, cop);
+                }
+            }
+        }
+        return;
+    }
+    if let Some(module_node) = node.as_module_node() {
+        if let Some(body) = module_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for s in stmts.body().iter() {
+                    check_def_level_vars_in_node(&s, source, diagnostics, cop);
+                }
+            }
+        }
+    }
 }
 
 /// Collect variable assignments at file level, stopping at describe blocks,
@@ -2707,4 +2788,8 @@ end
             "Offense should be on group-level assignment (line 4)"
         );
     }
+
+    // TODO: FN patterns not yet implemented:
+    // - def body vars leaking into describe blocks (chef pattern)
+    // - block param reassignment leaking into examples (arachni/ManageIQ pattern)
 }

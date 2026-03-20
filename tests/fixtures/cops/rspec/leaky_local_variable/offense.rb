@@ -246,3 +246,19 @@ describe "iterator block" do
     end
   end
 end
+
+# File-level variable assigned in if/elsif branches, used in describe block
+root_group = 'root'
+^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+if os == 'aix'
+  root_group = 'system'
+  ^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+elsif os == 'freebsd'
+  root_group = 'wheel'
+  ^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+end
+
+describe SomeClass do
+  its('groups') { should include root_group }
+end

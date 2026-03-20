@@ -360,3 +360,51 @@ describe SomeClass do
   end
 end
 
+# Sibling block scope: same-named variable in sibling non-RSpec blocks.
+# The post block has its own expected_schema that is NOT used in any example scope.
+# The get block also has expected_schema that IS used in example scopes (separate offense).
+# The post block's variable should NOT be flagged — it's a different local binding.
+# (discourse/rswag pattern)
+describe SomeClass do
+  path "/api" do
+    post "Create" do
+      expected_schema = load_schema("create")
+      parameter name: :params, schema: expected_schema
+      response "200" do
+        xit
+      end
+    end
+  end
+end
+
+# Variable initialized to nil, reassigned inside nested expect block in example.
+# (excon pattern: response = nil, then response = make_request() inside expect do end)
+describe SomeClass do
+  response = nil
+
+  it 'returns a response' do
+    expect do
+      response = make_request()
+    end.to_not raise_error
+  end
+
+  it 'has status' do
+    expect(response.status).to eq(200)
+  end
+end
+
+# Variable initialized to empty array, reassigned via lambda in example body.
+# (excon pattern: data = [], then data = [...] inside lambda/block)
+describe SomeClass do
+  data = []
+  it 'yields data' do
+    response_block = lambda do |chunk, remaining, total|
+      data = [chunk, remaining, total]
+    end
+    conn.request(response_block: response_block)
+  end
+  it 'has expected data' do
+    expect(data).to eq(['x', 0, 100])
+  end
+end
+
