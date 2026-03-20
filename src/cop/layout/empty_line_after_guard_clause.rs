@@ -133,6 +133,15 @@ use crate::parse::source::SourceFile;
 /// begin with `\r`, and the old code treated `\r` as non-whitespace "code",
 /// causing real guard clauses to be skipped. Fix: treat `\r`/`\n` as ignorable
 /// whitespace in the same-line suffix check.
+///
+/// Another remaining FN family came from block-form `if` nodes with `elsif`
+/// or `else` branches. The old Prism port rejected any `if` with
+/// `subsequent().is_some()`, but RuboCop's `contains_guard_clause?` only asks
+/// whether the node's `if_branch` is a guard clause. That means a multi-branch
+/// `if` whose first branch is a guard still counts and should require a blank
+/// line before the following statement. Fix: keep handling ternaries
+/// separately, but do not reject ordinary `if` nodes just because they have
+/// `elsif`/`else` branches.
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.
@@ -195,10 +204,6 @@ impl Cop for EmptyLineAfterGuardClause {
                             }
                         }
                     }
-                    return;
-                }
-                // Skip if/else or if/elsif forms — only simple if/unless (no else branch)
-                if if_node.subsequent().is_some() {
                     return;
                 }
                 match if_node.statements() {

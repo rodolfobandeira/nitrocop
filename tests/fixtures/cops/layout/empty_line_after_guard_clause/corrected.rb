@@ -235,3 +235,16 @@ def find_executable(bin, exts)
   end
   nil
 end
+
+# FN fix: multi-branch if/elsif guard block followed by code
+def display_name(first_name, last_name, login)
+  if first_name.blank? && last_name.blank?
+    return login
+  elsif first_name.blank?
+    return last_name
+  elsif last_name.blank?
+    return first_name
+  end
+
+  "#{first_name} #{last_name}"
+end
