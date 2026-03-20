@@ -39,6 +39,19 @@ use crate::parse::source::SourceFile;
 ///   for lambda blocks). This is inherently positional and hard to replicate with byte
 ///   scanning without introducing FPs (e.g., `items.each {; bar }` is NOT flagged by
 ///   RuboCop). These cases remain as known FN gaps.
+///
+/// Investigation findings (2026-03-20):
+///
+/// Root causes of remaining false positives (FP=12, 6 are begin...end):
+/// - Semicolons inside explicit `begin...end` blocks were flagged as expression
+///   separators. In Parser AST, explicit `begin...end` creates `kwbegin` (not `begin`),
+///   so RuboCop's `on_begin` callback does NOT fire for them. But in Prism, both
+///   explicit `begin...end` (BeginNode) and implicit multi-statement wrappers use
+///   StatementsNode, so the ExprSeparatorVisitor was incorrectly visiting them.
+///   Fix: override `visit_begin_node` to set `inside_explicit_begin` flag, and skip
+///   expression separator detection for StatementsNodes inside BeginNode.
+/// - 4 FPs are from `.rb.spec` files in the rufo repo — file discovery issues, not cop bugs.
+/// - 2 FPs are from `begin; 1; 2; end` style patterns in rufo (also begin...end).
 pub struct Semicolon;
 
 impl Cop for Semicolon {
@@ -69,6 +82,7 @@ impl Cop for Semicolon {
             let mut visitor = ExprSeparatorVisitor {
                 source,
                 lines: HashSet::new(),
+                inside_explicit_begin: false,
             };
             visitor.visit(&parse_result.node());
             visitor.lines
@@ -329,39 +343,60 @@ fn is_semicolon_after_interpolation_open(bytes: &[u8], pos: usize) -> bool {
 
 /// AST visitor that collects line numbers where a StatementsNode has 2+ children
 /// sharing the same last_line (expression separator lines).
+///
+/// Skips StatementsNode inside explicit `begin...end` (BeginNode in Prism).
+/// In Parser AST, explicit `begin...end` creates `kwbegin`, not `begin`.
+/// RuboCop's `on_begin` only fires for implicit `begin` (multi-statement wrappers),
+/// so semicolons inside explicit `begin...end` are NOT expression separators.
 struct ExprSeparatorVisitor<'a> {
     source: &'a SourceFile,
     lines: HashSet<usize>,
+    inside_explicit_begin: bool,
 }
 
 impl<'pr> Visit<'pr> for ExprSeparatorVisitor<'_> {
-    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
-        let body: Vec<ruby_prism::Node<'pr>> = node.body().iter().collect();
-        if body.len() >= 2 {
-            // Group expressions by their last line (matching RuboCop's expressions_per_line)
-            let mut line_counts: Vec<(usize, usize)> = Vec::new();
-            for expr in &body {
-                let end_offset = expr.location().end_offset();
-                // Use end_offset - 1 to get the line of the last byte of the expression
-                let (last_line, _) = self.source.offset_to_line_col(end_offset.saturating_sub(1));
-                if let Some(entry) = line_counts.last_mut() {
-                    if entry.0 == last_line {
-                        entry.1 += 1;
-                        continue;
-                    }
-                }
-                line_counts.push((last_line, 1));
-            }
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        // Mark that we're inside an explicit begin...end block.
+        // Don't detect expression separators for its inner StatementsNode.
+        let prev = self.inside_explicit_begin;
+        self.inside_explicit_begin = true;
+        ruby_prism::visit_begin_node(self, node);
+        self.inside_explicit_begin = prev;
+    }
 
-            for &(line, count) in &line_counts {
-                if count >= 2 {
-                    self.lines.insert(line);
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        if !self.inside_explicit_begin {
+            let body: Vec<ruby_prism::Node<'pr>> = node.body().iter().collect();
+            if body.len() >= 2 {
+                // Group expressions by their last line (matching RuboCop's expressions_per_line)
+                let mut line_counts: Vec<(usize, usize)> = Vec::new();
+                for expr in &body {
+                    let end_offset = expr.location().end_offset();
+                    // Use end_offset - 1 to get the line of the last byte of the expression
+                    let (last_line, _) =
+                        self.source.offset_to_line_col(end_offset.saturating_sub(1));
+                    if let Some(entry) = line_counts.last_mut() {
+                        if entry.0 == last_line {
+                            entry.1 += 1;
+                            continue;
+                        }
+                    }
+                    line_counts.push((last_line, 1));
+                }
+
+                for &(line, count) in &line_counts {
+                    if count >= 2 {
+                        self.lines.insert(line);
+                    }
                 }
             }
         }
 
-        // Continue visiting children
+        // Continue visiting children (reset flag so nested non-begin statements work)
+        let prev = self.inside_explicit_begin;
+        self.inside_explicit_begin = false;
         ruby_prism::visit_statements_node(self, node);
+        self.inside_explicit_begin = prev;
     }
 }
 

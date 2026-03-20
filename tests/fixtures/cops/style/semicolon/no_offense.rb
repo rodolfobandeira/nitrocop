@@ -75,3 +75,12 @@ a.b.c {; bar }
 
 # Block args before semicolons (not flagged)
 foo { |x|; bar }
+
+# Semicolons inside explicit begin...end blocks (kwbegin in Parser AST)
+# RuboCop's on_begin only fires for implicit begin (multi-statement wrappers),
+# NOT for explicit begin...end (kwbegin). These are NOT expression separators.
+begin; 1; 2; end
+(@b[*begin 1; [:k] end] ||= 10).should == 10
+(@b[*begin 1; [:k] end] &&= 10).should == 10
+(@b[*begin 1; [:k] end] += 10).should == 20
+while begin l = left.shift; r = right.shift; l || r end; end
