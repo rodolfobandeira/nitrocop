@@ -215,6 +215,40 @@ use crate::parse::source::SourceFile;
 ///   boundaries. Our AST-walking heuristics handle common patterns but can't
 ///   replicate VariableForce's full dataflow analysis. A complete fix would
 ///   require implementing VariableForce in Rust.
+///
+/// ## Investigation (FP=3, FN=77, 2026-03-21)
+///
+/// FP=3: All from jruby which lacks rubocop-rspec in Gemfile (same infra
+/// issue as ScatteredLet/que-rb). RuboCop skips RSpec cops when the plugin
+/// isn't installed; nitrocop runs them because they're compiled in.
+/// Not a cop logic bug — nitrocop is correct for actual RSpec files.
+///
+/// FN fixes (3 root causes):
+/// 1. **ConstantPathNode in `node_references_var`**: `result::Success` was
+///    not handled. When a variable is used as the parent of a constant path
+///    (e.g., `describe result::Success`), the `ConstantPathNode` fell through
+///    to `false`. Fixed by recursing into `cp.parent()`.
+/// 2. **If-condition assignments**: `if error = spec['error']` embeds a
+///    `LocalVariableWriteNode` in the `IfNode.predicate()`, which
+///    `collect_assignments_in_scope` and `collect_file_level_assignments`
+///    did not check. Fixed by recursing into predicate for both functions.
+/// 3. **`RSpec.describe` inside non-RSpec blocks**: `stmt_example_scope_var_interaction`
+///    and `check_var_used_in_example_scopes` only matched `describe` with no
+///    receiver (`no_recv`), missing `RSpec.describe` (receiver is `RSpec`).
+///    Fixed by adding `is_rspec_recv` check alongside `no_recv`.
+/// 4. **`LocalVariableWriteNode` in interaction/scope checks**: `spec = RSpec.describe ...`
+///    wraps the example group call in an assignment node, which both
+///    `stmt_example_scope_var_interaction` and `check_var_used_in_example_scopes`
+///    did not recurse into. Fixed by handling `as_local_variable_write_node()`.
+/// 5. **Example group arguments**: `describe result::Success do` uses a variable
+///    as an argument to the example group call. Both `stmt_example_scope_var_interaction`
+///    and `check_var_used_in_example_scopes` only recursed into the block body,
+///    not the call arguments. Fixed by checking `call.arguments()`.
+///
+/// Remaining FN gap (~20): `def self.method` bodies containing `.each` with
+/// `context`/`let` blocks (DataDog pattern). These create a separate Ruby
+/// scope that our AST-walking approach doesn't enter. A full fix requires
+/// VariableForce-level scope tracking.
 pub struct LeakyLocalVariable;
 
 impl Cop for LeakyLocalVariable {
@@ -537,7 +571,9 @@ fn collect_file_level_assignments(
     }
 
     // Recurse through control flow — assignments inside if/elsif/else are conditional
+    // Also check predicate for embedded assignments (e.g., `if error = expr`)
     if let Some(if_node) = node.as_if_node() {
+        collect_file_level_assignments(&if_node.predicate(), assigns, true);
         if let Some(stmts) = if_node.statements() {
             for s in stmts.body().iter() {
                 collect_file_level_assignments(&s, assigns, true);
@@ -569,6 +605,7 @@ fn collect_file_level_assignments(
 
     // UnlessNode
     if let Some(unless_node) = node.as_unless_node() {
+        collect_file_level_assignments(&unless_node.predicate(), assigns, true);
         if let Some(stmts) = unless_node.statements() {
             for s in stmts.body().iter() {
                 collect_file_level_assignments(&s, assigns, true);
@@ -888,6 +925,9 @@ fn stmt_example_scope_var_interaction(
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         let no_recv = call.receiver().is_none();
+        let is_rspec_recv = call
+            .receiver()
+            .is_some_and(|r| util::constant_name(&r).is_some_and(|n| n == b"RSpec"));
 
         // Example scopes: it, before, let, subject, etc.
         if no_recv && is_example_scope(name) {
@@ -987,7 +1027,17 @@ fn stmt_example_scope_var_interaction(
         }
 
         // Nested example groups: recurse into their statements
-        if no_recv && is_rspec_example_group(name) {
+        // Match both `describe` (no receiver) and `RSpec.describe` (receiver is RSpec)
+        if (no_recv || is_rspec_recv) && is_rspec_example_group(name) {
+            // Check arguments of the example group call (e.g., `describe result::Success`).
+            // Variables used as arguments to describe/context are reads.
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    if node_references_var(&arg, var_name) {
+                        return VarInteraction::ReadOnly;
+                    }
+                }
+            }
             if let Some(blk) = call.block() {
                 if let Some(bn) = blk.as_block_node() {
                     if let Some(body) = bn.body() {
@@ -1176,6 +1226,12 @@ fn stmt_example_scope_var_interaction(
         if let Some(body) = paren.body() {
             return stmt_example_scope_var_interaction(&body, var_name, assign_offset);
         }
+    }
+
+    // Local variable write: the RHS may contain example scopes
+    // e.g., `spec = RSpec.describe "SomeTest" do ... end`
+    if let Some(lw) = node.as_local_variable_write_node() {
+        return stmt_example_scope_var_interaction(&lw.value(), var_name, assign_offset);
     }
 
     VarInteraction::None
@@ -1603,8 +1659,11 @@ fn collect_assignments_in_scope(
         return;
     }
 
-    // If/Unless: recurse into branches
+    // If/Unless: recurse into predicate (for embedded assignments like `if error = expr`)
+    // and branches
     if let Some(if_node) = node.as_if_node() {
+        // Check predicate for embedded assignments (e.g., `if error = spec['error']`)
+        collect_assignments_in_scope(&if_node.predicate(), assigns, inside_block);
         if let Some(stmts) = if_node.statements() {
             for s in stmts.body().iter() {
                 collect_assignments_in_scope(&s, assigns, inside_block);
@@ -1616,6 +1675,8 @@ fn collect_assignments_in_scope(
         return;
     }
     if let Some(unless_node) = node.as_unless_node() {
+        // Check predicate for embedded assignments
+        collect_assignments_in_scope(&unless_node.predicate(), assigns, inside_block);
         if let Some(stmts) = unless_node.statements() {
             for s in stmts.body().iter() {
                 collect_assignments_in_scope(&s, assigns, inside_block);
@@ -1807,6 +1868,9 @@ fn check_var_used_in_example_scopes(node: &ruby_prism::Node<'_>, var_name: &[u8]
     if let Some(call) = node.as_call_node() {
         let name = call.name().as_slice();
         let no_recv = call.receiver().is_none();
+        let is_rspec_recv = call
+            .receiver()
+            .is_some_and(|r| util::constant_name(&r).is_some_and(|n| n == b"RSpec"));
 
         // Example scopes: it, before, let, subject, etc.
         if no_recv && is_example_scope(name) {
@@ -1861,8 +1925,17 @@ fn check_var_used_in_example_scopes(node: &ruby_prism::Node<'_>, var_name: &[u8]
             return false;
         }
 
-        // Nested example groups: recurse into their body
-        if no_recv && is_rspec_example_group(name) {
+        // Nested example groups: check arguments and recurse into their body
+        // Match both `describe` (no receiver) and `RSpec.describe` (receiver is RSpec)
+        if (no_recv || is_rspec_recv) && is_rspec_example_group(name) {
+            // Check arguments (e.g., `describe result::Success`)
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    if node_references_var(&arg, var_name) {
+                        return true;
+                    }
+                }
+            }
             if let Some(blk) = call.block() {
                 if let Some(bn) = blk.as_block_node() {
                     if let Some(body) = bn.body() {
@@ -2011,6 +2084,15 @@ fn check_var_used_in_example_scopes(node: &ruby_prism::Node<'_>, var_name: &[u8]
             if check_var_used_in_example_scopes(&body, var_name) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    // Local variable write: the RHS may contain example scopes
+    // e.g., `spec = RSpec.describe "SomeTest" do ... end`
+    if let Some(lw) = node.as_local_variable_write_node() {
+        if check_var_used_in_example_scopes(&lw.value(), var_name) {
+            return true;
         }
         return false;
     }
@@ -2908,6 +2990,14 @@ fn node_references_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
 
     // Ternary / inline conditionals (same node type as if in Prism, already handled above)
 
+    // ConstantPathNode: `result::Success` — check the parent (e.g., `result`)
+    if let Some(cp) = node.as_constant_path_node() {
+        if let Some(parent) = cp.parent() {
+            return node_references_var(&parent, var_name);
+        }
+        return false;
+    }
+
     false
 }
 
@@ -3351,4 +3441,98 @@ end
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_fn_var_used_in_describe_argument() {
+        // dry-monads pattern: variable used as argument to nested describe call
+        // e.g., `result = described_class; describe result::Success do ... end`
+        let source = br#"RSpec.describe(SomeClass) do
+  result = described_class
+
+  describe result::Success do
+    it "works" do
+      expect(true).to be true
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        assert!(
+            diags.len() >= 1,
+            "Expected at least 1 offense for var used in describe arg, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fn_var_used_in_if_condition_with_let() {
+        // DataDog pattern: variable assigned in if condition, used in let/it blocks
+        // `if error = spec['error']; let(:expected_error) { error }; it ... end`
+        let source = br#"describe SomeClass do
+  specs.each do |spec|
+    context spec['name'] do
+      if error = spec['error']
+        let(:expected_error) { error }
+
+        it 'fails' do
+          expect { run }.to raise_error(expected_error)
+        end
+      end
+    end
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        assert!(
+            diags.len() >= 1,
+            "Expected at least 1 offense for var in if-condition with let, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fn_var_before_non_rspec_block_with_describe() {
+        // DataDog CI pattern: variables assigned before a non-RSpec block containing RSpec.describe
+        let source = br#"describe SomeClass do
+  max_failures = 4
+  failure_count = 0
+
+  with_new_environment do
+    spec = RSpec.describe "SomeTest" do
+      it "test" do
+        failure_count += 1
+        if failure_count >= max_failures
+          raise "too many failures"
+        end
+      end
+    end
+
+    spec.run
+  end
+end
+"#;
+        let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
+        assert!(
+            diags.len() >= 2,
+            "Expected at least 2 offenses for vars before non-RSpec block with describe, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("{}:{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Note: def self.method with .each containing context/let (DataDog pattern)
+    // is not yet handled. Variables inside `def self.define_cases` are in a separate
+    // Ruby scope. Implementing this requires VariableForce-level scope tracking.
+    // This accounts for ~15-20 of the corpus FNs.
 }

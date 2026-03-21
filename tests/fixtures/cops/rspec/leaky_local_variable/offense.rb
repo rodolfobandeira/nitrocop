@@ -262,3 +262,47 @@ end
 describe SomeClass do
   its('groups') { should include root_group }
 end
+
+# Variable used as argument to nested describe (ConstantPathNode)
+RSpec.describe(SomeClass) do
+  result = described_class
+  ^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+  describe result::Success do
+    it "works" do
+      expect(true).to be true
+    end
+  end
+end
+
+# Variable assigned in if-condition, used in let block
+describe SomeClass do
+  specs.each do |spec|
+    context spec['name'] do
+      if error = spec['error']
+         ^^^^^^^^^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+        let(:expected_error) { error }
+
+        it 'fails' do
+          expect { run }.to raise_error(expected_error)
+        end
+      end
+    end
+  end
+end
+
+# Variable assigned before non-RSpec block containing RSpec.describe
+describe SomeClass do
+  max_count = 4
+  ^^^^^^^^^^^^^ RSpec/LeakyLocalVariable: Do not use local variables defined outside of examples inside of them.
+
+  with_new_environment do
+    spec = RSpec.describe "SomeTest" do
+      it "test" do
+        expect(max_count).to eq(4)
+      end
+    end
+
+    spec.run
+  end
+end
