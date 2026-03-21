@@ -104,7 +104,12 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
             claude -p --dangerously-skip-permissions \
-              "$(cat /tmp/task.md)" 2>&1 | tee /tmp/agent.log
+              --output-format json \
+              "$(cat /tmp/task.md)" > /tmp/agent-result.json 2>/tmp/agent.log
+            # Show summary in GHA log
+            echo "Agent finished. Cost: $(jq -r '.total_cost_usd // "?"' /tmp/agent-result.json)"
+            echo "Turns: $(jq -r '.num_turns // "?"' /tmp/agent-result.json)"
+            echo "Result: $(jq -r '.result // "no result"' /tmp/agent-result.json | head -20)"
           else
             mkdir -p ~/.codex
             echo "$CODEX_AUTH_JSON" > ~/.codex/auth.json
@@ -118,6 +123,7 @@ jobs:
           name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /tmp/agent.log
+            /tmp/agent-result.json
             /tmp/task.md
             ~/.claude/projects/**/conversations/**/*.jsonl
           retention-days: 7
