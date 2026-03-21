@@ -55,7 +55,9 @@ This is enough for all 319 Tier 1 cops. Upgrade to Max-Highspeed ($80/mo, 15K re
      rm -f CLAUDE.md AGENTS.md
      rm -rf .agents/ .claude/ .devcontainer/ .github/ bench/ docs/ gem/ scripts/
      ```
-4. Create a **webhook trigger** linked to the `minimax-highspeed` profile
+4. Create a **webhook trigger** linked to the `minimax-highspeed` profile:
+   - Prompt template: `{{body}}` (passes the task prompt through as-is)
+   - Inbound auth: set a shared secret (this becomes `KILO_API_KEY` in GitHub secrets)
 5. Note the webhook URL
 
 The startup commands install Rust, build the project, and remove large instruction files that would confuse the agent. The agent gets its instructions from `.kilocode/rules/cop-fix.md` (committed to the repo) and the task prompt (sent via webhook). These deletions are ephemeral — they only happen in the container and are never committed.

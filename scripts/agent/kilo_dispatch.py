@@ -33,15 +33,6 @@ def dispatch_to_kilo(
 ) -> dict:
     """Send a task to Kilo Cloud Agent via webhook."""
 
-    payload = {
-        "message": task_content,
-        "metadata": {
-            "cop": cop,
-            "branch": branch,
-            "source": "agent-cop-fix",
-        },
-    }
-
     if dry_run:
         print(f"DRY RUN: Would dispatch to {webhook_url}")
         print(f"  Cop: {cop}")
@@ -49,22 +40,26 @@ def dispatch_to_kilo(
         print(f"  Task size: {len(task_content):,} chars")
         return {"status": "dry_run"}
 
-    data = json.dumps(payload).encode("utf-8")
+    # Send task prompt as plain text body. The Kilo webhook template
+    # uses {{body}} to inject this directly as the agent's prompt.
+    data = task_content.encode("utf-8")
     headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "text/plain",
     }
+    # Kilo webhook inbound auth — include shared secret if configured.
+    # Kilo may expect Authorization header or a custom header name.
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     req = urllib.request.Request(webhook_url, data=data, headers=headers, method="POST")
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")
-            result = json.loads(body) if body else {}
             print(f"Dispatched {cop} to Kilo: {resp.status}")
-            if result:
-                print(f"  Response: {json.dumps(result, indent=2)}")
-            return result
+            if body.strip():
+                print(f"  Response: {body.strip()}")
+            return {"status": "dispatched", "http_status": resp.status}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"Error dispatching {cop}: HTTP {e.code}", file=sys.stderr)
