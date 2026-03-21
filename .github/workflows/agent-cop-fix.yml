@@ -401,7 +401,7 @@ jobs:
           git checkout -B "$BRANCH" origin/main
 
           if [ -s /tmp/agent.patch ]; then
-            git apply /tmp/agent.patch
+            git apply --3way /tmp/agent.patch
 
             # Auto-format Rust files (agent often skips this)
             RS_FILES=$(git diff --name-only | grep '\.rs$' || true)
