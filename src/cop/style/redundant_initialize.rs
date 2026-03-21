@@ -29,6 +29,13 @@ use crate::parse::source::SourceFile;
 /// comments between `end` and the next code line. Fixed by adding `has_comment_after_end`
 /// which scans source after the def node for comments before the next code line.
 ///
+/// FP fix (2026-03): Single-line defs with inline comments after `end`
+/// (e.g., `def initialize; end # rubocop:disable Lint/MissingSuper`) were flagged
+/// because `has_comment_in_body` returned false for `line_count == 0` (single-line)
+/// and `has_comment_after_end` skipped the rest of the current line after `end`,
+/// only checking subsequent lines. Fixed by scanning the remainder of the `end` line
+/// for `#` in `has_comment_after_end` before advancing to the next line.
+///
 /// 2 FNs remain (fastlane: inline comment on def line `def initialize # required`;
 /// fluentd: comment after super in body). Both involve comments that nitrocop correctly
 /// detects via `has_comment_in_body`, yet RuboCop still flags them. The root cause
@@ -236,9 +243,14 @@ fn has_comment_in_body(body_bytes: &[u8]) -> bool {
 fn has_comment_after_end(source_bytes: &[u8], def_end_offset: usize) -> bool {
     // Scan forward from the end of the def node
     let remaining = &source_bytes[def_end_offset..];
-    // Skip the rest of the current line (after `end`)
+    // First check the rest of the current line (after `end`) for an inline comment.
+    // For single-line defs like `def initialize; end # comment`, the comment is
+    // on the same line as `end` but outside the def node's location range.
     let mut pos = 0;
     while pos < remaining.len() && remaining[pos] != b'\n' {
+        if remaining[pos] == b'#' {
+            return true;
+        }
         pos += 1;
     }
     if pos < remaining.len() {
@@ -329,7 +341,9 @@ mod tests {
     crate::cop_fixture_tests!(RedundantInitialize, "cops/style/redundant_initialize");
 
     #[test]
-    fn debug_prism_range() {
+    fn single_line_def_with_inline_comment_no_offense() {
+        // Isolated test: single-line def with inline comment after `end`.
+        // Must NOT rely on comments on subsequent lines in fixture context.
         let source = b"def initialize; end # rubocop:disable Lint/MissingSuper\n";
         let diags = crate::testutil::run_cop_full_internal(
             &RedundantInitialize,
@@ -337,10 +351,10 @@ mod tests {
             crate::cop::CopConfig::default(),
             "test.rb",
         );
-        eprintln!("DIAGS: {:?}", diags.len());
-        for d in &diags {
-            eprintln!("  L{}:C{} {:?}", d.location.line, d.location.column, d.message);
-        }
-        assert!(diags.is_empty(), "Should not flag single-line def with inline comment");
+        assert!(
+            diags.is_empty(),
+            "Should not flag single-line def with inline comment after end, got {} offense(s)",
+            diags.len(),
+        );
     }
 }
