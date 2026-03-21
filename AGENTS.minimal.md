@@ -84,15 +84,15 @@ To handle a new node type in a cop:
 
 ## Inspecting Prism AST
 
-To see what Prism produces for a Ruby snippet:
+To see what nitrocop detects on a snippet, write it to a file and run:
 ```bash
-echo 'BEGIN { include Foo }' | ruby -rprism -e 'puts Prism.parse(STDIN.read).value.inspect'
+echo 'BEGIN { include Foo }' > /tmp/test.rb
+cargo run -- --format json --only Style/MixinUsage /tmp/test.rb
 ```
 
-Or use nitrocop's debug output on a file:
-```bash
-cargo run -- --format json --only Style/FrozenStringLiteralComment test.rb
-```
+For the full Prism AST node hierarchy, see `vendor/rubocop/lib/rubocop/ast/` or the
+[Prism docs](https://ruby.github.io/prism/). Key: every Ruby construct maps to a
+specific `*Node` type — use `node.as_*_node()` to downcast and access child accessors.
 
 ## Scope-Aware Cops
 
