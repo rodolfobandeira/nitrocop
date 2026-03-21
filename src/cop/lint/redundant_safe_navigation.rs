@@ -6,6 +6,7 @@ use crate::cop::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Checks for redundant safe navigation calls.
 ///
@@ -37,6 +38,20 @@ use crate::parse::source::SourceFile;
 /// chain of safe navigations. This may be a version discrepancy (discourse's
 /// RuboCop version may not have the conversion_with_default check). Remaining FP=1
 /// from extended corpus; FN=402 from missing features (InferNonNilReceiver, etc).
+///
+/// ## Corpus investigation (2026-03-21) — AllowedMethods in conditions
+///
+/// FN=177: Almost all are `receiver&.method` calls where `method` is one of the
+/// AllowedMethods (is_a?, kind_of?, eql?, respond_to?, instance_of?, equal?) used
+/// in conditional contexts (if, unless, while, until, ternary, &&, ||).
+/// RuboCop flags these because in conditional contexts, `nil` (returned by
+/// `nil&.method`) is falsy just like `false` (returned by `nil.method`), making
+/// the `&.` redundant. Fixed by adding a `check_source` visitor that tracks
+/// conditional predicate context (if/unless/while/until predicates, ternary
+/// conditions, and &&/|| operands) and flags AllowedMethods `&.` calls within.
+/// Exception: `respond_to?` with a nil-specific method argument (:to_a, :to_i,
+/// :to_s, :to_f, :to_h) is NOT flagged even in conditions, because nil does
+/// respond to those methods.
 pub struct RedundantSafeNavigation;
 
 /// Methods guaranteed to exist on every instance (their receivers can't be nil)
@@ -87,7 +102,7 @@ impl Cop for RedundantSafeNavigation {
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         _parse_result: &ruby_prism::ParseResult<'_>,
-        config: &CopConfig,
+        _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
@@ -112,8 +127,6 @@ impl Cop for RedundantSafeNavigation {
             Some(r) => r,
             None => return,
         };
-
-        let _method_name = call.name().as_slice();
 
         // Case 1: Receiver is a constant in camel case (not all uppercase/snake case)
         if is_camel_case_const(&receiver) {
@@ -160,17 +173,33 @@ impl Cop for RedundantSafeNavigation {
             ));
         }
 
-        // Case 5: AllowedMethods used in conditions
-        let allowed_methods = config.get_string_array("AllowedMethods");
-        let is_allowed = if let Some(ref allowed) = allowed_methods {
-            allowed.iter().any(|m| m.as_bytes() == _method_name)
-        } else {
-            DEFAULT_ALLOWED_METHODS.contains(&_method_name)
-        };
+        // Case 5: AllowedMethods used in conditions — handled by check_source below
+    }
 
-        // Note: We'd need parent context to check if the call is in a condition.
-        // For now, we only handle the simpler cases above.
-        let _ = is_allowed;
+    fn check_source(
+        &self,
+        source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        let allowed_methods: Vec<Vec<u8>> =
+            if let Some(ref allowed) = config.get_string_array("AllowedMethods") {
+                allowed.iter().map(|m| m.as_bytes().to_vec()).collect()
+            } else {
+                DEFAULT_ALLOWED_METHODS.iter().map(|m| m.to_vec()).collect()
+            };
+
+        let mut visitor = ConditionalAllowedMethodVisitor {
+            cop: self,
+            source,
+            allowed_methods,
+            diagnostics: Vec::new(),
+        };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
     }
 }
 
@@ -226,6 +255,162 @@ impl RedundantSafeNavigation {
                 column,
                 "Redundant safe navigation with default literal detected.".to_string(),
             ));
+        }
+    }
+}
+
+/// Nil-specific methods — `respond_to?(:to_a)` etc. should NOT be flagged
+/// because nil genuinely responds to these methods.
+const NIL_METHODS: &[&[u8]] = &[b"to_a", b"to_i", b"to_s", b"to_f", b"to_h"];
+
+struct ConditionalAllowedMethodVisitor<'a> {
+    cop: &'a RedundantSafeNavigation,
+    source: &'a SourceFile,
+    allowed_methods: Vec<Vec<u8>>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl<'a> ConditionalAllowedMethodVisitor<'a> {
+    /// Check if a CallNode is an AllowedMethod with &. in conditional context
+    fn check_call_in_conditional(&mut self, call: &ruby_prism::CallNode<'_>) {
+        // Must use safe navigation (&.)
+        let op_loc = match call.call_operator_loc() {
+            Some(loc) if loc.as_slice() == b"&." => loc,
+            _ => return,
+        };
+
+        // Must have a receiver
+        if call.receiver().is_none() {
+            return;
+        }
+
+        let method_name = call.name().as_slice();
+
+        // Must be an AllowedMethod
+        if !self
+            .allowed_methods
+            .iter()
+            .any(|m| m.as_slice() == method_name)
+        {
+            return;
+        }
+
+        // Special case: respond_to? with a nil-specific method argument is NOT redundant
+        // because nil does respond to :to_a, :to_i, etc.
+        if method_name == b"respond_to?" {
+            if let Some(args) = call.arguments() {
+                let arg_list: Vec<_> = args.arguments().iter().collect();
+                if let Some(first_arg) = arg_list.first() {
+                    if let Some(sym) = first_arg.as_symbol_node() {
+                        let sym_name: &[u8] = sym.unescaped();
+                        if NIL_METHODS.contains(&sym_name) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        let (line, column) = self.source.offset_to_line_col(op_loc.start_offset());
+        self.diagnostics.push(self.cop.diagnostic(
+            self.source,
+            line,
+            column,
+            "Redundant safe navigation detected, use `.` instead.".to_string(),
+        ));
+    }
+
+    /// Visit all CallNodes within a node tree (recursive), checking for offenses
+    fn visit_conditional_subtree(&mut self, node: &ruby_prism::Node<'_>) {
+        if let Some(call) = node.as_call_node() {
+            self.check_call_in_conditional(&call);
+            // Also recurse into receiver and arguments of this call
+            if let Some(recv) = call.receiver() {
+                self.visit_conditional_subtree(&recv);
+            }
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    self.visit_conditional_subtree(&arg);
+                }
+            }
+            return;
+        }
+
+        // Recurse through boolean operators (&&, ||, and, or)
+        if let Some(and_node) = node.as_and_node() {
+            self.visit_conditional_subtree(&and_node.left());
+            self.visit_conditional_subtree(&and_node.right());
+            return;
+        }
+        if let Some(or_node) = node.as_or_node() {
+            self.visit_conditional_subtree(&or_node.left());
+            self.visit_conditional_subtree(&or_node.right());
+            return;
+        }
+
+        // Recurse through parentheses
+        if let Some(parens) = node.as_parentheses_node() {
+            if let Some(body) = parens.body() {
+                self.visit_conditional_subtree(&body);
+            }
+            return;
+        }
+
+        // Recurse through prefix ! (not)
+        if let Some(prefix) = node.as_call_node() {
+            // Already handled above
+            let _ = prefix;
+        }
+    }
+}
+
+impl<'a> Visit<'a> for ConditionalAllowedMethodVisitor<'a> {
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'a>) {
+        // Visit the predicate in conditional context
+        let predicate = node.predicate();
+        self.visit_conditional_subtree(&predicate);
+
+        // Visit body normally (not in conditional context)
+        if let Some(stmts) = node.statements() {
+            self.visit_statements_node(&stmts);
+        }
+        // Visit subsequent (elsif or else) — recurse via default visit
+        if let Some(sub) = node.subsequent() {
+            if let Some(if_node) = sub.as_if_node() {
+                self.visit_if_node(&if_node);
+            } else if let Some(else_node) = sub.as_else_node() {
+                self.visit_else_node(&else_node);
+            }
+        }
+    }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'a>) {
+        let predicate = node.predicate();
+        self.visit_conditional_subtree(&predicate);
+
+        if let Some(stmts) = node.statements() {
+            self.visit_statements_node(&stmts);
+        }
+        if let Some(else_clause) = node.else_clause() {
+            self.visit_else_node(&else_clause);
+        }
+    }
+
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'a>) {
+        let predicate = node.predicate();
+        self.visit_conditional_subtree(&predicate);
+
+        if let Some(stmts) = node.statements() {
+            self.visit_statements_node(&stmts);
+        }
+    }
+
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'a>) {
+        let predicate = node.predicate();
+        self.visit_conditional_subtree(&predicate);
+
+        if let Some(stmts) = node.statements() {
+            self.visit_statements_node(&stmts);
         }
     }
 }

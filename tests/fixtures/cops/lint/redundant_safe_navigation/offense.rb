@@ -30,3 +30,57 @@ foo&.to_s || ''
 
 foo&.to_h { |k, v| [k, v] } || {}
    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/RedundantSafeNavigation: Redundant safe navigation with default literal detected.
+
+# Case 5: AllowedMethods in conditional context
+if foo&.respond_to?(:bar)
+      ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+  do_something
+elsif foo&.respond_to?(:baz)
+         ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+  do_something_else
+end
+
+do_something unless foo&.respond_to?(:bar)
+                       ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+while foo&.respond_to?(:bar)
+         ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+  do_something
+end
+
+begin
+  do_something
+end until foo&.respond_to?(:bar)
+             ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+do_something if foo&.respond_to?(:bar) && !foo&.respond_to?(:baz)
+                   ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+                                              ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+if foo&.is_a?(String)
+      ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+  do_something
+end
+
+do_something if foo&.kind_of?(Hash)
+                   ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+return unless foo&.eql?('bar')
+                 ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+foo&.instance_of?(String) ? 'yes' : 'no'
+   ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# AllowedMethods with || in condition
+return unless options[:name] && options[:value]&.is_a?(Hash)
+                                               ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# AllowedMethods with eql? in if condition
+if parameters[:method]&.eql?('POST')
+                      ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+  handle_post
+end
+
+# equal? in condition
+do_something if foo&.equal?(bar)
+                   ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
