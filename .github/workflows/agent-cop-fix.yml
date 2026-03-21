@@ -291,7 +291,14 @@ jobs:
 
       - name: Install Ruby gems (for agent debugging)
         if: steps.task.outputs.code_bugs != '0'
-        run: gem install prism rubocop rubocop-performance rubocop-rails rubocop-rspec --no-document
+        run: |
+          # Read versions from vendor submodule tags to stay in sync
+          V_RC=$(cd vendor/rubocop && git describe --tags --abbrev=0 | sed 's/^v//')
+          V_PERF=$(cd vendor/rubocop-performance && git describe --tags --abbrev=0 | sed 's/^v//')
+          V_RAILS=$(cd vendor/rubocop-rails && git describe --tags --abbrev=0 | sed 's/^v//')
+          V_RSPEC=$(cd vendor/rubocop-rspec && git describe --tags --abbrev=0 | sed 's/^v//')
+          gem install "rubocop:$V_RC" "rubocop-performance:$V_PERF" \
+            "rubocop-rails:$V_RAILS" "rubocop-rspec:$V_RSPEC" prism --no-document
 
       - name: Prepare clean workspace for agent
         if: steps.task.outputs.code_bugs != '0'
