@@ -404,7 +404,10 @@ jobs:
             git apply /tmp/agent.patch
 
             # Auto-format Rust files (agent often skips this)
-            cargo fmt -- $(git diff --name-only --diff-filter=AM | grep '\.rs$') 2>/dev/null || true
+            RS_FILES=$(git diff --name-only | grep '\.rs$' || true)
+            if [ -n "$RS_FILES" ]; then
+              cargo fmt -- $RS_FILES
+            fi
 
             git add src/cop/ tests/fixtures/cops/ bench/corpus/
 

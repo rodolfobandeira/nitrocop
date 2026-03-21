@@ -126,7 +126,10 @@ impl Visit<'_> for GlobalStdStreamVisitor<'_, '_> {
         self.in_std_gvar_assignment = saved;
     }
 
-    fn visit_instance_variable_write_node(&mut self, node: &ruby_prism::InstanceVariableWriteNode<'_>) {
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'_>,
+    ) {
         // When entering an instance variable assignment like `@stderr = STDERR`,
         // temporarily clear the gvar assignment context. The constant on the RHS
         // should still be flagged.
