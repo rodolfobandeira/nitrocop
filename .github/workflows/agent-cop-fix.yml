@@ -340,23 +340,8 @@ jobs:
           CODEX_AUTH_JSON: ${{ github.event.inputs.backend == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
         run: |
           # Background progress watcher — shows what the agent is doing every 30s
-          (
-            sleep 10
-            while true; do
-              LOGFILE=$(find ~/.claude/projects -name '*.jsonl' -newer /tmp/final-task.md 2>/dev/null | head -1)
-              if [ -n "$LOGFILE" ]; then
-                LINES=$(wc -l < "$LOGFILE")
-                # Show last assistant message or tool use summary
-                LAST_TYPE=$(tail -1 "$LOGFILE" | jq -r '.type // "?"' 2>/dev/null || echo "?")
-                LAST_TOOL=$(tail -5 "$LOGFILE" | jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | .name' 2>/dev/null | tail -1)
-                LAST_TEXT=$(tail -5 "$LOGFILE" | jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' 2>/dev/null | tail -c 200)
-                echo "[progress] $(date +%H:%M:%S) | ${LINES} events | type: ${LAST_TYPE} | tool: ${LAST_TOOL:-n/a} | text: ${LAST_TEXT:-(none)}"
-              else
-                echo "[progress] $(date +%H:%M:%S) | waiting for session to start..."
-              fi
-              sleep 30
-            done
-          ) &
+          python3 /tmp/ci-scripts/watch_agent_progress.py \
+            --newer-than /tmp/final-task.md --interval 30 &
           WATCHER_PID=$!
 
           if [ "${{ github.event.inputs.backend }}" = "minimax" ]; then
