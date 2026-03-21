@@ -5,7 +5,7 @@
 exec > >(tee -a /tmp/setup.log) 2>&1
 echo "=== Setup started at $(date) ==="
 
-# Install C compiler only if missing (ruby-prism crate needs it)
+# Install C compiler only if missing (ruby-prism crate needs it for rebuilds)
 if ! command -v cc &>/dev/null; then
   echo "--- Installing build tools ---"
   if command -v sudo &>/dev/null; then
@@ -19,24 +19,37 @@ fi
 if ! command -v cargo &>/dev/null; then
   echo "--- Installing Rust ---"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  # Make cargo available in this session AND future sessions
   echo 'source "$HOME/.cargo/env"' >> "$HOME/.bashrc"
   echo 'source "$HOME/.cargo/env"' >> "$HOME/.profile"
 fi
-# Source for this script's session
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# Ensure submodules are checked out (needed for ruby-prism build)
+# Ensure submodules are checked out
 if [ ! -d "vendor/rubocop/.git" ] && [ -f ".gitmodules" ]; then
   echo "--- Checking out submodules ---"
   git submodule update --init --recursive
 fi
 
-# Pre-compile the test binary (what the agent actually runs).
-# cargo test --no-run compiles without executing, so subsequent
-# cargo test --lib -- <filter> is near-instant.
-echo "--- Building test binary ($(date)) ---"
-cargo test --lib --no-run 2>&1 || echo "WARNING: build failed, agent will need to build"
+# Download pre-built build cache from GitHub Releases (public, no auth needed).
+# This avoids the 5+ minute cold compile. The GHA dispatch workflow uploads
+# a fresh cache before each dispatch.
+CACHE_URL="https://github.com/6/nitrocop/releases/download/agent-build-cache/agent-build-cache.tar.gz"
+if [ ! -d "target/debug/deps" ]; then
+  echo "--- Downloading pre-built cache ---"
+  mkdir -p target/debug
+  if curl -sL --fail "$CACHE_URL" -o /tmp/agent-build-cache.tar.gz; then
+    tar xzf /tmp/agent-build-cache.tar.gz -C target/debug/
+    rm -f /tmp/agent-build-cache.tar.gz
+    echo "Build cache restored"
+  else
+    echo "WARNING: could not download cache, will compile from scratch"
+  fi
+fi
+
+# Quick incremental build to pick up any source differences between
+# the cache (built from main) and the agent's branch.
+echo "--- Incremental build ($(date)) ---"
+cargo test --lib --no-run 2>&1 || echo "WARNING: build failed"
 echo "--- Build done ($(date)) ---"
 
 # Remove files that would confuse the agent
