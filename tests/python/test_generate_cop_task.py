@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Tests for generate-cop-task.py helper functions."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parents[2] / "scripts" / "agent"))
+
+# The module has a hyphen in filename, use importlib
+import importlib
+gct = importlib.import_module("generate-cop-task")
+
+
+def test_pascal_to_snake():
+    assert gct.pascal_to_snake("NegatedWhile") == "negated_while"
+    assert gct.pascal_to_snake("AmbiguousRange") == "ambiguous_range"
+    assert gct.pascal_to_snake("HashLikeCase") == "hash_like_case"
+    assert gct.pascal_to_snake("I18nLocaleTexts") == "i18n_locale_texts"
+    assert gct.pascal_to_snake("HTTPClient") == "http_client"
+
+
+def test_parse_cop_name():
+    dept, name, snake = gct.parse_cop_name("Style/NegatedWhile")
+    assert dept == "Style"
+    assert name == "NegatedWhile"
+    assert snake == "negated_while"
+
+
+def test_dept_dir_name():
+    assert gct.dept_dir_name("Style") == "style"
+    assert gct.dept_dir_name("RSpec") == "rspec"
+    assert gct.dept_dir_name("RSpecRails") == "rspec_rails"
+    assert gct.dept_dir_name("FactoryBot") == "factory_bot"
+    assert gct.dept_dir_name("Lint") == "lint"
+
+
+def test_extract_source_lines():
+    src = [
+        "  6: def foo",
+        ">>>  7: \tinclude Bar",
+        "  8: end",
+    ]
+    lines, offense, idx = gct._extract_source_lines(src)
+    assert len(lines) == 3
+    assert "include Bar" in offense
+    assert idx == 1
+
+
+def test_extract_source_lines_no_offense():
+    src = ["  1: x = 1", "  2: y = 2"]
+    lines, offense, idx = gct._extract_source_lines(src)
+    assert len(lines) == 2
+    assert offense is None
+    assert idx is None
+
+
+def test_find_enclosing_structure_begin():
+    lines = [
+        "BEGIN {",
+        "\tinclude Foo",
+        "}",
+    ]
+    result = gct._find_enclosing_structure(lines, 1)
+    assert result is not None
+    assert "BEGIN" in result
+    assert "PreExecutionNode" in result
+
+
+def test_find_enclosing_structure_class():
+    lines = [
+        "class MyClass",
+        "  def foo",
+        "    bar",
+        "  end",
+        "end",
+    ]
+    result = gct._find_enclosing_structure(lines, 2)
+    assert result is not None
+    assert "method body" in result
+
+
+def test_find_enclosing_structure_none():
+    lines = ["x = 1"]
+    result = gct._find_enclosing_structure(lines, 0)
+    assert result is None
+
+
+def test_find_enclosing_structure_top_level():
+    lines = [
+        "include Foo",
+    ]
+    result = gct._find_enclosing_structure(lines, 0)
+    assert result is None
+
+
+def test_extract_spec_excerpts():
+    spec = '''
+    it 'flags bad code' do
+      expect_offense(<<~RUBY)
+        x = 1
+        ^^^^^ Lint/Foo: Bad.
+      RUBY
+    end
+
+    it 'accepts good code' do
+      expect_no_offenses(<<~RUBY)
+        y = 2
+      RUBY
+    end
+    '''
+    result = gct.extract_spec_excerpts(spec)
+    assert "expect_offense" in result
+    assert "expect_no_offenses" in result
+
+
+def test_extract_spec_excerpts_empty():
+    result = gct.extract_spec_excerpts("# no specs here")
+    assert result == "(no expect_offense blocks found)"
+
+
+def test_detect_prism_pitfalls():
+    source_with_hash = "if let Some(h) = node.as_hash_node() {"
+    pitfalls = gct.detect_prism_pitfalls(source_with_hash)
+    assert len(pitfalls) == 1
+    assert "KeywordHashNode" in pitfalls[0]
+
+
+def test_detect_prism_pitfalls_none():
+    source = "fn check_node(&self) { }"
+    pitfalls = gct.detect_prism_pitfalls(source)
+    assert len(pitfalls) == 0
+
+
+if __name__ == "__main__":
+    test_pascal_to_snake()
+    test_parse_cop_name()
+    test_dept_dir_name()
+    test_extract_source_lines()
+    test_extract_source_lines_no_offense()
+    test_find_enclosing_structure_begin()
+    test_find_enclosing_structure_class()
+    test_find_enclosing_structure_none()
+    test_find_enclosing_structure_top_level()
+    test_extract_spec_excerpts()
+    test_extract_spec_excerpts_empty()
+    test_detect_prism_pitfalls()
+    test_detect_prism_pitfalls_none()
+    print("All tests passed.")

@@ -290,6 +290,41 @@ def _find_enclosing_structure(
     return None
 
 
+def _get_prism_node_type(source: str, line: int) -> str | None:
+    """Use Ruby's Prism to identify the AST node type at a given line.
+
+    Returns a string like 'RangeNode > IntegerNode' or None if Ruby/Prism
+    is not available."""
+    ruby_script = f"""
+require 'prism'
+result = Prism.parse({source!r})
+target_line = {line}
+
+# Walk the AST to find the deepest node at the target line
+def find_at_line(node, line, path=[])
+  return nil unless node.respond_to?(:child_nodes)
+  loc = node.location rescue nil
+  if loc && loc.start_line == line
+    path << node.class.name.split('::').last
+  end
+  node.child_nodes.compact.each {{ |c| find_at_line(c, line, path) }}
+  path
+end
+
+types = find_at_line(result.value, target_line)
+puts types.join(' > ') unless types.empty?
+"""
+    try:
+        proc = subprocess.run(
+            ["ruby", "-e", ruby_script],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = proc.stdout.strip()
+        return out if out else None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
 def _run_nitrocop(binary_path: Path, cwd: str, cop: str = "") -> list[dict]:
     """Run nitrocop on test.rb in the given directory, return offenses list."""
     cmd = [str(binary_path), "--force-default-config", "--format", "json"]
@@ -376,12 +411,20 @@ def run_diagnostic(
                 # Identify enclosing structure for context
                 enclosing = _find_enclosing_structure(source_lines, offense_line_idx)
 
+                # Identify Prism node type at the offense location
+                node_type = None
+                if offense_line_idx is not None:
+                    node_type = _get_prism_node_type(
+                        "\n".join(source_lines), offense_line_idx + 1,
+                    )
+
                 results.append({
                     "kind": kind, "loc": loc, "msg": msg,
                     "diagnosed": True, "detected": detected,
                     "offense_line": offense_line,
                     "test_snippet": test_snippet,
                     "enclosing": enclosing,
+                    "node_type": node_type,
                     "source_context": "\n".join(source_lines),
                 })
             except Exception as e:
@@ -458,6 +501,8 @@ def _format_with_diagnostics(
                     lines.append(f"\n**Enclosing structure:** {d['enclosing']}")
                     lines.append("The offense is inside this structure — the cop may need")
                     lines.append("to handle this context to detect the pattern.")
+                if d.get("node_type"):
+                    lines.append(f"\n**Prism AST at offense line:** `{d['node_type']}`")
             lines.append(f"\nMessage: `{d['msg']}`")
             if d.get("test_snippet"):
                 lines.append("\nReady-made test snippet (add to offense.rb, adjust `^` count):")
@@ -482,6 +527,9 @@ def _format_with_diagnostics(
                     lines.append(f"\n**Enclosing structure:** {d['enclosing']}")
                     lines.append("The offense is inside this structure — this is likely WHY")
                     lines.append("RuboCop does not flag it. Your fix should detect this context.")
+                if d.get("node_type"):
+                    lines.append(f"\n**Prism AST at offense line:** `{d['node_type']}`")
+                    lines.append("This shows the Prism node types at the flagged location.")
                 if d.get("source_context"):
                     lines.append(f"\nFull source context (add relevant parts to no_offense.rb):")
                     lines.append(f"```ruby\n{d['source_context']}\n```")

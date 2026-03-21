@@ -302,6 +302,15 @@ jobs:
           gem install "rubocop:$V_RC" "rubocop-performance:$V_PERF" \
             "rubocop-rails:$V_RAILS" "rubocop-rspec:$V_RSPEC" prism --no-document
 
+      - name: Pre-populate fixtures with corpus examples
+        if: steps.task.outputs.code_bugs != '0'
+        run: |
+          COP="${{ github.event.inputs.cop }}"
+          DEPT_DIR="${{ steps.cop.outputs.filter }}"
+          # cop::dept::name -> tests/fixtures/cops/dept/name
+          FIXTURE_DIR="tests/fixtures/cops/$(echo "$DEPT_DIR" | sed 's|cop::||;s|::|/|g')"
+          python3 scripts/ci/prepopulate_fixtures.py /tmp/task.md "$COP" "$FIXTURE_DIR"
+
       - name: Prepare clean workspace for agent
         if: steps.task.outputs.code_bugs != '0'
         run: |
