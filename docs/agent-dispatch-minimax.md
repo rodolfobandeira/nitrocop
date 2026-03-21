@@ -64,7 +64,7 @@ python3 scripts/agent/tier_cops.py --extended --tier 1 --names | while read cop;
 done
 
 # Retry
-gh workflow run agent-cop-retry.yml -f cop="Style/VariableInterpolation"
+gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation" -f mode=retry
 ```
 
 ## Tradeoffs vs Codex

@@ -18,7 +18,7 @@ Before dispatching, verify the pipeline is set up:
 
 ```bash
 # Verify the workflows exist
-ls .github/workflows/agent-cop-fix.yml .github/workflows/agent-cop-retry.yml .github/workflows/agent-cop-check.yml
+ls .github/workflows/agent-cop-fix.yml .github/workflows/agent-cop-check.yml
 ```
 
 The user needs `CODEX_AUTH_JSON` configured in GitHub repo secrets.
@@ -140,14 +140,15 @@ gh pr list --state open --search "status:failure" --limit 50
 Retry each with stronger model:
 
 ```bash
-gh workflow run agent-cop-retry.yml -f cop="Department/CopName"
+gh workflow run agent-cop-fix.yml -f cop="Department/CopName" -f mode=retry
 ```
 
 For specific issues, add context:
 
 ```bash
-gh workflow run agent-cop-retry.yml \
+gh workflow run agent-cop-fix.yml \
   -f cop="Department/CopName" \
+  -f mode=retry \
   -f extra_context="<what went wrong>"
 ```
 

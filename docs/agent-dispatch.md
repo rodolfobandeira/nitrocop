@@ -115,12 +115,12 @@ GHA runs these in parallel (up to your concurrency limit, typically 20 for free/
 ### Phase 4: Retry Failures
 
 ```bash
-gh workflow run agent-cop-retry.yml -f cop="Style/VariableInterpolation"
-gh workflow run agent-cop-retry.yml -f cop="Style/VariableInterpolation" \
-  -f extra_context="The FN is a global variable interpolation"
+gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation" -f mode=retry
+gh workflow run agent-cop-fix.yml -f cop="Style/VariableInterpolation" \
+  -f mode=retry -f extra_context="The FN is a global variable interpolation"
 ```
 
-The retry workflow auto-discovers all prior failed PRs, includes their diffs and CI failure logs in the prompt, and closes stale PRs before dispatching.
+Retry mode auto-discovers all prior failed PRs, includes their diffs and CI failure logs in the prompt, and closes stale PRs before dispatching.
 
 ### Phase 5: Validate
 
@@ -178,8 +178,7 @@ On the PR, two additional workflows run:
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `agent-cop-fix.yml` | `workflow_dispatch` | Generate prompt → Codex fixes → validate → PR |
-| `agent-cop-retry.yml` | `workflow_dispatch` | Retry with prior attempt context |
+| `agent-cop-fix.yml` | `workflow_dispatch` | Generate prompt → agent fixes → validate → PR (mode: fix/retry) |
 | `agent-cop-check.yml` | PR (cop file changes) | Validate changed cops against corpus |
 | `agent-build-cache.yml` | `workflow_dispatch` | Pre-build Rust cache (optional optimization) |
 
