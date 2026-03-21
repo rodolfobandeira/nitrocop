@@ -407,7 +407,8 @@ jobs:
           fi
 
           CLEAN_APPLY=true
-          LABELS="agent-fix"
+          MODEL_LABEL="model:${BACKEND}"
+          LABELS="agent-fix,${MODEL_LABEL}"
           if git apply --3way /tmp/agent.patch; then
             echo "Patch applied cleanly"
           else
