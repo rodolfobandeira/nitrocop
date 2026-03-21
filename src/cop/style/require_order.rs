@@ -81,7 +81,7 @@ impl Cop for RequireOrder {
                     || line_str
                         .as_bytes()
                         .get(6)
-                        .map_or(false, |b| b.is_ascii_whitespace()))
+                        .is_some_and(|b| b.is_ascii_whitespace()))
             {
                 inside_begin_block = true;
                 if current_group.len() > 1 {
@@ -98,7 +98,7 @@ impl Cop for RequireOrder {
                         || line_str
                             .as_bytes()
                             .get(4)
-                            .map_or(false, |b| b.is_ascii_whitespace()))
+                            .is_some_and(|b| b.is_ascii_whitespace()))
                 {
                     inside_begin_block = false;
                 }
