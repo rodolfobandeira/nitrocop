@@ -1,5 +1,9 @@
 name: Agent Cop Fix
 
+permissions:
+  contents: write
+  actions: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -45,6 +49,8 @@ jobs:
           echo "Branch: $BRANCH"
 
       - name: Generate task packet
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/agent/generate-cop-task.py \
             "${{ github.event.inputs.cop }}" \
@@ -64,15 +70,6 @@ jobs:
           git push origin --delete "$BRANCH" 2>/dev/null || true
 
           git checkout -b "$BRANCH"
-
-          # Replace CLAUDE.md with focused agent instructions.
-          # This IS safe to commit — when merged, main gets a CLAUDE.md
-          # that just says "see task prompt", which we'll revert in CI
-          # or the merge will be a squash that only includes cop changes.
-          #
-          # Actually — safest approach: push the branch as-is (identical
-          # to main) and let Kilo's startup commands do the cleanup.
-          # The agent's commits will only contain cop file changes.
           git push -u origin "$BRANCH"
 
       # Select the right webhook URL based on model profile.
