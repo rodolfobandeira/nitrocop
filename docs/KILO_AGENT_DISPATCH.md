@@ -56,7 +56,7 @@ This is enough for all 319 Tier 1 cops. Upgrade to Max-Highspeed ($80/mo, 15K re
      rm -rf .agents/ .claude/ .devcontainer/ .github/ bench/ docs/ gem/ scripts/
      ```
 4. Create a **webhook trigger** linked to the `minimax-highspeed` profile:
-   - Prompt template: `{{body}}` (passes the task prompt through as-is)
+   - Prompt template: `{{bodyJson}}` (the dispatch sends JSON with a `message` field containing the full task)
    - Inbound auth: set a shared secret (this becomes `KILO_WEBHOOK_SECRET` in GitHub secrets)
 5. Note the webhook URL
 

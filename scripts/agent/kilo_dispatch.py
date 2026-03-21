@@ -42,15 +42,20 @@ def dispatch_to_kilo(
 
     # Send task prompt as plain text body. The Kilo webhook template
     # uses {{body}} to inject this directly as the agent's prompt.
-    data = task_content.encode("utf-8")
+    # Send as JSON — Cloudflare/Kilo may reject plain text.
+    # The webhook prompt template should use {{body}} or {{bodyJson}}
+    # to extract the task content.
+    payload = json.dumps({"message": task_content}).encode("utf-8")
     headers = {
-        "Content-Type": "text/plain",
+        "Content-Type": "application/json",
+        "User-Agent": "nitrocop-agent-dispatch/1.0",
+        "Accept": "application/json",
     }
     # Kilo webhook inbound auth: x-webhook-secret header with shared secret
     if api_key:
         headers["x-webhook-secret"] = api_key
 
-    req = urllib.request.Request(webhook_url, data=data, headers=headers, method="POST")
+    req = urllib.request.Request(webhook_url, data=payload, headers=headers, method="POST")
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
