@@ -425,12 +425,15 @@ jobs:
               --body "Automated ${MODE} fix for ${COP} (backend: ${BACKEND}).
 
           ## Validation
-          - [ ] cargo test --lib
           - [ ] Full CI (checks.yml)
-          - [ ] Corpus count check
+          - [ ] Corpus cop check
           ")
             echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
             echo "has_pr=true" >> "$GITHUB_OUTPUT"
+
+            # Enable auto-merge — PR merges automatically when CI passes
+            gh pr merge "$PR_URL" --auto --squash --delete-branch || \
+              echo "WARNING: could not enable auto-merge (check repo settings)"
             echo "Created PR: $PR_URL"
           else
             echo "No cop file changes found in agent output"
