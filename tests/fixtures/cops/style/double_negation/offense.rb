@@ -74,10 +74,11 @@ def foo?
   end
 end
 
-# !! inside nested conditional where inner if ends before outer if/elsif
-# RuboCop does NOT consider this return position because the inner conditional
-# ends before the def body's last expression
+# !! inside nested conditional where inner if ends before outer if
+# Multi-statement body: outer if is NOT the only statement, so child_nodes.last
+# of begin = outer if. Inner conditional ends before outer if's end → offense.
 def invite(username, invited_by, guardian)
+  do_setup
   if condition_a
     if condition_b
       !!call_one(invited_by, guardian)
@@ -86,6 +87,34 @@ def invite(username, invited_by, guardian)
       !!call_two(invited_by, guardian)
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
     end
+  end
+end
+
+# !! inside elsif branch in multi-statement body (confirmed FN)
+# When def body has multiple statements, last_child = outer if. The elsif
+# conditional ends before the outer if's end → not return position → offense.
+def circular_reference?(child_svc)
+  return true if child_svc == self
+
+  if child_svc.kind_of?(Service)
+    ancestor_ids.include?(child_svc.id)
+  elsif child_svc.kind_of?(ServiceTemplate)
+    !!circular_reference_check(child_svc)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  end
+end
+
+# !! with =~ inside elsif branch in multi-statement body (confirmed FN)
+def is_a_type?(value)
+  value = compute_type(value)
+
+  if value == :system_snapshot
+    is_a_type?(:evm_snapshot)
+  elsif value.kind_of?(Regexp)
+    !!(value =~ name)
+    ^^^^^^^^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
+  else
+    name == value
   end
 end
 
@@ -169,11 +198,3 @@ def start_server
   end
 end
 
-# !! in hash value inside map block (block dig-in finds hash as last_child)
-def run_actions
-  items.map do |item|
-    skipped = seen_items[item.name]
-    { type: "recipe", name: item.name, skipped: !!skipped }
-                                                ^^^^^^^^^^ Style/DoubleNegation: Avoid the use of double negation (`!!`).
-  end
-end

@@ -319,3 +319,81 @@ def tab_context_menu(tab)
     end
   end
 end
+
+# FP fix: !! inside nested conditional in single-statement body (return position)
+# When the if is the ONLY statement, child_nodes.last digs into the if, finding
+# the inner if. The inner if covers the branch → return position → no offense.
+def invite(username, invited_by, guardian)
+  if condition_a
+    if condition_b
+      !!call_one(invited_by, guardian)
+    else
+      !!call_two(invited_by, guardian)
+    end
+  end
+end
+
+# FP fix: !! inside hash value in map block body (block is return position)
+# The block body's StatementsNode starts before !! line → return position.
+def run_actions
+  items.map do |item|
+    skipped = seen_items[item.name]
+    { type: "recipe", name: item.name, skipped: !!skipped }
+  end
+end
+
+# FP fix: !! assignment inside block (block body is return position)
+# alter do ... end is single-statement body; block body covers the !!.
+def with_marker(lineno = 1)
+  alter do
+    @with_marker   = !!lineno
+    @marker_lineno = lineno
+  end
+end
+
+# FP fix: !! assignment inside synchronize block
+def run
+  @mutex.synchronize do
+    return if @ran_once
+    result = yield
+    @ran_once = !!result
+    if !@ran_once && limited?
+      @retries += 1
+    end
+    result
+  end
+end
+
+# FP fix: !! hash value inside synchronize block
+def data_for(thread, purpose, compatible)
+  @monitor.synchronize do
+    data[thread] = {
+      thread: thread,
+      sharing: @sharing[thread],
+      purpose: purpose,
+      waiting: !!@waiting[thread],
+      sleeper: @sleeping[thread],
+    }
+  end
+end
+
+# FP fix: !! hash assignment inside filter_map block
+def properties_list(properties)
+  properties.filter_map do |property|
+    values = {}
+    values["property"] = property["name"]
+    values["required"] = !!property["required"]
+    values["default_value"] = property["default"]
+    values
+  end
+end
+
+# FP fix: !! assignment inside map block
+def process_items(items)
+  items.map do |item|
+    item_info = item[item.keys.first]
+    item_info["failover_ip"] = !!item_info["has_failover"]
+    item_info["active_server_ip"] = item_info["server_ip"]
+    item_info
+  end
+end

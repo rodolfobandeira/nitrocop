@@ -82,6 +82,35 @@ use crate::parse::source::SourceFile;
 /// (3) Added OrNode/AndNode handling in `parser_last_child` (returns right side).
 /// (4) Added `*OrWriteNode`, `*AndWriteNode`, and other compound assignment
 /// handlers to `parser_last_child`.
+///
+/// Corpus investigation (round 6): 15 FPs, 4 FNs.
+///
+/// FP root cause: (1) `parser_last_child` for CallNode with block dug too deep,
+/// returning the last child of the block body instead of the block body itself.
+/// In Parser AST, `child_nodes.last` of a block returns the body (begin wrapper
+/// or single expression), NOT the last statement within it. This caused `!!`
+/// inside non-define_method blocks (synchronize, alter, map, filter_map) to have
+/// a `last_child_first_line` set to a line AFTER the `!!`, incorrectly preventing
+/// it from being classified as return position. (2) Three fixture tests were
+/// incorrect: the nested-conditional and map-block-hash patterns in single-statement
+/// bodies are return position in RuboCop (verified empirically).
+///
+/// FN root cause: Prism includes the shared `end` keyword in elsif IfNode ranges,
+/// while Parser AST excludes it. For `if A; ...; elsif B; !!x; end` in a
+/// multi-statement body, `cond_last_line` (from the elsif IfNode) equaled
+/// `last_child_last_line` (from the outer IfNode), both including `end`. In
+/// Parser, the elsif's range stops at its body's last line (before `end`), so
+/// the comparison `last_child_last_line <= cond_last_line` correctly fails.
+///
+/// Fix (round 6): (1) Changed `parser_last_child` for CallNode with block to
+/// return the block body (StatementsNode) directly instead of its last child.
+/// (2) Added IfNode handling to `parser_last_child` — returns the subsequent
+/// (elsif IfNode or else body) matching Parser's `child_nodes.last` filtering.
+/// (3) Added `parser_if_last_line()` to compute Parser-equivalent last line for
+/// IfNode, excluding the shared `end` keyword. Used in `visit_if_node` for elsif
+/// branches and in `find_last_child_of_stmts` for elsif last-child nodes.
+/// (4) Fixed three incorrect fixture tests (moved to no_offense.rb).
+/// (5) Added FN test cases for elsif branches in multi-statement bodies.
 pub struct DoubleNegation;
 
 impl Cop for DoubleNegation {
