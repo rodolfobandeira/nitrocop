@@ -1,42 +1,39 @@
 #!/usr/bin/env bash
 # Kilo Cloud Agent setup for nitrocop cop-fix tasks.
 # Called from Kilo startup commands: bash .kilocode/setup-script
-#
-# Logs to /tmp/setup.log for debugging if session fails.
 
 exec > >(tee -a /tmp/setup.log) 2>&1
 echo "=== Setup started at $(date) ==="
 
-# Install build tools (ruby-prism crate needs a C compiler)
-echo "--- Installing build tools ---"
-if command -v sudo &>/dev/null; then
-  sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl
-else
-  apt-get update -qq && apt-get install -y -qq build-essential curl
+# Install C compiler only if missing (ruby-prism crate needs it)
+if ! command -v cc &>/dev/null; then
+  echo "--- Installing build tools ---"
+  if command -v sudo &>/dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq build-essential
+  else
+    apt-get update -qq && apt-get install -y -qq build-essential
+  fi
 fi
 
-# Install Rust
-echo "--- Installing Rust ---"
+# Install Rust only if missing
 if ! command -v cargo &>/dev/null; then
+  echo "--- Installing Rust ---"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 fi
-# Source cargo env (try both common locations)
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 [ -f "/root/.cargo/env" ] && . "/root/.cargo/env"
-echo "cargo: $(which cargo 2>/dev/null || echo 'NOT FOUND')"
 
 # Ensure submodules are checked out (needed for ruby-prism build)
-echo "--- Checking submodules ---"
 if [ ! -d "vendor/rubocop/.git" ] && [ -f ".gitmodules" ]; then
+  echo "--- Checking out submodules ---"
   git submodule update --init --recursive
 fi
 
-# Build the project
-echo "--- Building ---"
+# Build
+echo "--- Building ($(date)) ---"
 cargo build 2>&1
 
-# Remove files that would confuse the agent.
-echo "--- Cleaning up distracting files ---"
+# Remove files that would confuse the agent
 rm -f CLAUDE.md AGENTS.md
 rm -rf .agents/ .claude/ .devcontainer/ .github/ bench/ docs/ gem/ scripts/
 
