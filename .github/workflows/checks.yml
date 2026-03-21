@@ -8,12 +8,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: 'Git ref to check (branch or SHA)'
-        required: false
-        type: string
 
 jobs:
   build-and-test:
@@ -96,6 +90,68 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # Corpus cop check: for any changed cops, compare nitrocop offense counts
+  # against the cached corpus oracle baseline. Fast (~30s per cop).
+  cop-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Detect changed cops
+        id: cops
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="HEAD~1"
+          fi
+          python3 scripts/agent/detect_changed_cops.py \
+            --base "$BASE" --head HEAD > /tmp/changed_cops.txt
+          echo "Changed cops:"
+          cat /tmp/changed_cops.txt
+          if [ -s /tmp/changed_cops.txt ]; then
+            echo "has_cops=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cops=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.cops.outputs.has_cops == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.cops.outputs.has_cops == 'true'
+
+      - name: Build release binary
+        if: steps.cops.outputs.has_cops == 'true'
+        run: cargo build --release
+
+      - name: Check cops against corpus baseline
+        if: steps.cops.outputs.has_cops == 'true'
+        env:
+          NITROCOP_BIN: ${{ github.workspace }}/target/release/nitrocop
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=0
+          while IFS= read -r cop; do
+            [ -z "$cop" ] && continue
+            echo ""
+            echo "=============================="
+            echo "Checking: $cop (vs cached corpus oracle baseline)"
+            echo "=============================="
+            if ! python3 scripts/check-cop.py "$cop" --extended --verbose; then
+              echo "WARN: $cop check reported issues"
+              failed=$((failed + 1))
+            fi
+          done < /tmp/changed_cops.txt
+
+          if [ "$failed" -gt 0 ]; then
+            echo ""
+            echo "WARNING: $failed cop(s) had check issues. Review above output."
+          fi
 
   # Corpus smoke test: run nitrocop + rubocop on a few cheap sentinel repos to
   # catch systemic regressions (file discovery, config, plugin loading, directives)
