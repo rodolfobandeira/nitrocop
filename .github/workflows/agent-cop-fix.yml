@@ -381,6 +381,7 @@ jobs:
             PR_URL=$(gh pr create \
               --base main \
               --head "$BRANCH" \
+              --label "agent-fix" \
               --title "Fix ${COP}: agent-generated conformance fix${RETRY_NOTE}" \
               --body "Automated ${MODE} fix for ${COP} (backend: ${BACKEND}).
 
