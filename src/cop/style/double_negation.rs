@@ -340,7 +340,18 @@ impl DoubleNegationVisitor<'_> {
             // For a CallNode, the last child is the last argument (or block body).
             // If that last child is a hash/keyword_hash, it causes the offense.
             if let Some(last_child) = self.parser_last_child(last) {
-                return Some(self.node_to_def_body_info(&last_child));
+                let mut info = self.node_to_def_body_info(&last_child);
+                // If the last child is an elsif IfNode, adjust last_child_last_line
+                // to exclude the shared `end` keyword (matching Parser AST range).
+                if let Some(if_node) = last_child.as_if_node() {
+                    let is_elsif = if_node
+                        .if_keyword_loc()
+                        .is_some_and(|kw| kw.as_slice() == b"elsif");
+                    if is_elsif {
+                        info.last_child_last_line = self.parser_if_last_line(&if_node);
+                    }
+                }
+                return Some(info);
             }
         }
 
@@ -358,18 +369,12 @@ impl DoubleNegationVisitor<'_> {
             if let Some(block) = call.block() {
                 if let Some(block_node) = block.as_block_node() {
                     // Block call: child_nodes.last of a Parser block = body.
-                    // In Parser AST, single-statement body = the expression,
-                    // multi-statement = begin wrapper. child_nodes.last of
-                    // begin = last statement. In Prism, body is always a
-                    // StatementsNode; get its last child to match Parser.
-                    if let Some(body) = block_node.body() {
-                        if let Some(stmts) = body.as_statements_node() {
-                            let children: Vec<_> = stmts.body().iter().collect();
-                            return children.into_iter().last();
-                        }
-                        return Some(body);
-                    }
-                    return None;
+                    // Return the block body (StatementsNode) directly, matching
+                    // Parser's child_nodes.last which returns the begin wrapper
+                    // (or single expression) — NOT the last statement within it.
+                    // The caller uses the body's first_line for the return-position
+                    // check: `last_child_first_line <= node_line`.
+                    return block_node.body();
                 }
             }
             if let Some(args) = call.arguments() {
@@ -378,6 +383,29 @@ impl DoubleNegationVisitor<'_> {
             }
             // No arguments: last child is receiver (if any)
             return call.receiver();
+        }
+
+        // IfNode: child_nodes.last in Parser = else clause (inner if for elsif,
+        // else body, or nil). child_nodes filters out nil, so for `if` without
+        // else: last child = the then-body.
+        if let Some(if_node) = node.as_if_node() {
+            if let Some(subsequent) = if_node.subsequent() {
+                // elsif → another IfNode; else → ElseNode
+                if let Some(inner_if) = subsequent.as_if_node() {
+                    return Some(inner_if.as_node());
+                }
+                if let Some(else_node) = subsequent.as_else_node() {
+                    // Parser's child_nodes.last of an if-with-else = the else body
+                    // (expression or begin). In Prism, ElseNode wraps statements.
+                    if let Some(stmts) = else_node.statements() {
+                        return Some(stmts.as_node());
+                    }
+                    // Empty else: no last child from the else
+                    return if_node.statements().map(|s| s.as_node());
+                }
+            }
+            // No else/elsif: last child = the then-body (statements)
+            return if_node.statements().map(|s| s.as_node());
         }
 
         // OrNode: child_nodes.last = right side
@@ -487,6 +515,45 @@ impl DoubleNegationVisitor<'_> {
         }
     }
 
+    /// Compute the "Parser-equivalent" last line for an IfNode.
+    ///
+    /// In Parser AST, elsif creates a nested if node whose range excludes the
+    /// shared `end` keyword. For `if a; 1; elsif b; 2; end`, Parser gives the
+    /// inner if (from elsif) a range of L3-4 (body only), while Prism gives
+    /// L3-5 (including `end`). For `if a; ...; elsif b; ...; else; ...; end`,
+    /// Parser gives the inner if L3-6 (through else body), Prism gives L3-7.
+    ///
+    /// This method returns the content-based last line (matching Parser) by
+    /// walking the subsequent chain without including the `end` keyword.
+    fn parser_if_last_line(&self, node: &ruby_prism::IfNode<'_>) -> usize {
+        if let Some(subsequent) = node.subsequent() {
+            if let Some(inner_if) = subsequent.as_if_node() {
+                // Another elsif: recurse
+                return self.parser_if_last_line(&inner_if);
+            }
+            if let Some(else_node) = subsequent.as_else_node() {
+                // else clause: use the else body's last line
+                if let Some(stmts) = else_node.statements() {
+                    return self.last_line_of_node(
+                        stmts.location().start_offset(),
+                        stmts.location().end_offset(),
+                    );
+                }
+                // Empty else: use the else keyword's line
+                return self.line_of_offset(else_node.else_keyword_loc().start_offset());
+            }
+        }
+        // No subsequent: use the body's last line
+        if let Some(stmts) = node.statements() {
+            return self.last_line_of_node(
+                stmts.location().start_offset(),
+                stmts.location().end_offset(),
+            );
+        }
+        // Fallback: use the predicate's line
+        self.line_of_offset(node.predicate().location().start_offset())
+    }
+
     /// Enter a method body: compute last-child info, push to stack, visit body, pop.
     fn with_def_body<F>(&mut self, body: Option<ruby_prism::Node<'_>>, visit_fn: F)
     where
@@ -554,8 +621,18 @@ impl<'pr> Visit<'pr> for DoubleNegationVisitor<'_> {
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         if !self.def_info_stack.is_empty() {
-            let last_line = self
-                .last_line_of_node(node.location().start_offset(), node.location().end_offset());
+            // For elsif IfNodes, use the Parser-equivalent last line that
+            // excludes the shared `end` keyword. This is critical because
+            // Prism includes `end` in elsif IfNode ranges while Parser doesn't,
+            // causing incorrect return-position detection.
+            let is_elsif = node
+                .if_keyword_loc()
+                .is_some_and(|kw| kw.as_slice() == b"elsif");
+            let last_line = if is_elsif {
+                self.parser_if_last_line(node)
+            } else {
+                self.last_line_of_node(node.location().start_offset(), node.location().end_offset())
+            };
             self.conditional_last_line_stack.push(last_line);
             // Clear statements stack: the condition is not inside a StatementsNode
             // within this conditional, so the begin_type? check should not apply.
