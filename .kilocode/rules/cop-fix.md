@@ -8,12 +8,10 @@ you received. Follow only those instructions.
 
 1. Read the task prompt — it contains the cop's source code, RuboCop reference
    implementation, test fixtures, and corpus FP/FN examples
-2. Add a test case first (TDD)
+2. Add a test case to the fixture file (offense.rb for FN, no_offense.rb for FP)
 3. Fix the cop's Rust source file
-4. Run `cargo test --lib` with a filter for your cop only
-5. Run `cargo fmt` on the file you changed
-6. Add a `///` doc comment on the cop struct documenting the fix
-7. Commit only your cop's files
+4. Add a `///` doc comment on the cop struct documenting the fix
+5. Commit only your cop's files
 
 ## What files you modify
 
@@ -23,22 +21,11 @@ you received. Follow only those instructions.
 
 Nothing else.
 
-## How you test
+## Important: do NOT compile or run tests
 
-```bash
-cargo test --lib -- cop::<department>::<cop_name>
-```
-
-Use debug builds only. Do not run `cargo test` without a filter.
-
-If the first test run is slow (compiling), that is normal — wait for it.
-Subsequent runs will be near-instant due to incremental compilation.
-
-## How you format
-
-```bash
-cargo fmt -- src/cop/<department>/<cop_name>.rs
-```
+This environment has limited disk space. Do NOT run `cargo build`, `cargo test`,
+or `cargo fmt`. CI will validate your changes after you push. Focus on making
+the correct code changes based on the task prompt and RuboCop reference.
 
 ## Fixture format
 

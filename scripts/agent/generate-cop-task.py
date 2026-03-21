@@ -305,23 +305,12 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 
 ### Workflow
 1. Read the FP/FN examples below to understand what pattern is wrong
-2. Add a test case FIRST:
+2. Add a test case:
    - FN fix: add the missed pattern to `tests/fixtures/cops/{dept_snake}/{snake}/offense.rb` with `^` annotation
    - FP fix: add the false-positive pattern to `tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`
-3. Verify the test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
-4. Fix `src/cop/{dept_snake}/{snake}.rs`
-5. Verify the test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
-6. Format: `cargo fmt -- src/cop/{dept_snake}/{snake}.rs`
-7. Add a `///` doc comment on the cop struct documenting what you found and fixed
-8. Create a branch, commit, push, and open a draft PR:
-   ```
-   git checkout -b fix/{dept_snake}-{snake}
-   git add src/cop/{dept_snake}/{snake}.rs tests/fixtures/cops/{dept_snake}/{snake}/
-   git commit -m "Fix {cop}: <one-line description of what was wrong>"
-   git push -u origin fix/{dept_snake}-{snake}
-   ```
-   Then open a draft pull request targeting `main`.
-   Do NOT push directly to `main`.
+3. Fix `src/cop/{dept_snake}/{snake}.rs`
+4. Add a `///` doc comment on the cop struct documenting what you found and fixed
+5. Commit only your cop's files
 
 ### Fixture Format
 Mark offenses with `^` markers on the line AFTER the offending source line:
@@ -332,12 +321,10 @@ x = 1
 The `^` characters must align with the offending columns. The message format is `{cop}: <message text>`.
 
 ### Rules
-- Only modify files for THIS cop (source + fixtures)
-- Use debug builds: `cargo test --lib -- cop::{dept_snake}::{snake}` (NOT `cargo test --release`)
+- Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
+- Do NOT run `cargo build`, `cargo test`, or `cargo fmt` — CI will validate after push
 - Do NOT touch unrelated files
 - Do NOT use `git stash`
-- Do NOT run the full test suite (`cargo test` without filter)
-- This task prompt and `.kilocode/rules/cop-fix.md` contain your complete instructions.
 """)
 
     # Prism pitfall notes
