@@ -182,4 +182,4 @@ python3 scripts/agent/tier_cops.py --extended
 - The task prompt contains all context the agent needs
 - `workflow_dispatch` requires write access — safe on public repos
 - Retries auto-close stale PRs and include prior attempt context
-- Monitor ChatGPT usage at chatgpt.com/settings — dispatch in small batches
+- Monitor ChatGPT usage at chatgpt.com/codex/settings/usage — dispatch in small batches

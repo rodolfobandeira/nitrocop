@@ -151,7 +151,7 @@ jobs:
           git add -A
           git commit -m "Fix ${COP}: agent-generated fix (retry)
 
-          Co-Authored-By: OpenAI Codex <noreply@openai.com>"
+          Co-Authored-By: codex <noreply@github.com>"
 
           git push -u origin "$BRANCH"
 

@@ -38,7 +38,7 @@ The workflow uses your ChatGPT Pro plan (flat rate, no per-token billing).
 
 Codex automatically refreshes tokens, but if they expire between runs, re-run `codex login` locally and update the secret.
 
-**Usage limits:** ChatGPT Pro allows 300-1500 messages per 5-hour window. Each cop fix uses ~10-30 internal messages. Dispatch in small batches (5-10 cops at a time) and monitor usage at [chatgpt.com/settings](https://chatgpt.com/settings).
+**Usage limits:** ChatGPT Pro allows 300-1500 messages per 5-hour window. Each cop fix uses ~10-30 internal messages. Dispatch in small batches (5-10 cops at a time) and monitor usage at [chatgpt.com/codex/settings/usage](https://chatgpt.com/codex/settings/usage).
 
 ### Step 2: GitHub Repository Secrets
 
