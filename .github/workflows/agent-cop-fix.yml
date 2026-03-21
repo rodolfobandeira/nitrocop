@@ -71,10 +71,6 @@ jobs:
           key: agent-target-${{ hashFiles('Cargo.lock') }}
           restore-keys: agent-target-
 
-      # mold linker: cuts relink time from 30-60s to 2-5s for incremental builds
-      - name: Install mold linker
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold
-
       # --- Fast steps ---
 
       - name: Compute identifiers
@@ -157,6 +153,10 @@ jobs:
 
       # --- Build (before task generation for pre-diagnostic) ---
 
+      # mold linker: cuts relink time from 30-60s to 2-5s for incremental builds
+      - name: Install mold linker
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold
+
       - name: Build binary
         run: |
           cargo build 2>&1
@@ -235,6 +235,34 @@ jobs:
 
           echo "=== Final prompt ==="
           wc -l /tmp/final-task.md
+
+      - name: Update PR with task prompt
+        if: steps.task.outputs.code_bugs != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          COP="${{ github.event.inputs.cop }}"
+          BACKEND="${{ github.event.inputs.backend }}"
+          MODE="${{ github.event.inputs.mode }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PR_URL="${{ steps.claim.outputs.pr_url }}"
+          CODE_BUGS="${{ steps.task.outputs.code_bugs }}"
+
+          {
+            echo "> **Status:** Agent is working on this fix..."
+            echo ">"
+            echo "> **Cop:** \`${COP}\` | **Backend:** ${BACKEND} | **Mode:** ${MODE}"
+            echo "> **Code bugs:** ${CODE_BUGS} | **Run:** ${RUN_URL}"
+            echo ""
+            echo "<details>"
+            echo "<summary>Task prompt (click to expand)</summary>"
+            echo ""
+            cat /tmp/task.md
+            echo ""
+            echo "</details>"
+          } > /tmp/claim-body.md
+
+          gh pr edit "$PR_URL" --body-file /tmp/claim-body.md
 
       - name: Skip if already fixed
         if: steps.task.outputs.code_bugs == '0'
@@ -537,6 +565,13 @@ jobs:
             echo '```'
             echo "${DIFF_STAT}"
             echo '```'
+            echo ""
+            echo "<details>"
+            echo "<summary>Task prompt</summary>"
+            echo ""
+            cat /tmp/task.md
+            echo ""
+            echo "</details>"
           } > /tmp/pr-body.md
 
           gh pr edit "$PR_URL" --body-file /tmp/pr-body.md
