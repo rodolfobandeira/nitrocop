@@ -135,8 +135,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-        with:
           submodules: true
 
       - name: Download nitrocop binary
