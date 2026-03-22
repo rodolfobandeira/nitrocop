@@ -388,8 +388,7 @@ impl<'pr> Visit<'pr> for CollectionLiteralVisitor<'_, '_> {
         let loop_kind = if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
                 let has_implicit_params = block_node.parameters().is_some_and(|p| {
-                    p.as_numbered_parameters_node().is_some()
-                        || p.as_it_parameters_node().is_some()
+                    p.as_numbered_parameters_node().is_some() || p.as_it_parameters_node().is_some()
                 });
                 if has_implicit_params {
                     LoopKind::None
