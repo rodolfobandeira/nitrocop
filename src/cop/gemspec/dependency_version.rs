@@ -71,11 +71,12 @@ use crate::parse::source::SourceFile;
 /// missed the version args on continuation lines. Fixed by detecting unclosed parens
 /// and joining continuation lines before parsing args.
 ///
-/// FN=6: Splat+array patterns like `add_dependency(*["openssl", " ~> 3.2"])` — the
-/// bracket-depth tracking in `has_any_version_string` correctly skips strings inside
-/// `[...]`, so these are already flagged as missing version (matching RuboCop). The
-/// FN=6 was from the corpus oracle using a file where `should_check_dependencies`
-/// returned false due to `Gem::Specification.new` having positional args.
+/// FN=6: The sekrets repo uses `Gem::Specification::new` (double-colon) instead of
+/// `Gem::Specification.new` (dot). `should_check_dependencies` only matched the dot
+/// form, so it returned false and skipped the file entirely. Both forms are equivalent
+/// in Ruby (both are send nodes with method `:new`). Fixed by also matching `::new`.
+/// The splat+array args `(*["openssl", " ~> 3.2"])` correctly trigger the offense
+/// because bracket-depth tracking skips the nested version string.
 pub struct DependencyVersion;
 
 const DEP_METHODS: &[&str] = &[
@@ -247,21 +248,31 @@ fn join_continuation_lines(after: &str, lines: &[&[u8]], current_idx: usize) -> 
 
 /// Check whether dependencies should be checked in this file.
 ///
-/// Returns true only if the file contains `Gem::Specification.new` followed by a block
-/// (do or {) with no positional arguments. This matches RuboCop's GemspecHelp
-/// `gem_specification` NodePattern which requires `.new` with only a block parameter.
+/// Returns true only if the file contains `Gem::Specification.new` or
+/// `Gem::Specification::new` followed by a block (do or {) with no positional
+/// arguments. This matches RuboCop's GemspecHelp `gem_specification` NodePattern
+/// which requires `.new` with only a block parameter. Both `.new` and `::new` are
+/// equivalent in Ruby (both are send nodes with method `:new`).
 ///
 /// Returns false (skip file) when:
-/// - No `Gem::Specification.new` found at all
-/// - `Gem::Specification.new` has positional arguments
+/// - No `Gem::Specification.new` or `::new` found at all
+/// - `Gem::Specification.new`/`::new` has positional arguments
 fn should_check_dependencies(source: &SourceFile) -> bool {
     for line in source.lines() {
         let line_str = match std::str::from_utf8(line) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if let Some(pos) = line_str.find("Gem::Specification.new") {
-            let after = line_str[pos + "Gem::Specification.new".len()..].trim_start();
+        let gem_spec_new = line_str
+            .find("Gem::Specification.new")
+            .map(|pos| (pos, "Gem::Specification.new".len()))
+            .or_else(|| {
+                line_str
+                    .find("Gem::Specification::new")
+                    .map(|pos| (pos, "Gem::Specification::new".len()))
+            });
+        if let Some((pos, len)) = gem_spec_new {
+            let after = line_str[pos + len..].trim_start();
             // RuboCop requires .new followed directly by a block (do/{ with no args).
             if after.is_empty() || after.starts_with("do") || after.starts_with('{') {
                 return true;
@@ -767,6 +778,23 @@ mod tests {
             diags.len(),
             1,
             "should flag multi-line dep without version: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn double_colon_new_recognized() {
+        // Gem::Specification::new (double-colon) should be recognized same as .new
+        let source = crate::parse::source::SourceFile::from_bytes(
+            "example.gemspec",
+            b"Gem::Specification::new do |spec|\n  spec.add_dependency 'foo'\nend\n".to_vec(),
+        );
+        let config = crate::cop::CopConfig::default();
+        let mut diags = vec![];
+        DependencyVersion.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(
+            diags.len(),
+            1,
+            "should detect dep in ::new block: {diags:?}"
         );
     }
 
