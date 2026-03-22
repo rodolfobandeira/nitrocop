@@ -61,6 +61,17 @@ jobs:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
+      - name: Generate read-only GitHub token
+        id: actions-read-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          permission-actions: read
+          permission-contents: read
+          permission-metadata: read
+          permission-pull-requests: read
+
       - name: Resolve target PR
         id: target
         env:
@@ -99,7 +110,7 @@ jobs:
       - name: Load PR metadata and gate repair
         id: pr
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
           PR_JSON=$(gh pr view "${{ steps.target.outputs.pr_number }}" \
             --repo "${{ github.repository }}" \
@@ -174,12 +185,15 @@ jobs:
           git config user.email "129682364+6[bot]@users.noreply.github.com"
           git fetch origin main
           echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          WORKSPACE_BRANCH="repair-workspace-${{ github.run_id }}-${{ github.run_attempt }}"
+          git switch -c "$WORKSPACE_BRANCH"
+          echo "workspace_branch=$WORKSPACE_BRANCH" >> "$GITHUB_OUTPUT"
         id: prep
 
       - name: Capture current PR diff
         if: steps.pr.outputs.should_run == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
           git diff --stat origin/main...HEAD > /tmp/pr-diff.stat
           gh pr diff "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" > /tmp/pr.diff
@@ -187,7 +201,7 @@ jobs:
       - name: Prepare repair packet
         if: steps.pr.outputs.should_run == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
           python3 scripts/ci/prepare_pr_repair.py \
             --repo "${{ github.repository }}" \
@@ -204,6 +218,15 @@ jobs:
             --extra-context "${{ github.event.inputs.extra_context || '' }}" \
             >> "$GITHUB_OUTPUT"
         id: repair
+
+      - name: Prepare clean workspace for agent
+        if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
+        id: workspace
+        run: |
+          python3 scripts/ci/prepare_agent_workspace.py \
+            --mode agent-pr-repair \
+            --preserve-ci-scripts /tmp/ci-scripts
+          echo "workspace_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Skip non-repairable failures
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route == 'skip'
@@ -273,7 +296,6 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         id: backend
         run: |
-          cp -r scripts/ci /tmp/ci-scripts
           python3 scripts/ci/resolve_backend.py "${{ steps.repair.outputs.backend }}" \
             >> "$GITHUB_OUTPUT"
 
@@ -284,6 +306,15 @@ jobs:
           ANTHROPIC_API_KEY: ${{ steps.repair.outputs.backend == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
           CODEX_AUTH_JSON: ${{ steps.repair.outputs.backend == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
         run: ${{ steps.backend.outputs.setup_cmd }}
+
+      - name: Mask read-only GitHub token
+        if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
+        env:
+          GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
+        run: |
+          python3 /tmp/ci-scripts/guard_backend_secrets.py \
+            --from-env GH_TOKEN_FOR_ACTIONS_READ \
+            emit-masks
 
       - name: Run repair agent
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
@@ -297,6 +328,8 @@ jobs:
           API_TIMEOUT_MS: ${{ steps.backend.outputs.env_API_TIMEOUT_MS }}
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: ${{ steps.backend.outputs.env_CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC }}
           CARGO_INCREMENTAL: "1"
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
+          GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
           python3 /tmp/ci-scripts/watch_agent_progress.py \
             --newer-than /tmp/final-task.md --interval 30 \
@@ -311,10 +344,10 @@ jobs:
         if: always() && steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         run: |
           git status --short > /tmp/agent-status.txt || true
-          git log --oneline "${{ steps.prep.outputs.base_sha }}"..HEAD > /tmp/agent-commits.txt || true
-          git diff --stat "${{ steps.prep.outputs.base_sha }}" > /tmp/agent-recovery.stat || true
-          git diff "${{ steps.prep.outputs.base_sha }}" > /tmp/agent-recovery.diff || true
-          git diff --binary "${{ steps.prep.outputs.base_sha }}" > /tmp/agent-recovery.patch || true
+          git log --oneline "${{ steps.workspace.outputs.workspace_sha }}"..HEAD > /tmp/agent-commits.txt || true
+          git diff --stat "${{ steps.workspace.outputs.workspace_sha }}" > /tmp/agent-recovery.stat || true
+          git diff "${{ steps.workspace.outputs.workspace_sha }}" > /tmp/agent-recovery.diff || true
+          git diff --binary "${{ steps.workspace.outputs.workspace_sha }}" > /tmp/agent-recovery.patch || true
           python3 -c "
           import sys; sys.path.insert(0, '/tmp/ci-scripts')
           from watch_agent_progress import find_logfile
@@ -327,7 +360,7 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
         id: verify
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
           NITROCOP_BIN: ${{ github.workspace }}/target/release/nitrocop
         run: |
           set +e
@@ -345,7 +378,7 @@ jobs:
             exit 0
           fi
 
-          if git diff --quiet && [ "$(git rev-parse HEAD)" = "${{ steps.prep.outputs.base_sha }}" ]; then
+          if git diff --quiet && [ "$(git rev-parse HEAD)" = "${{ steps.workspace.outputs.workspace_sha }}" ]; then
             echo "result=no_changes" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -354,6 +387,28 @@ jobs:
             git add -A
             git commit -m "Repair PR #${{ steps.pr.outputs.number }}: auto-repair (${{ steps.repair.outputs.backend }})"
           fi
+
+          git diff --binary "${{ steps.workspace.outputs.workspace_sha }}"..HEAD > /tmp/repair-apply.patch || true
+          if [ ! -s /tmp/repair-apply.patch ]; then
+            echo "result=no_changes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git switch --detach "${{ steps.prep.outputs.base_sha }}"
+          git switch -C "repair-push-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          if ! git apply --3way /tmp/repair-apply.patch; then
+            echo "result=apply_failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "result=no_changes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Repair PR #${{ steps.pr.outputs.number }}: auto-repair (${{ steps.repair.outputs.backend }})"
 
           CURRENT_HEAD=$(git rev-parse HEAD)
           echo "head_sha=$CURRENT_HEAD" >> "$GITHUB_OUTPUT"
@@ -416,6 +471,17 @@ jobs:
               echo "- Repair workflow: [#${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
               echo ""
               echo "The repair would have reduced the PR to an empty diff against \`origin/main\`, which this workflow treats as an invalid blanket revert."
+            } > /tmp/repair-comment.md
+          elif [ "$RESULT" = "apply_failed" ]; then
+            gh pr edit "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --add-label "needs-human" 2>/dev/null || true
+            {
+              echo "## Auto-repair Could Not Materialize the Patch"
+              echo ""
+              echo "- Checks run: [#${{ steps.target.outputs.checks_run_id }}](${{ steps.target.outputs.checks_url }})"
+              echo "- Backend: \`${{ steps.repair.outputs.backend }}\`"
+              echo "- Repair workflow: [#${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+              echo ""
+              echo "The agent produced changes in the temporary workspace, but those changes could not be replayed cleanly onto the original PR head."
             } > /tmp/repair-comment.md
           elif [ "${{ steps.push.outcome }}" = "failure" ]; then
             gh pr edit "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --add-label "needs-human" 2>/dev/null || true
@@ -549,12 +615,14 @@ jobs:
           MINIMAX_API_KEY: ${{ steps.repair.outputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ steps.repair.outputs.backend == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
           CODEX_AUTH_JSON: ${{ steps.repair.outputs.backend == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
+          GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
           python3 /tmp/ci-scripts/guard_backend_secrets.py \
             --ignore-missing \
             --from-env MINIMAX_API_KEY \
             --from-env ANTHROPIC_API_KEY \
             --from-env CODEX_AUTH_JSON \
+            --from-env GH_TOKEN_FOR_ACTIONS_READ \
             scan-files \
             /tmp/agent.log \
             /tmp/agent-events.jsonl \
@@ -570,6 +638,7 @@ jobs:
             /tmp/pr.diff \
             /tmp/final-task.md \
             /tmp/repair.json \
+            /tmp/repair-apply.patch \
             /tmp/repair-verify.sh \
             /tmp/repair-verify.log \
             /tmp/repair-summary.md \
@@ -598,6 +667,7 @@ jobs:
             /tmp/pr.diff
             /tmp/final-task.md
             /tmp/repair.json
+            /tmp/repair-apply.patch
             /tmp/repair-verify.sh
             /tmp/repair-verify.log
             /tmp/repair-summary.md

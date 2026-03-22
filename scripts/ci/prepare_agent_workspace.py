@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Prepare a reduced agent workspace for CI workflows.
+
+This script centralizes the repo-pruning logic used by agent workflows. It:
+
+- preserves `scripts/ci` to a temporary location for post-cleanup helpers
+- replaces `AGENTS.md` / `CLAUDE.md` with `AGENTS.minimal.md`
+- removes mode-specific high-noise paths from the git checkout
+- commits the cleanup as a temporary workspace-only commit
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+MODES = {
+    "agent-cop-fix": {
+        "remove_paths": [
+            "AGENTS.minimal.md",
+            ".claude",
+            ".agents",
+            ".devcontainer",
+            ".github",
+            "docs",
+            "gem",
+            "scripts",
+        ],
+        "commit_message": "tmp: clean workspace for agent",
+    },
+    "agent-pr-repair": {
+        "remove_paths": [
+            "AGENTS.minimal.md",
+            ".claude",
+            ".agents",
+            ".devcontainer",
+            ".github",
+            "docs",
+            "gem",
+        ],
+        "commit_message": "tmp: clean workspace for agent",
+    },
+}
+
+
+def run(cmd: list[str], *, cwd: Path, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        text=True,
+        capture_output=capture_output,
+        check=True,
+    )
+
+
+def preserve_ci_scripts(repo_root: Path, dest: Path) -> None:
+    src = repo_root / "scripts" / "ci"
+    if not src.exists():
+        raise FileNotFoundError(f"{src} not found")
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest)
+
+
+def replace_agent_docs(repo_root: Path) -> None:
+    minimal = repo_root / "AGENTS.minimal.md"
+    if not minimal.exists():
+        raise FileNotFoundError(f"{minimal} not found")
+    content = minimal.read_text()
+    (repo_root / "AGENTS.md").write_text(content)
+    (repo_root / "CLAUDE.md").write_text(content)
+    run(["git", "add", "AGENTS.md", "CLAUDE.md"], cwd=repo_root)
+
+
+def prune_paths(repo_root: Path, remove_paths: list[str]) -> None:
+    cmd = ["git", "rm", "-r", "--quiet", "--ignore-unmatch", "--", *remove_paths]
+    run(cmd, cwd=repo_root)
+
+
+def has_staged_or_worktree_changes(repo_root: Path) -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(repo_root),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def prepare_workspace(mode: str, repo_root: Path, preserve_ci_to: Path | None) -> str:
+    config = MODES[mode]
+
+    if preserve_ci_to is not None:
+        preserve_ci_scripts(repo_root, preserve_ci_to)
+
+    replace_agent_docs(repo_root)
+    prune_paths(repo_root, config["remove_paths"])
+
+    if not has_staged_or_worktree_changes(repo_root):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    run(["git", "commit", "-m", config["commit_message"]], cwd=repo_root)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Prepare a reduced agent workspace")
+    parser.add_argument("--mode", choices=sorted(MODES), required=True)
+    parser.add_argument(
+        "--preserve-ci-scripts",
+        type=Path,
+        help="Copy scripts/ci to this path before pruning the workspace",
+    )
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Git repository root (default: current directory)",
+    )
+    args = parser.parse_args()
+
+    repo_root = args.repo_root.resolve()
+    cleanup_sha = prepare_workspace(args.mode, repo_root, args.preserve_ci_scripts)
+    print(f"cleanup_sha={cleanup_sha}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

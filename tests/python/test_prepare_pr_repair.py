@@ -85,6 +85,10 @@ def test_prompt_includes_route_and_failed_packet():
         diff_stat=" 1 file changed",
         diff_text="diff --git a/a b/a\n+change\n",
         extra_context="Keep the patch narrow.",
+        corpus_context={
+            "standard": {"path": "/tmp/repair-corpus-standard.json", "run_id": "123", "head_sha": "abc"},
+            "extended": {"path": "/tmp/repair-corpus-extended.json", "run_id": "456", "head_sha": "def"},
+        },
     )
     assert "PR #130" in prompt
     assert "Selected backend: `codex`" in prompt
@@ -92,6 +96,9 @@ def test_prompt_includes_route_and_failed_packet():
     assert "Keep the patch narrow." in prompt
     assert "Do not repair this PR by reverting it back to `origin/main`" in prompt
     assert "empty PR is treated as a failed repair" in prompt
+    assert "/tmp/repair-corpus-standard.json" in prompt
+    assert "/tmp/repair-corpus-extended.json" in prompt
+    assert "read-only token is available in `GH_TOKEN`" in prompt
 
 
 if __name__ == "__main__":

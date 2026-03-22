@@ -10,9 +10,13 @@ that the workflow can rerun before pushing any changes.
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from corpus_download import download_corpus_results as _download_corpus
 
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 FAILED_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}
@@ -226,6 +230,26 @@ def excerpt_diff(diff_text: str, max_lines: int = 220) -> str:
     return "\n".join(lines)
 
 
+def prefetch_corpus_context(route: str) -> dict[str, dict[str, str]]:
+    if route != "hard":
+        return {}
+
+    contexts: dict[str, dict[str, str]] = {}
+    for prefer, target_name in (
+        ("standard", "/tmp/repair-corpus-standard.json"),
+        ("extended", "/tmp/repair-corpus-extended.json"),
+    ):
+        source_path, run_id, head_sha = _download_corpus(prefer=prefer)
+        target_path = Path(target_name)
+        shutil.copy2(source_path, target_path)
+        contexts[prefer] = {
+            "path": str(target_path),
+            "run_id": str(run_id),
+            "head_sha": head_sha,
+        }
+    return contexts
+
+
 def build_prompt(
     run: dict,
     classification: dict,
@@ -233,6 +257,7 @@ def build_prompt(
     diff_stat: str,
     diff_text: str,
     extra_context: str,
+    corpus_context: dict[str, dict[str, str]] | None = None,
 ) -> str:
     route = classification["route"]
     backend = classification["backend"] or "none"
@@ -286,6 +311,49 @@ def build_prompt(
         "## Failed Checks Packet",
         "",
     ]
+
+    if corpus_context:
+        lines.extend([
+            "## Local Corpus Context",
+            "",
+            "These corpus oracle artifacts are already downloaded locally by the workflow.",
+            "Prefer these local files over re-downloading the same corpus data from GitHub Actions.",
+            "If you still need GitHub metadata for debugging, a read-only token is available in `GH_TOKEN`.",
+            "",
+        ])
+        standard = corpus_context.get("standard")
+        if standard:
+            lines.append(
+                f"- Standard corpus JSON (matches the PR `cop-check` gate): `{standard['path']}` "
+                f"(corpus oracle run #{standard['run_id']})"
+            )
+        extended = corpus_context.get("extended")
+        if extended:
+            lines.append(
+                f"- Extended corpus JSON (broader diagnosis): `{extended['path']}` "
+                f"(corpus oracle run #{extended['run_id']})"
+            )
+        lines.extend([
+            "",
+            "Use these files directly with the repo scripts when you need corpus context.",
+            "",
+            "```bash",
+        ])
+        if standard:
+            lines.append(
+                f"python3 scripts/investigate-cop.py Department/CopName --input {standard['path']} --context"
+            )
+            lines.append(
+                f"python3 scripts/check-cop.py Department/CopName --input {standard['path']} --verbose --rerun --quick --clone"
+            )
+        elif extended:
+            lines.append(
+                f"python3 scripts/investigate-cop.py Department/CopName --input {extended['path']} --context"
+            )
+        lines.extend([
+            "```",
+            "",
+        ])
 
     for job in classification["jobs"]:
         lines.append(f"### {job.get('name', 'unknown job')}")
@@ -342,6 +410,8 @@ def main() -> None:
     for job in classification["jobs"]:
         job["failed_log"] = fetch_failed_log(args.repo, args.run_id, str(job.get("databaseId", "")))
 
+    corpus_context = prefetch_corpus_context(classification["route"])
+
     pr_meta = {
         "number": args.pr_number,
         "title": args.pr_title,
@@ -355,6 +425,7 @@ def main() -> None:
         diff_stat=args.diff_stat.read_text() if args.diff_stat.exists() else "",
         diff_text=args.diff.read_text() if args.diff.exists() else "",
         extra_context=args.extra_context,
+        corpus_context=corpus_context,
     )
     verify_script = build_verification_script(classification["verification_commands"])
 
@@ -367,6 +438,7 @@ def main() -> None:
         "backend": classification["backend"],
         "reason": classification["reason"],
         "verification_commands": classification["verification_commands"],
+        "corpus_context": corpus_context,
         "failed_jobs": [
             {
                 "name": job.get("name"),
@@ -383,6 +455,10 @@ def main() -> None:
     print(f"backend={classification['backend']}")
     print(f"reason={classification['reason']}")
     print(f"failed_jobs={len(classification['jobs'])}")
+    if "standard" in corpus_context:
+        print(f"standard_corpus={corpus_context['standard']['path']}")
+    if "extended" in corpus_context:
+        print(f"extended_corpus={corpus_context['extended']['path']}")
 
 
 if __name__ == "__main__":
