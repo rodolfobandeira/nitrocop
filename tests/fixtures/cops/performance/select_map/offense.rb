@@ -17,3 +17,6 @@ select.map { |e| e.to_s }
 ^^^^^^ Performance/SelectMap: Use `filter_map` instead of `select.map`.
 items.select.map { |e| e.name }
       ^^^^^^ Performance/SelectMap: Use `filter_map` instead of `select.map`.
+# select inside block body, chained with .map on block result
+items.flat_map { |g| g.users.select(&:active?) }.map(&:name)
+                             ^^^^^^ Performance/SelectMap: Use `filter_map` instead of `select.map`.
