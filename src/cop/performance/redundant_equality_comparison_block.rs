@@ -8,6 +8,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Corpus investigation (2026-03-22, extended corpus):
+/// FN fix: `file.original_filename == file` where the block param is the RHS and a method
+/// call on the param is the LHS. The "same receiver" check had an incorrect symmetric case
+/// that compared `arg_source` with `recv_recv_source`, catching `param_method == param` as
+/// if it were `param == param.method`. RuboCop's `same_block_argument_and_is_a_argument?`
+/// only checks one direction: `receiver.source == first_argument.receiver&.source`. Removed
+/// the symmetric check since the original directional check already handles `param == param.method`.
 pub struct RedundantEqualityComparisonBlock;
 
 const FLAGGED_METHODS: &[&[u8]] = &[b"all?", b"any?", b"one?", b"none?"];
@@ -246,18 +253,6 @@ impl Cop for RedundantEqualityComparisonBlock {
                 })
             });
             if arg_recv_source.is_some_and(|s| s == recv_source) {
-                return;
-            }
-            // Also check the symmetric case: arg is param and recv is a call
-            // whose receiver matches the arg source.
-            let arg_source = &source.as_bytes()
-                [arg_nodes[0].location().start_offset()..arg_nodes[0].location().end_offset()];
-            let recv_recv_source = recv.as_call_node().and_then(|c| {
-                c.receiver().map(|r| {
-                    &source.as_bytes()[r.location().start_offset()..r.location().end_offset()]
-                })
-            });
-            if recv_recv_source.is_some_and(|s| s == arg_source) {
                 return;
             }
         }

@@ -22,3 +22,6 @@ any? { |x| Pattern === x }
 # param used as receiver chain on other side (not as method argument)
 items.all? { |k| k == k.to_i.to_s }
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RedundantEqualityComparisonBlock: Use `grep` or `===` comparison instead of block with `==`.
+# param method call on LHS, param itself on RHS
+items.all? { |file| file.original_filename == file }
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Performance/RedundantEqualityComparisonBlock: Use `grep` or `===` comparison instead of block with `==`.
