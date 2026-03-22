@@ -1,3 +1,9 @@
+---
+name: land-agent-prs
+description: Review and merge PRs created by the agent cop fix workflow.
+allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob
+---
+
 # land-agent-prs
 
 Review and merge PRs created by the agent cop fix workflow.
