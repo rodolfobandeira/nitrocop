@@ -61,9 +61,9 @@ python3 scripts/investigate-cop.py Department/CopName --extended --context  # de
 will auto-skip them anyway (pre-diagnostic gate).
 
 The sync workflow creates or updates one `[cop] Department/CopName` issue per
-diverging cop, reopens old issues when a cop regresses again, and recommends a
-backend label (`backend:minimax` vs `backend:codex`) using deterministic
-dispatch-cops heuristics.
+diverging cop, reopens old issues when a cop regresses again, and applies a
+durable difficulty label (`difficulty:simple|medium|complex`). The actual
+backend is chosen later by `agent-cop-fix` when the issue is dispatched.
 
 ### Phase 2: Dispatch
 

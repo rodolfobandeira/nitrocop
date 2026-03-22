@@ -10,6 +10,7 @@ AGENT_COP_FIX = ROOT / ".github" / "workflows" / "agent-cop-fix.yml"
 AGENT_PR_REPAIR = ROOT / ".github" / "workflows" / "agent-pr-repair.yml"
 COP_ISSUE_SYNC = ROOT / ".github" / "workflows" / "cop-issue-sync.yml"
 COP_ISSUE_DISPATCH = ROOT / ".github" / "workflows" / "cop-issue-dispatch.yml"
+INVESTIGATE_REGRESSION = ROOT / ".github" / "workflows" / "investigate-regression.yml"
 
 
 def test_agent_cop_fix_supports_issue_linking_and_auto_backend():
@@ -44,9 +45,17 @@ def test_issue_dispatch_workflow_uses_app_token_and_dispatch_script():
     assert "--max-active" in content
 
 
+def test_investigate_regression_workflow_uses_script():
+    content = INVESTIGATE_REGRESSION.read_text()
+    assert "actions/create-github-app-token@v1" in content
+    assert "python3 scripts/investigate-regression.py" in content
+    assert "dispatch-simple" in content
+
+
 if __name__ == "__main__":
     test_agent_cop_fix_supports_issue_linking_and_auto_backend()
     test_agent_pr_repair_reads_linked_issue_and_can_update_it()
     test_issue_sync_workflow_uses_app_token_and_dispatch_script()
     test_issue_dispatch_workflow_uses_app_token_and_dispatch_script()
+    test_investigate_regression_workflow_uses_script()
     print("All tests passed.")

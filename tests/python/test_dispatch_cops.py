@@ -211,6 +211,19 @@ def test_has_failed_attempt_ignores_open_prs():
     assert gct.has_failed_attempt(prs[:2]) is False
 
 
+def test_select_backend_for_entry_uses_issue_difficulty_when_present():
+    result = gct.select_backend_for_entry(
+        "Style/Foo",
+        {"cop": "Style/Foo", "fp": 20, "fn": 0, "matches": 20},
+        mode="fix",
+        binary=None,
+        prior_prs=[],
+        issue_difficulty="simple",
+    )
+    assert result["backend"] == "minimax"
+    assert "issue difficulty label is simple" in result["reason"]
+
+
 def test_select_backend_for_entry_easy_cop_uses_minimax():
     original = gct.diagnose_examples
     gct.diagnose_examples = lambda *args, **kwargs: (1, 0)
@@ -237,9 +250,9 @@ def test_choose_issue_state_preserves_blocked_without_open_pr():
 
 def test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop():
     issues = [
-        {"number": 3, "title": "[cop] Style/Zed", "body": "<!-- nitrocop-cop-tracker: cop=Style/Zed total=4 tier=1 backend=minimax -->", "labels": []},
-        {"number": 1, "title": "[cop] Layout/Foo", "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo total=3 tier=1 backend=minimax -->", "labels": []},
-        {"number": 2, "title": "[cop] Metrics/Bar", "body": "<!-- nitrocop-cop-tracker: cop=Metrics/Bar total=2 tier=2 backend=codex -->", "labels": []},
+        {"number": 3, "title": "[cop] Style/Zed", "body": "<!-- nitrocop-cop-tracker: cop=Style/Zed total=4 difficulty=simple -->", "labels": []},
+        {"number": 1, "title": "[cop] Layout/Foo", "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo total=3 difficulty=simple -->", "labels": []},
+        {"number": 2, "title": "[cop] Metrics/Bar", "body": "<!-- nitrocop-cop-tracker: cop=Metrics/Bar total=2 difficulty=medium -->", "labels": []},
     ]
     ordered = gct.sorted_dispatch_candidates(issues)
     assert [issue["number"] for issue in ordered] == [1, 3, 2]
@@ -276,7 +289,7 @@ def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
             "title": "[cop] Style/Foo",
             "state": "CLOSED",
             "url": "https://example.com/issues/11",
-            "body": "<!-- nitrocop-cop-tracker: cop=Style/Foo fp=1 fn=2 total=3 matches=55 tier=1 backend=minimax -->",
+            "body": "<!-- nitrocop-cop-tracker: cop=Style/Foo fp=1 fn=2 total=3 matches=55 difficulty=simple -->",
             "labels": [{"name": "cop-tracker"}],
         },
         {
@@ -284,7 +297,7 @@ def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
             "title": "[cop] Layout/Done",
             "state": "OPEN",
             "url": "https://example.com/issues/12",
-            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Done fp=0 fn=1 total=1 matches=120 tier=1 backend=minimax -->",
+            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Done fp=0 fn=1 total=1 matches=120 difficulty=simple -->",
             "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}],
         },
     ]
@@ -314,7 +327,7 @@ def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
     assert any(call[0] == "close" and call[1] == 12 for call in calls)
 
 
-def test_cmd_dispatch_issues_respects_capacity_and_issue_backend_labels():
+def test_cmd_dispatch_issues_respects_capacity_and_uses_auto_backend():
     original_list_tracker_issues = gct.list_tracker_issues
     original_active_agent_fix_count = gct.active_agent_fix_count
     original_run = gct.subprocess.run
@@ -323,15 +336,15 @@ def test_cmd_dispatch_issues_respects_capacity_and_issue_backend_labels():
             "number": 21,
             "title": "[cop] Layout/Foo",
             "state": "OPEN",
-            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo fp=1 fn=2 total=3 matches=60 tier=1 backend=minimax -->",
-            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}, {"name": "backend:minimax"}],
+            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo fp=1 fn=2 total=3 matches=60 difficulty=simple -->",
+            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}, {"name": "difficulty:simple"}],
         },
         {
             "number": 22,
             "title": "[cop] Style/Bar",
             "state": "OPEN",
-            "body": "<!-- nitrocop-cop-tracker: cop=Style/Bar fp=2 fn=2 total=4 matches=80 tier=1 backend=codex -->",
-            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}, {"name": "backend:codex"}],
+            "body": "<!-- nitrocop-cop-tracker: cop=Style/Bar fp=2 fn=2 total=4 matches=80 difficulty=medium -->",
+            "labels": [{"name": "cop-tracker"}, {"name": "state:backlog"}, {"name": "difficulty:medium"}],
         },
     ]
     gct.active_agent_fix_count = lambda repo: (1, 1, 1)
@@ -348,7 +361,7 @@ def test_cmd_dispatch_issues_respects_capacity_and_issue_backend_labels():
         gct.subprocess.run = original_run
     payload = json.loads(stdout.getvalue())
     assert payload["capacity"] == 1
-    assert payload["selected"] == [{"issue": 21, "cop": "Layout/Foo", "backend": "minimax"}]
+    assert payload["selected"] == [{"issue": 21, "cop": "Layout/Foo", "difficulty": "simple", "backend": "auto"}]
 
 
 if __name__ == "__main__":
@@ -369,9 +382,10 @@ if __name__ == "__main__":
     test_format_with_diagnostics_keeps_no_source_examples_when_they_are_all_we_have()
     test_select_backend_for_entry_retry_forces_codex()
     test_has_failed_attempt_ignores_open_prs()
+    test_select_backend_for_entry_uses_issue_difficulty_when_present()
     test_select_backend_for_entry_easy_cop_uses_minimax()
     test_choose_issue_state_preserves_blocked_without_open_pr()
     test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop()
     test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue()
-    test_cmd_dispatch_issues_respects_capacity_and_issue_backend_labels()
+    test_cmd_dispatch_issues_respects_capacity_and_uses_auto_backend()
     print("All tests passed.")

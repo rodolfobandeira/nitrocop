@@ -100,18 +100,19 @@ STATE_BACKLOG = "state:backlog"
 STATE_PR_OPEN = "state:pr-open"
 STATE_BLOCKED = "state:blocked"
 STATE_LABELS = [STATE_BACKLOG, STATE_PR_OPEN, STATE_BLOCKED]
-BACKEND_LABELS = {"minimax": "backend:minimax", "codex": "backend:codex"}
-TIER_LABELS = {1: "difficulty:tier1", 2: "difficulty:tier2", 3: "difficulty:tier3"}
+DIFFICULTY_LABELS = {
+    "simple": "difficulty:simple",
+    "medium": "difficulty:medium",
+    "complex": "difficulty:complex",
+}
 LABEL_COLORS = {
     TRACKER_LABEL: "1d76db",
     STATE_BACKLOG: "fbca04",
     STATE_PR_OPEN: "0e8a16",
     STATE_BLOCKED: "b60205",
-    "backend:minimax": "5319e7",
-    "backend:codex": "0366d6",
-    "difficulty:tier1": "0e8a16",
-    "difficulty:tier2": "fbca04",
-    "difficulty:tier3": "d73a4a",
+    "difficulty:simple": "0e8a16",
+    "difficulty:medium": "fbca04",
+    "difficulty:complex": "d73a4a",
 }
 TITLE_RE = re.compile(r"^\[bot\] Fix (?P<cop>.+?)(?: \(retry\))?$")
 TRACKER_RE = re.compile(r"<!--\s*" + re.escape(COP_TRACKER_MARKER) + r":\s*(.*?)\s*-->")
@@ -1071,6 +1072,7 @@ def select_backend_for_entry(
     mode: str,
     binary: Path | None,
     prior_prs: list[dict] | None = None,
+    issue_difficulty: str | None = None,
     min_total: int = 3,
     max_total: int = 15,
     min_matches: int = 50,
@@ -1094,6 +1096,25 @@ def select_backend_for_entry(
         return {
             "backend": "codex",
             "reason": "cop has prior failed agent attempts",
+            "tier": tier,
+            "code_bugs": 0,
+            "config_issues": 0,
+            "easy": False,
+        }
+
+    if issue_difficulty:
+        if issue_difficulty == "simple":
+            return {
+                "backend": "minimax",
+                "reason": "issue difficulty label is simple",
+                "tier": tier,
+                "code_bugs": 0,
+                "config_issues": 0,
+                "easy": True,
+            }
+        return {
+            "backend": "codex",
+            "reason": f"issue difficulty label is {issue_difficulty}",
             "tier": tier,
             "code_bugs": 0,
             "config_issues": 0,
@@ -1163,6 +1184,14 @@ def select_backend_for_entry(
         "config_issues": config_issues,
         "easy": False,
     }
+
+
+def classify_issue_difficulty(entry: dict, recommendation: dict[str, object]) -> str:
+    if recommendation.get("easy"):
+        return "simple"
+    if tier_for_total(total_for_entry(entry)) >= 3:
+        return "complex"
+    return "medium"
 
 
 def run_nitrocop(binary: Path, cwd: str, cop: str) -> list[dict]:
@@ -1320,12 +1349,12 @@ def choose_issue_state(existing_issue: dict | None, has_open_pr: bool) -> str:
 
 
 def render_tracker_marker(
-    cop: str, fp: int, fn: int, matches: int, tier: int, backend: str,
+    cop: str, fp: int, fn: int, matches: int, difficulty: str,
 ) -> str:
     total = fp + fn
     return (
         f"<!-- {COP_TRACKER_MARKER}: cop={cop} fp={fp} fn={fn} "
-        f"total={total} matches={matches} tier={tier} backend={backend} -->"
+        f"total={total} matches={matches} difficulty={difficulty} -->"
     )
 
 
@@ -1334,8 +1363,7 @@ def render_issue_body(
     entry: dict,
     *,
     repo: str,
-    backend: str,
-    tier: int,
+    difficulty: str,
     state_label: str,
     open_pr: dict | None,
     corpus_kind: str,
@@ -1359,8 +1387,7 @@ def render_issue_body(
         f"- False negatives: `{fn}`",
         f"- Total divergence: `{total}`",
         f"- Matches: `{matches}`",
-        f"- Difficulty tier: `tier{tier}`",
-        f"- Recommended backend: `{backend}`",
+        f"- Difficulty: `{difficulty}`",
         f"- Current state label: `{state_label}`",
     ]
     if run_id:
@@ -1376,14 +1403,14 @@ def render_issue_body(
         "- This issue stays open while the cop still diverges or a bot PR is active.",
         "- If a later corpus run shows the cop diverging again after merge, this same issue should be reopened and reused.",
         "",
-        render_tracker_marker(cop, fp, fn, matches, tier, backend),
+        render_tracker_marker(cop, fp, fn, matches, difficulty),
         "",
     ])
     return "\n".join(lines)
 
 
 def sync_issue_labels(repo: str, issue_number: int, labels: list[str]) -> None:
-    remove = STATE_LABELS + list(BACKEND_LABELS.values()) + list(TIER_LABELS.values())
+    remove = STATE_LABELS + list(DIFFICULTY_LABELS.values())
     subprocess.run(
         [
             "gh", "issue", "edit", str(issue_number),
@@ -1627,6 +1654,7 @@ def cmd_backend(args: argparse.Namespace) -> int:
         mode=args.mode,
         binary=binary,
         prior_prs=prior_prs,
+        issue_difficulty=args.issue_difficulty,
     )
     print(f"backend={recommendation['backend']}")
     print(f"reason={recommendation['reason']}")
@@ -1665,19 +1693,17 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
             binary=binary,
             prior_prs=prior_prs,
         )
-        tier = recommendation["tier"]
-        backend = str(recommendation["backend"])
+        difficulty = classify_issue_difficulty(entry, recommendation)
         open_pr = open_prs_by_cop.get(cop)
         existing_issue = issues_by_cop.get(cop)
         state_label = choose_issue_state(existing_issue, open_pr is not None)
-        labels = [state_label, TIER_LABELS[tier], BACKEND_LABELS[backend]]
+        labels = [state_label, DIFFICULTY_LABELS[difficulty]]
         title = make_issue_title(cop)
         body = render_issue_body(
             cop,
             entry,
             repo=repo,
-            backend=backend,
-            tier=tier,
+            difficulty=difficulty,
             state_label=state_label,
             open_pr=open_pr,
             corpus_kind=corpus_kind,
@@ -1759,10 +1785,11 @@ def active_agent_fix_count(repo: str) -> tuple[int, int, int]:
 def sorted_dispatch_candidates(issues: list[dict]) -> list[dict]:
     def key(issue: dict) -> tuple[int, int, str]:
         fields = parse_marker_fields(issue.get("body", ""), TRACKER_RE)
-        tier = int(fields.get("tier", "3"))
+        difficulty = fields.get("difficulty", "complex")
+        difficulty_rank = {"simple": 0, "medium": 1, "complex": 2}.get(difficulty, 2)
         total = int(fields.get("total", "999999"))
         cop = extract_cop_from_issue(issue) or issue.get("title", "")
-        return tier, total, cop
+        return difficulty_rank, total, cop
 
     return sorted(issues, key=key)
 
@@ -1792,13 +1819,12 @@ def cmd_dispatch_issues(args: argparse.Namespace) -> int:
         cop = extract_cop_from_issue(issue)
         if not cop:
             continue
-        labels = issue_label_names(issue)
-        backend = (
-            args.backend_override
-            if args.backend_override != "auto"
-            else ("minimax" if BACKEND_LABELS["minimax"] in labels else "codex")
+        fields = parse_marker_fields(issue.get("body", ""), TRACKER_RE)
+        difficulty = fields.get("difficulty", "complex")
+        backend = args.backend_override
+        result["selected"].append(
+            {"issue": issue["number"], "cop": cop, "difficulty": difficulty, "backend": backend}
         )
-        result["selected"].append({"issue": issue["number"], "cop": cop, "backend": backend})
         if args.dry_run:
             continue
         subprocess.run(
@@ -1858,6 +1884,11 @@ def main():
     backend_parser.add_argument("--binary", type=Path, help="Path to nitrocop binary")
     backend_parser.add_argument("--input", type=Path, help="Path to corpus-results.json")
     backend_parser.add_argument("--extended", action="store_true", help="Use extended corpus")
+    backend_parser.add_argument(
+        "--issue-difficulty",
+        choices=["simple", "medium", "complex"],
+        help="Use linked issue difficulty label as the routing hint",
+    )
     backend_parser.add_argument(
         "--repo",
         default=os.environ.get("GITHUB_REPOSITORY", ""),

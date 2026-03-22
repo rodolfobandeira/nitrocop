@@ -332,6 +332,7 @@ See `.claude/skills/dispatch-cops/SKILL.md` for the `/dispatch-cops` skill.
 /dispatch-cops retry        # retry failed cops with stronger model
 /dispatch-cops status       # check PR status
 /dispatch-cops validate     # trigger corpus oracle
+/investigate-regression     # compare corpus runs and surface repair vs revert candidates
 ```
 
 ## Corpus Investigation

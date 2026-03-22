@@ -221,13 +221,32 @@ jobs:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
         run: |
           INPUT_BACKEND="${{ github.event.inputs.backend }}"
-          if [ "$INPUT_BACKEND" = "auto" ]; then
-            python3 scripts/dispatch-cops.py backend \
+          ISSUE_DIFFICULTY=""
+          if [ -n "${{ github.event.inputs.issue_number }}" ]; then
+            ISSUE_LABELS=$(gh issue view "${{ github.event.inputs.issue_number }}" \
               --repo "${{ github.repository }}" \
-              --cop "${{ github.event.inputs.cop }}" \
-              --mode "${{ github.event.inputs.mode }}" \
-              --extended \
-              --binary target/debug/nitrocop \
+              --json labels --jq '.labels[].name' 2>/dev/null || true)
+            if echo "$ISSUE_LABELS" | grep -qx 'difficulty:simple'; then
+              ISSUE_DIFFICULTY="simple"
+            elif echo "$ISSUE_LABELS" | grep -qx 'difficulty:medium'; then
+              ISSUE_DIFFICULTY="medium"
+            elif echo "$ISSUE_LABELS" | grep -qx 'difficulty:complex'; then
+              ISSUE_DIFFICULTY="complex"
+            fi
+          fi
+          if [ "$INPUT_BACKEND" = "auto" ]; then
+            ARGS=(
+              --repo "${{ github.repository }}"
+              --cop "${{ github.event.inputs.cop }}"
+              --mode "${{ github.event.inputs.mode }}"
+              --extended
+              --binary target/debug/nitrocop
+            )
+            if [ -n "$ISSUE_DIFFICULTY" ]; then
+              ARGS+=(--issue-difficulty "$ISSUE_DIFFICULTY")
+            fi
+            python3 scripts/dispatch-cops.py backend \
+              "${ARGS[@]}" \
               >> "$GITHUB_OUTPUT"
           else
             echo "backend=$INPUT_BACKEND" >> "$GITHUB_OUTPUT"

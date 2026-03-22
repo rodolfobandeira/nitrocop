@@ -58,7 +58,7 @@ Same commands as the Codex workflow, just a different workflow name:
 # Sync tracker issues from the latest extended corpus
 gh workflow run cop-issue-sync.yml -f corpus=extended
 
-# Fill the queue using issue-recommended backends
+# Fill the queue using automatic backend selection
 gh workflow run cop-issue-dispatch.yml -f max_active=5
 
 # Or force MiniMax across the queue
