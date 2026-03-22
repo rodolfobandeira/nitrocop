@@ -27,8 +27,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Download pre-baked rubocop baseline (if available) ──────────
+  # ── Download pre-baked rubocop baseline (extended corpus only) ───
   download-baseline:
+    if: github.event.inputs.corpus_size == 'extended'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -178,6 +179,8 @@ jobs:
   # ── Run oracle on each batch of repos ────────────────────────────
   oracle-repo:
     needs: [build-nitrocop, compute-matrix, download-baseline]
+    # Always run even if download-baseline was skipped (standard corpus)
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ github.event.inputs.corpus_size == 'extended' && 90 || 30 }}
     strategy:
