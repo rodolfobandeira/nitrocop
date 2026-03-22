@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Tests for corpus_download.py shared module.
 
-Run with: python3 scripts/test_corpus_download.py
+Run with: python3 tests/python/test_corpus_download.py
 """
+
 from __future__ import annotations
 
 import io
 import json
 import os
-import shutil
 import sys
 import tempfile
 import unittest
@@ -16,7 +16,10 @@ import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
 import corpus_download as cd
 
 
@@ -87,7 +90,7 @@ class TestCleanStaleLocal(unittest.TestCase):
 
     def test_no_error_when_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            cd._clean_stale_local(Path(tmpdir))  # should not raise
+            cd._clean_stale_local(Path(tmpdir))
 
 
 class TestTryGh(unittest.TestCase):
@@ -107,17 +110,13 @@ class TestTryGh(unittest.TestCase):
     @patch("corpus_download.subprocess.run")
     @patch("corpus_download.shutil.which", return_value="/usr/bin/gh")
     def test_gh_success_with_cache(self, _mock_which, mock_run, _mock_copy):
-        # Auth succeeds
         auth_result = MagicMock(returncode=0)
-        # List runs succeeds
         list_result = MagicMock(
             returncode=0,
             stdout=json.dumps([{"databaseId": 12345, "headSha": "abc123"}]),
         )
-
         mock_run.side_effect = [auth_result, list_result]
 
-        # Simulate cache hit
         cache_dir = cd._cache_dir()
         cache_file = cache_dir / "corpus-results-12345.json"
         cache_file.write_text('{"summary": {}}')
@@ -149,6 +148,7 @@ class TestTryCurlApi(unittest.TestCase):
     @patch("corpus_download._github_api_get")
     def test_api_error(self, mock_get):
         from urllib.error import URLError
+
         mock_get.side_effect = URLError("connection failed")
         self.assertIsNone(cd._try_curl_api("owner/repo"))
 
@@ -163,7 +163,6 @@ class TestTryCurlApi(unittest.TestCase):
         mock_get.return_value = {
             "workflow_runs": [{"id": 99, "head_sha": "def456"}]
         }
-        # Clear cache to force download attempt
         cache_file = cd._cache_dir() / "corpus-results-99.json"
         cache_file.unlink(missing_ok=True)
         result = cd._try_curl_api("owner/repo")
@@ -174,17 +173,14 @@ class TestTryCurlApi(unittest.TestCase):
     @patch.dict(os.environ, {"GH_TOKEN": "fake-token"}, clear=False)
     def test_full_download_success(self, mock_get, mock_download):
         run_id = 77777
-        # Clear cache
         cache_file = cd._cache_dir() / f"corpus-results-{run_id}.json"
         cache_file.unlink(missing_ok=True)
 
-        # Step 1: list runs
         mock_get.side_effect = [
             {"workflow_runs": [{"id": run_id, "head_sha": "sha1"}]},
             {"artifacts": [{"name": "corpus-report", "id": 555}]},
         ]
 
-        # Step 3: download zip
         corpus_data = json.dumps({"summary": {}, "by_cop": []}).encode()
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w") as zf:
@@ -192,7 +188,7 @@ class TestTryCurlApi(unittest.TestCase):
         mock_download.return_value = zip_buf.getvalue()
 
         try:
-            result = cd._try_curl_api("owner/repo")
+            result = cd._try_curl_api("owner/repo", prefer="standard")
             self.assertIsNotNone(result)
             path, rid, sha = result
             self.assertEqual(rid, run_id)
@@ -217,7 +213,7 @@ class TestTryCurlApi(unittest.TestCase):
         ]
         mock_download.return_value = b"not a zip file"
 
-        result = cd._try_curl_api("owner/repo")
+        result = cd._try_curl_api("owner/repo", prefer="standard")
         self.assertIsNone(result)
 
     @patch("corpus_download._github_api_get")
@@ -231,17 +227,12 @@ class TestTryCurlApi(unittest.TestCase):
             {"workflow_runs": [{"id": run_id, "head_sha": "sha3"}]},
             {"artifacts": [{"name": "other-artifact", "id": 777}]},
         ]
-        result = cd._try_curl_api("owner/repo")
+        result = cd._try_curl_api("owner/repo", prefer="standard")
         self.assertIsNone(result)
 
 
 class TestTryCorpusMd(unittest.TestCase):
     """Tests for _try_corpus_md()."""
-
-    def _write_corpus_md(self, tmpdir: str, content: str) -> None:
-        docs = Path(tmpdir) / "docs"
-        docs.mkdir()
-        (docs / "corpus.md").write_text(content)
 
     SAMPLE_MD = """\
 # Corpus Oracle Results
@@ -275,6 +266,11 @@ class TestTryCorpusMd(unittest.TestCase):
 
 </details>
 """
+
+    def _write_corpus_md(self, tmpdir: str, content: str) -> None:
+        docs = Path(tmpdir) / "docs"
+        docs.mkdir()
+        (docs / "corpus.md").write_text(content)
 
     @patch("corpus_download._find_project_root")
     @patch("corpus_download.subprocess.run")
@@ -326,7 +322,6 @@ class TestTryCorpusMd(unittest.TestCase):
 
             result = cd._try_corpus_md()
             data = json.loads(result[0].read_text())
-            # 2 diverging + 2 perfect = 4 total
             self.assertEqual(len(data["by_cop"]), 4)
 
     @patch("corpus_download._find_project_root")
@@ -412,7 +407,6 @@ class TestGithubApiGet(unittest.TestCase):
         result = cd._github_api_get("https://api.github.com/test")
         self.assertEqual(result, {"key": "value"})
 
-        # Verify no Authorization header
         req = mock_urlopen.call_args[0][0]
         self.assertNotIn("Authorization", req.headers)
 
@@ -435,37 +429,26 @@ class TestCallerScriptImports(unittest.TestCase):
     """Verify that all caller scripts can import from corpus_download."""
 
     def test_check_cop_import(self):
-        """check-cop.py should have a working download_corpus_results."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "check_cop", Path(__file__).resolve().parent / "check-cop.py"
-        )
-        mod = importlib.util.module_from_spec(spec)
-        # We just need it to parse without ImportError — don't exec
-        # (exec would try to define main and have side effects)
-        # Instead, check the source for the import pattern
-        source = (Path(__file__).resolve().parent / "check-cop.py").read_text()
+        source = (SCRIPTS_DIR / "check-cop.py").read_text()
         self.assertIn("from corpus_download import", source)
 
     def test_investigate_cop_import(self):
-        source = (Path(__file__).resolve().parent / "investigate-cop.py").read_text()
+        source = (SCRIPTS_DIR / "investigate-cop.py").read_text()
         self.assertIn("from corpus_download import", source)
 
     def test_investigate_repo_import(self):
-        source = (Path(__file__).resolve().parent / "investigate-repo.py").read_text()
+        source = (SCRIPTS_DIR / "investigate-repo.py").read_text()
         self.assertIn("from corpus_download import", source)
 
     def test_triage_import(self):
         source = (
-            Path(__file__).resolve().parent.parent
-            / ".claude" / "skills" / "triage" / "scripts" / "triage.py"
+            ROOT / ".claude" / "skills" / "triage" / "scripts" / "triage.py"
         ).read_text()
         self.assertIn("from corpus_download import", source)
 
     def test_gem_progress_import(self):
         source = (
-            Path(__file__).resolve().parent.parent
-            / ".claude" / "skills" / "fix-department" / "scripts" / "gem_progress.py"
+            ROOT / ".claude" / "skills" / "fix-department" / "scripts" / "gem_progress.py"
         ).read_text()
         self.assertIn("from corpus_download import", source)
 
