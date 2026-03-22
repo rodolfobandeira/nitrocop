@@ -75,7 +75,7 @@ jobs:
           gh pr create --title "Release v${{ steps.version.outputs.tag }}" \
             --body "Version bump from release workflow. Auto-merges after CI passes." \
             --base main --head "$BRANCH"
-          gh pr merge "$BRANCH" --auto --merge --delete-branch
+          gh pr merge "$BRANCH" --auto --squash --delete-branch
 
   build:
     needs: prepare
