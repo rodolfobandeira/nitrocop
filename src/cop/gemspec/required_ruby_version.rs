@@ -20,6 +20,24 @@ use crate::parse::source::SourceFile;
 /// const paths), can't extract version digits from interpolated strings, and
 /// fires a mismatch offense. Fixed by only treating `[` as dynamic when it's
 /// not at the start of the RHS (hash access like `foo[...]` vs array literal).
+///
+/// ## Corpus investigation (2026-03-21, extended corpus)
+///
+/// Extended corpus reported FP=0, FN=2.
+///
+/// FN=1: net-http-persistent `net-http-persistent.gemspec:17` — `.freeze`
+/// treated as dynamic. RuboCop's `dynamic_version?` does NOT treat bare
+/// `"str".freeze` as dynamic (the .freeze IS the node itself, no send
+/// descendants). Fixed by stripping trailing `.freeze` from RHS and extracting
+/// version normally. Nested `.freeze` (inside `Gem::Requirement.new(...)`) is
+/// still treated as dynamic (the .freeze is a send descendant there).
+///
+/// FN=2: twterm `twterm.gemspec:19` — double assignment
+/// `spec.required_ruby_version = spec.required_ruby_version = value`.
+/// `split(".required_ruby_version").nth(1)` truncated at the second occurrence,
+/// yielding ` = spec` as the RHS, which was treated as a local variable
+/// (dynamic). Fixed by using `find` + slice to get the full remainder after
+/// the first `.required_ruby_version`, so the RHS includes the actual value.
 pub struct RequiredRubyVersion;
 
 /// Extract version digits from a version string like RuboCop does:
@@ -116,7 +134,15 @@ impl Cop for RequiredRubyVersion {
 
             // Check for required_ruby_version assignment
             if trimmed.contains(".required_ruby_version") {
-                let after = trimmed.split(".required_ruby_version").nth(1).unwrap_or("");
+                // Find the first .required_ruby_version and take everything after it.
+                // Using find+slice instead of split().nth(1) so we get the full
+                // remainder (split truncates at the next occurrence for double
+                // assignments like `a.required_ruby_version = a.required_ruby_version = val`).
+                let after = if let Some(pos) = trimmed.find(".required_ruby_version") {
+                    &trimmed[pos + ".required_ruby_version".len()..]
+                } else {
+                    ""
+                };
                 let after_trimmed = after.trim_start();
                 // Must be an assignment (= or >=) not just a method call check
                 if after_trimmed.starts_with('=') || after_trimmed.is_empty() {
@@ -125,12 +151,24 @@ impl Cop for RequiredRubyVersion {
                     if let Some(eq_pos) = after_trimmed.find('=') {
                         let rhs = &after_trimmed[eq_pos + 1..].trim_start();
 
-                        // Check for .freeze anywhere in the RHS — RuboCop treats this as
-                        // dynamic because .freeze is a send descendant.
-                        if rhs.contains(".freeze") {
-                            assignments.push(None); // dynamic
+                        // Handle .freeze: RuboCop's dynamic_version? checks
+                        // descendants for send nodes. For bare `"str".freeze`,
+                        // the .freeze IS the node (no send descendants) → NOT
+                        // dynamic. For `Gem::Requirement.new("str".freeze)`,
+                        // .freeze is a descendant → IS dynamic.
+                        // We approximate: if .freeze is at the end of the RHS,
+                        // strip it (bare string case). Otherwise (nested inside
+                        // parens), treat as dynamic.
+                        let rhs_str;
+                        let rhs = if let Some(stripped) = rhs.strip_suffix(".freeze") {
+                            rhs_str = stripped.trim_end().to_string();
+                            rhs_str.as_str()
+                        } else if rhs.contains(".freeze") {
+                            assignments.push(None); // dynamic (nested .freeze)
                             continue;
-                        }
+                        } else {
+                            rhs
+                        };
 
                         // Check if RHS is a bare local variable (lowercase identifier, no
                         // quotes, no ::, no .). RuboCop treats these as dynamic.
@@ -340,6 +378,41 @@ mod tests {
                 "../../../tests/fixtures/cops/gemspec/required_ruby_version/no_offense_hash_access.rb"
             ),
             config_with_target_ruby(3.4),
+        );
+    }
+
+    #[test]
+    fn freeze_version_mismatch() {
+        // ">= 2.4".freeze — not dynamic per RuboCop, version "2.4" != target "4.0" → offense
+        let source = crate::parse::source::SourceFile::from_bytes(
+            "example.gemspec",
+            b"Gem::Specification.new do |s|\n  s.required_ruby_version = \">= 2.4\".freeze\nend\n"
+                .to_vec(),
+        );
+        let config = config_with_target_ruby(4.0);
+        let mut diags = vec![];
+        RequiredRubyVersion.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(
+            diags.len(),
+            1,
+            "should fire mismatch for .freeze version: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn double_assignment_fires_offense() {
+        // spec.required_ruby_version = spec.required_ruby_version = Gem::Requirement.new('~> 2.5')
+        let source = crate::parse::source::SourceFile::from_bytes(
+            "example.gemspec",
+            b"Gem::Specification.new do |spec|\n  spec.required_ruby_version = spec.required_ruby_version = Gem::Requirement.new('~> 2.5')\nend\n"
+                .to_vec(),
+        );
+        let config = config_with_target_ruby(4.0);
+        let mut diags = vec![];
+        RequiredRubyVersion.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            !diags.is_empty(),
+            "should fire mismatch for double assignment: {diags:?}"
         );
     }
 
