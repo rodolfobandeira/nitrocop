@@ -90,10 +90,7 @@ impl FetchEnvVar {
     ///
     /// Does NOT walk into `&&` / `||` subtrees — only direct children of the condition
     /// are checked, matching RuboCop's `condition.child_nodes.any?(node)` behavior.
-    fn extract_condition_keys(
-        source: &[u8],
-        condition: &ruby_prism::Node<'_>,
-    ) -> HashSet<Vec<u8>> {
+    fn extract_condition_keys(source: &[u8], condition: &ruby_prism::Node<'_>) -> HashSet<Vec<u8>> {
         let mut keys = HashSet::new();
 
         // Case 1: Condition IS `ENV['X']`
@@ -469,8 +466,7 @@ impl FetchEnvVarVisitor<'_> {
     /// condition, and extract qualifying keys for body suppression.
     fn process_condition(&mut self, condition: &ruby_prism::Node<'_>) {
         FetchEnvVar::collect_suppressed_in_condition(condition, &mut self.suppressed_offsets);
-        let keys =
-            FetchEnvVar::extract_condition_keys(self.source.as_bytes(), condition);
+        let keys = FetchEnvVar::extract_condition_keys(self.source.as_bytes(), condition);
         self.condition_keys.push(keys);
     }
 
