@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn block_scope_reader() {
         let source = b"describe \"something\" do\n  def app\n    @app\n  end\nend\n";
-        let diagnostics = crate::testutil::run_cop(&TrivialAccessors, source);
+        let diagnostics = crate::testutil::run_cop_full(&TrivialAccessors, source);
         assert_eq!(
             diagnostics.len(),
             1,
