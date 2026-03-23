@@ -112,11 +112,8 @@ fn get_loop_info(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<Loo
     let block = call.block()?;
 
     // Both loops must have bodies (not empty blocks)
-    // block can be a BlockNode or similar — check if the block has a body
     if let Some(block_node) = block.as_block_node() {
-        if block_node.body().is_none() {
-            return None;
-        }
+        block_node.body()?;
     }
 
     let receiver = call.receiver()?;
