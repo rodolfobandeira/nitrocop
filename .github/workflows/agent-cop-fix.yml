@@ -163,8 +163,8 @@ jobs:
           echo "Code bugs: $CODE_BUGS, Config issues: $CONFIG_ISSUES"
 
           # Count tokens
-          pip install -q tiktoken
-          TOKENS=$(python3 scripts/workflows/count_tokens.py "$TASK_FILE" 2>/dev/null || echo "?")
+          python3 -m pip install -q tiktoken
+          TOKENS=$(python3 scripts/workflows/count_tokens.py "$TASK_FILE")
           echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
           echo "Tokens: $TOKENS"
         id: task
@@ -501,6 +501,8 @@ jobs:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
+          export PYTHONPATH="$PWD/scripts${PYTHONPATH:+:$PYTHONPATH}"
+
           # Background progress watcher
           python3 "$CI_SCRIPTS_DIR/agent_logs.py" watch \
             --newer-than "$FINAL_TASK_FILE" --interval 30 \

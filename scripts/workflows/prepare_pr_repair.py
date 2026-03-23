@@ -21,6 +21,9 @@ import agent_runtime
 from shared.corpus_artifacts import download_corpus_results as _download_corpus
 
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+ACTIONS_LOG_PREFIX_RE = re.compile(
+    r"^[^\t]+\t[^\t]+\t\d{4}-\d{2}-\d{2}T[\d:.+-]+Z\s*"
+)
 FAILED_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}
 SKIPPABLE_STEP_NAMES = {
     "Set up job",
@@ -83,9 +86,47 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text)
 
 
+def strip_actions_log_prefix(line: str) -> str:
+    return ACTIONS_LOG_PREFIX_RE.sub("", line, count=1).lstrip()
+
+
+def is_actions_log_noise(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    noise_prefixes = (
+        "[command]/usr/bin/git ",
+        "Entering '",
+        "Temporarily overriding HOME=",
+        "Adding repository directory to the temporary git global config as a safe directory",
+        "Cleaning up orphan processes",
+    )
+    if stripped.startswith(noise_prefixes):
+        return True
+    noise_exact = {
+        "Post job cleanup.",
+        "http.https://github.com/.extraheader",
+    }
+    if stripped in noise_exact:
+        return True
+    if stripped.startswith("git version "):
+        return True
+    if stripped.startswith("##[warning]Node.js "):
+        return True
+    if stripped.startswith("file:") and stripped.endswith("\tremote.origin.url"):
+        return True
+    return False
+
+
 def normalize_log(text: str, max_lines: int = 80) -> str:
-    lines = [strip_ansi(line).rstrip() for line in text.splitlines()]
-    lines = [line for line in lines if line.strip()]
+    lines = []
+    for raw_line in text.splitlines():
+        line = strip_actions_log_prefix(strip_ansi(raw_line).rstrip())
+        if not line.strip():
+            continue
+        if is_actions_log_noise(line):
+            continue
+        lines.append(line)
     if len(lines) > max_lines:
         lines = ["... (truncated, showing last %d lines) ..." % max_lines] + lines[-max_lines:]
     return "\n".join(lines)
@@ -323,7 +364,8 @@ def build_prompt(
         excerpt_diff(diff_text),
         "```",
         "",
-        "## Failed Checks Packet",
+        "The reduced agent workspace may include a temporary cleanup commit that is not part of the real PR.",
+        "Treat the diff excerpt above as the intended PR change, and do not reason from a broad `git diff origin/main` inside the reduced workspace.",
         "",
     ]
 
@@ -369,6 +411,11 @@ def build_prompt(
             "```",
             "",
         ])
+
+    lines.extend([
+        "## Failed Checks Packet",
+        "",
+    ])
 
     for job in classification["jobs"]:
         lines.append(f"### {job.get('name', 'unknown job')}")

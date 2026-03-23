@@ -106,6 +106,31 @@ def test_prompt_includes_route_and_failed_packet():
     assert "/tmp/repair-corpus-standard.json" in prompt
     assert "/tmp/repair-corpus-extended.json" in prompt
     assert "read-only token is available in `GH_TOKEN`" in prompt
+    assert "temporary cleanup commit" in prompt
+    assert prompt.index("## Local Corpus Context") < prompt.index("## Failed Checks Packet")
+
+
+def test_normalize_log_strips_actions_prefix_and_cleanup_noise():
+    raw = "\n".join(
+        [
+            "cop-check\tUNKNOWN STEP\t2026-03-23T01:25:57.6876571Z Results:",
+            "cop-check\tUNKNOWN STEP\t2026-03-23T01:25:57.6877040Z   Expected (RuboCop):          540",
+            "cop-check\tUNKNOWN STEP\t2026-03-23T01:25:57.6878585Z FAIL: FN increased from 0 to 38 (+38, threshold: 0)",
+            "cop-check\tUNKNOWN STEP\t2026-03-23T01:25:57.7182573Z Post job cleanup.",
+            "cop-check\tUNKNOWN STEP\t2026-03-23T01:25:57.8139436Z [command]/usr/bin/git version",
+            "cop-check\tUNKNOWN STEP\t2026-03-23T01:25:57.8175848Z git version 2.53.0",
+        ]
+    )
+
+    normalized = prepare_pr_repair.normalize_log(raw)
+
+    assert "UNKNOWN STEP" not in normalized
+    assert "Post job cleanup." not in normalized
+    assert "[command]/usr/bin/git version" not in normalized
+    assert "git version 2.53.0" not in normalized
+    assert "Results:" in normalized
+    assert "Expected (RuboCop):          540" in normalized
+    assert "FAIL: FN increased from 0 to 38 (+38, threshold: 0)" in normalized
 
 
 def test_prefetch_corpus_context_uses_runtime_env_paths():
@@ -161,5 +186,6 @@ if __name__ == "__main__":
     test_mixed_failures_escalate_to_hard()
     test_macos_only_failure_is_skipped()
     test_prompt_includes_route_and_failed_packet()
+    test_normalize_log_strips_actions_prefix_and_cleanup_noise()
     test_prefetch_corpus_context_uses_runtime_env_paths()
     print("All tests passed.")

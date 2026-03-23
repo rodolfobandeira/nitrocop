@@ -23,8 +23,6 @@ def test_counts_tokens():
         f.flush()
         out, rc = run(f.name)
     assert rc == 0
-    if out.strip() == "?":
-        return
     count = int(out.strip())
     assert count > 0
     assert count < 100  # sanity check — a short sentence
@@ -36,8 +34,6 @@ def test_empty_file():
         f.flush()
         out, rc = run(f.name)
     assert rc == 0
-    if out.strip() == "?":
-        return
     assert out.strip() == "0"
 
 

@@ -242,19 +242,15 @@ jobs:
             --prior-codex-attempts "${{ steps.pr.outputs.prior_codex_attempts }}" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Load repair metadata flags
+      - name: Detect local cop-check verification
         if: steps.pr.outputs.should_run == 'true'
-        id: repair_meta
+        id: verify_meta
         run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import os
-
-          with open(os.environ["REPAIR_JSON_FILE"]) as f:
-              data = json.load(f)
-
-          print(f"cop_check_failure={'true' if data.get('cop_check_failure') else 'false'}")
-          PY
+          if grep -q "scripts/check-cop.py" "$REPAIR_VERIFY_SCRIPT"; then
+            echo "needs_local_cop_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_local_cop_check=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Resolve backend config
         if: steps.pr.outputs.should_run == 'true' && steps.repair.outputs.route != 'skip'
@@ -360,7 +356,7 @@ jobs:
           bundle install --jobs 4 --retry 3
 
       - name: Cache corpus clones
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair_meta.outputs.cop_check_failure == 'true'
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.verify_meta.outputs.needs_local_cop_check == 'true'
         uses: actions/cache@v4
         with:
           path: vendor/corpus
@@ -371,19 +367,19 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq mold
 
       - name: Build release binary for local cop-check diagnosis
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair_meta.outputs.cop_check_failure == 'true'
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.verify_meta.outputs.needs_local_cop_check == 'true'
         run: cargo build --release
 
       - name: Precompute local cop-check diagnosis packet
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair_meta.outputs.cop_check_failure == 'true'
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.verify_meta.outputs.needs_local_cop_check == 'true'
         run: |
-          python3 scripts/workflows/precompute_repair_cop_check.py \
+          python3 "$CI_SCRIPTS_DIR/precompute_repair_cop_check.py" \
             --repo-root "$PWD" \
             --changed-cops-out "$REPAIR_CHANGED_COPS_FILE" \
             --output "$REPAIR_COP_CHECK_PACKET_FILE"
 
       - name: Append local cop-check diagnosis to prompt
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair_meta.outputs.cop_check_failure == 'true'
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.verify_meta.outputs.needs_local_cop_check == 'true'
         run: |
           cat "$REPAIR_COP_CHECK_PACKET_FILE" >> "$FINAL_TASK_FILE"
 
@@ -391,8 +387,8 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         id: prompt
         run: |
-          pip install -q tiktoken
-          TOKENS=$(python3 scripts/workflows/count_tokens.py "$FINAL_TASK_FILE" 2>/dev/null || echo "?")
+          python3 -m pip install -q tiktoken
+          TOKENS=$(python3 "$CI_SCRIPTS_DIR/count_tokens.py" "$FINAL_TASK_FILE")
           echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
           echo "=== Final prompt stats ==="
           wc -l "$FINAL_TASK_FILE"
@@ -465,6 +461,8 @@ jobs:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
+          export PYTHONPATH="$PWD/scripts${PYTHONPATH:+:$PYTHONPATH}"
+
           python3 "$CI_SCRIPTS_DIR/agent_logs.py" watch \
             --newer-than "$FINAL_TASK_FILE" --interval 30 \
             --backend "${{ steps.backend.outputs.log_format }}" &
