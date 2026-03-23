@@ -253,9 +253,9 @@ impl Cop for EmptyLineAfterGuardClause {
                     if subsequent.as_else_node().is_some() {
                         // Check if `if` keyword is preceded by code on the same line
                         if let Some(kw) = if_node.if_keyword_loc() {
-                            let (kw_line, kw_col) = source.offset_to_line_col(kw.start_offset());
+                            let kw_line = source.offset_to_line_col(kw.start_offset()).0;
                             let lines_vec: Vec<&[u8]> = source.lines().collect();
-                            if let Some(line_content) = lines_vec.get(kw_line.saturating_sub(1)) {
+                            if lines_vec.get(kw_line.saturating_sub(1)).is_some() {
                                 // Check if all chars before the `if` keyword are whitespace
                                 // Use byte offset: compute bytes before the keyword
                                 let line_start_offset =
@@ -348,7 +348,7 @@ impl Cop for EmptyLineAfterGuardClause {
             loc.end_offset().saturating_sub(1)
         };
 
-        let (if_end_line, end_col) = source.offset_to_line_col(effective_end_offset);
+        let if_end_line = source.offset_to_line_col(effective_end_offset).0;
 
         // Check for heredoc arguments — if present, the "end line" is after the
         // heredoc closing delimiter, not after the if node's source range.

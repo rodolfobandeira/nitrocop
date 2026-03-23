@@ -563,7 +563,13 @@ fn is_aligned_standalone(
     let last_byte = *op_bytes.last().unwrap_or(&0);
     if last_byte == b'=' {
         return check_assignment_group_alignment(
-            source, &lines, line_idx, char_col, char_end_col, my_indent, code_map,
+            source,
+            &lines,
+            line_idx,
+            char_col,
+            char_end_col,
+            my_indent,
+            code_map,
         );
     }
     false
@@ -674,9 +680,15 @@ fn check_alignment_standalone(
 }
 
 /// Search for assignment-group alignment: looks through lines at the same
-/// indentation level, skipping non-assignment lines, to find an assignment
-/// operator ending at the same column. Mirrors RuboCop's `relevant_assignment_lines`
-/// behavior which allows assignments to be aligned across non-assignment lines.
+/// indentation level, skipping non-assignment lines and blank lines, to find
+/// an assignment operator ending at the same column. Also implements the
+/// "no subsequent assignment → not an offense" rule from RuboCop.
+///
+/// This mirrors RuboCop's `excess_leading_space?` for assignments, which checks
+/// both preceding and subsequent assignment lines and allows extra space if:
+/// - There IS a preceding assignment at the same column, OR
+/// - There is NO subsequent assignment at the same indent (isolated), OR
+/// - There IS a subsequent assignment at the same column.
 ///
 /// Example that should be considered aligned:
 /// ```ruby
@@ -693,87 +705,78 @@ fn check_assignment_group_alignment(
     my_indent: usize,
     code_map: Option<&CodeMap>,
 ) -> bool {
-    // Search both up and down through the assignment group.
-    for up in [true, false] {
-        let mut check_idx = if up {
-            if line_idx == 0 {
-                continue;
-            }
-            line_idx - 1
-        } else {
-            line_idx + 1
-        };
-        // Track whether we're still at the relevant indentation level.
-        // Once we see a differently-indented line, blank lines no longer break.
-        let mut at_relevant_indent = true;
-        loop {
-            if check_idx >= lines.len() {
-                break;
-            }
-            let line_bytes = lines[check_idx];
-            let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
-            let is_blank = first_non_ws.is_none();
-            let is_comment = first_non_ws.is_some_and(|fs| line_bytes[fs] == b'#');
-            let indent = first_non_ws.unwrap_or(0);
+    // Check preceding: is there any assignment at the same column above?
+    if search_assignment_alignment(
+        source,
+        lines,
+        line_idx,
+        char_col,
+        char_end_col,
+        my_indent,
+        code_map,
+        true,
+    ) {
+        return true;
+    }
+    // Check subsequent: search for any assignment at the same indent below.
+    let subsequent_status = search_subsequent_assignment_status(
+        source,
+        lines,
+        line_idx,
+        char_col,
+        char_end_col,
+        my_indent,
+        code_map,
+    );
+    match subsequent_status {
+        SubsequentStatus::None => true, // No subsequent assignment → not an offense
+        SubsequentStatus::Aligned => true, // Subsequent assignment at same column → aligned
+        SubsequentStatus::Misaligned => false, // Subsequent at different column → offense
+    }
+}
 
-            // Break conditions (mirroring RuboCop's relevant_assignment_lines):
-            // 1. Non-blank line with less indentation than ours
-            if !is_blank && !is_comment && indent < my_indent {
-                break;
-            }
-            // 2. Blank line while at the relevant indentation level
-            if at_relevant_indent && is_blank {
-                break;
-            }
+enum SubsequentStatus {
+    None,       // No subsequent assignment found at same indent
+    Aligned,    // Found subsequent assignment at same column
+    Misaligned, // Found subsequent assignment at different column
+}
 
-            // Skip blank and comment lines
-            if is_blank || is_comment {
-                if up {
-                    if check_idx == 0 {
-                        break;
-                    }
-                    check_idx -= 1;
-                } else {
-                    check_idx += 1;
-                }
-                continue;
-            }
+/// Search for an assignment at the same column in one direction.
+fn search_assignment_alignment(
+    source: &SourceFile,
+    lines: &[&[u8]],
+    line_idx: usize,
+    char_col: usize,
+    char_end_col: usize,
+    my_indent: usize,
+    code_map: Option<&CodeMap>,
+    up: bool,
+) -> bool {
+    let mut check_idx = if up {
+        if line_idx == 0 {
+            return false;
+        }
+        line_idx - 1
+    } else {
+        line_idx + 1
+    };
+    loop {
+        if check_idx >= lines.len() {
+            break;
+        }
+        let line_bytes = lines[check_idx];
+        let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
+        let is_blank = first_non_ws.is_none();
+        let is_comment = first_non_ws.is_some_and(|fs| line_bytes[fs] == b'#');
+        let indent = first_non_ws.unwrap_or(0);
 
-            // Check alignment at lines with the same indentation
-            if indent == my_indent {
-                // Check if this line has an assignment/comparison operator ending at the same column
-                if let Some(byte_end_col) = char_col_to_bytes(line_bytes, char_end_col) {
-                    let abs_end_offset = source.line_start_offset(check_idx + 1) + byte_end_col;
-                    if code_map.is_none_or(|cm| {
-                        byte_end_col > 0 && cm.is_code(abs_end_offset.saturating_sub(1))
-                    }) && line_has_operator_ending_at_col(line_bytes, byte_end_col)
-                    {
-                        return true;
-                    }
-                }
-                // Also check same operator at same char column
-                if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
-                    let abs_offset = source.line_start_offset(check_idx + 1) + byte_col;
-                    if byte_col + 1 <= line_bytes.len()
-                        && line_bytes[byte_col] == b'='
-                        && code_map.is_none_or(|cm| cm.is_code(abs_offset))
-                    {
-                        // Verify it's preceded by whitespace (an actual assignment operator)
-                        if byte_col > 0
-                            && (line_bytes[byte_col - 1] == b' '
-                                || line_bytes[byte_col - 1] == b'\t')
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
+        // Break on non-blank line with less indentation
+        if !is_blank && !is_comment && indent < my_indent {
+            break;
+        }
 
-            // Update at_relevant_indent for non-blank lines
-            if !is_blank {
-                at_relevant_indent = indent == my_indent;
-            }
-
+        // Skip blank and comment lines
+        if is_blank || is_comment {
             if up {
                 if check_idx == 0 {
                     break;
@@ -782,6 +785,156 @@ fn check_assignment_group_alignment(
             } else {
                 check_idx += 1;
             }
+            continue;
+        }
+
+        // Check alignment at lines with the same indentation
+        if indent == my_indent {
+            if check_line_has_aligned_assignment(
+                source,
+                lines,
+                check_idx,
+                char_col,
+                char_end_col,
+                code_map,
+            ) {
+                return true;
+            }
+        }
+
+        if up {
+            if check_idx == 0 {
+                break;
+            }
+            check_idx -= 1;
+        } else {
+            check_idx += 1;
+        }
+    }
+    false
+}
+
+/// Search for any subsequent assignment at the same indent level and determine
+/// whether it's aligned, misaligned, or absent.
+fn search_subsequent_assignment_status(
+    source: &SourceFile,
+    lines: &[&[u8]],
+    line_idx: usize,
+    char_col: usize,
+    char_end_col: usize,
+    my_indent: usize,
+    code_map: Option<&CodeMap>,
+) -> SubsequentStatus {
+    let mut check_idx = line_idx + 1;
+    loop {
+        if check_idx >= lines.len() {
+            break;
+        }
+        let line_bytes = lines[check_idx];
+        let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
+        let is_blank = first_non_ws.is_none();
+        let is_comment = first_non_ws.is_some_and(|fs| line_bytes[fs] == b'#');
+        let indent = first_non_ws.unwrap_or(0);
+
+        // Break on non-blank line with less indentation
+        if !is_blank && !is_comment && indent < my_indent {
+            break;
+        }
+
+        // Skip blank and comment lines
+        if is_blank || is_comment {
+            check_idx += 1;
+            continue;
+        }
+
+        // At same indentation, check if this line has any assignment operator
+        if indent == my_indent {
+            if line_has_any_assignment_operator(source, lines, check_idx, code_map) {
+                // Found an assignment — check if it's at the same column
+                if check_line_has_aligned_assignment(
+                    source,
+                    lines,
+                    check_idx,
+                    char_col,
+                    char_end_col,
+                    code_map,
+                ) {
+                    return SubsequentStatus::Aligned;
+                }
+                return SubsequentStatus::Misaligned;
+            }
+        }
+
+        check_idx += 1;
+    }
+    SubsequentStatus::None
+}
+
+/// Check if a line has an assignment/comparison operator at the given column.
+fn check_line_has_aligned_assignment(
+    source: &SourceFile,
+    lines: &[&[u8]],
+    check_idx: usize,
+    char_col: usize,
+    char_end_col: usize,
+    code_map: Option<&CodeMap>,
+) -> bool {
+    let line_bytes = lines[check_idx];
+
+    // Check cross-operator alignment (operators ending at same column)
+    if let Some(byte_end_col) = char_col_to_bytes(line_bytes, char_end_col) {
+        let abs_end_offset = source.line_start_offset(check_idx + 1) + byte_end_col;
+        if code_map
+            .is_none_or(|cm| byte_end_col > 0 && cm.is_code(abs_end_offset.saturating_sub(1)))
+            && line_has_operator_ending_at_col(line_bytes, byte_end_col)
+        {
+            return true;
+        }
+    }
+    // Check same `=` at same char column
+    if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
+        let abs_offset = source.line_start_offset(check_idx + 1) + byte_col;
+        if byte_col + 1 <= line_bytes.len()
+            && line_bytes[byte_col] == b'='
+            && code_map.is_none_or(|cm| cm.is_code(abs_offset))
+        {
+            if byte_col > 0
+                && (line_bytes[byte_col - 1] == b' ' || line_bytes[byte_col - 1] == b'\t')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a line has any assignment-like operator (=, ==, !=, <=, >=, +=, etc.) in code.
+fn line_has_any_assignment_operator(
+    source: &SourceFile,
+    lines: &[&[u8]],
+    check_idx: usize,
+    code_map: Option<&CodeMap>,
+) -> bool {
+    let line_bytes = lines[check_idx];
+    let line_start = source.line_start_offset(check_idx + 1);
+    for (i, &b) in line_bytes.iter().enumerate() {
+        if b == b'=' {
+            // Skip if preceded by !, <, >, =, +, -, *, /, %, &, |, ^, ~ (compound operators)
+            // We just need to know if there's ANY `=` on this line that is in code
+            if let Some(cm) = code_map {
+                if !cm.is_code(line_start + i) {
+                    continue;
+                }
+            }
+            // Skip `=>` (hash rocket)
+            if i + 1 < line_bytes.len() && line_bytes[i + 1] == b'>' {
+                continue;
+            }
+            // Skip `=~`
+            if i + 1 < line_bytes.len() && line_bytes[i + 1] == b'~' {
+                continue;
+            }
+            return true;
         }
     }
     false
