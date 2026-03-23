@@ -445,6 +445,14 @@ def main():
     parser = argparse.ArgumentParser(description="Workflow-time agent log tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    find_parser = subparsers.add_parser("find", help="Locate the newest matching session log")
+    find_parser.add_argument("--newer-than", type=Path, required=True)
+    find_parser.add_argument(
+        "--backend",
+        choices=sorted(LOG_FORMAT_PATTERNS),
+        default="codex",
+    )
+
     watch_parser = subparsers.add_parser("watch", help="Print live progress updates")
     watch_parser.add_argument("--newer-than", type=Path, required=True)
     watch_parser.add_argument("--interval", type=int, default=30)
@@ -463,6 +471,12 @@ def main():
     summarize_parser.add_argument("last_message", type=Path, help="Path to final message text file")
 
     args = parser.parse_args()
+
+    if args.command == "find":
+        logfile = find_logfile(args.newer_than, args.backend)
+        if logfile:
+            print(logfile)
+        return
 
     if args.command == "extract":
         extract_markdown(args.path, args.max_lines)

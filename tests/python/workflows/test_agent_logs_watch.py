@@ -261,6 +261,26 @@ def test_codex_ignores_function_call_output_noise():
     assert "Planning the fix" in s["last_text"]
 
 
+def test_find_logfile_uses_backend_family_resolution():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        ref = tmp_path / "task.md"
+        ref.write_text("task\n")
+        log = tmp_path / "session.jsonl"
+        log.write_text("{}\n")
+        log.touch()
+
+        original_patterns = dict(agent_logs.LOG_FORMAT_PATTERNS)
+        try:
+            agent_logs.LOG_FORMAT_PATTERNS["claude"] = str(log)
+            found = agent_logs.find_logfile(ref, backend="claude-normal")
+        finally:
+            agent_logs.LOG_FORMAT_PATTERNS.clear()
+            agent_logs.LOG_FORMAT_PATTERNS.update(original_patterns)
+
+        assert found == str(log)
+
+
 def test_find_logfile_returns_none():
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as ref:
         # No JSONL files in a temp dir — should return None
@@ -290,6 +310,7 @@ if __name__ == "__main__":
     test_codex_response_item_function_call_sets_tool()
     test_codex_looks_past_token_count_noise()
     test_codex_ignores_function_call_output_noise()
+    test_find_logfile_uses_backend_family_resolution()
     test_find_logfile_returns_none()
     test_agent_log_formats_match_resolve_backend_outputs()
     print("All tests passed.")

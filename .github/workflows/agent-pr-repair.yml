@@ -187,9 +187,6 @@ jobs:
           python3 scripts/workflows/workflow_git.py configure
           git fetch origin main
           echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          WORKSPACE_BRANCH="repair-workspace-${{ github.run_id }}-${{ github.run_attempt }}"
-          git switch -c "$WORKSPACE_BRANCH"
-          echo "workspace_branch=$WORKSPACE_BRANCH" >> "$GITHUB_OUTPUT"
         id: prep
 
       - name: Capture current PR diff
@@ -259,20 +256,10 @@ jobs:
           python3 scripts/workflows/resolve_backend.py "${{ steps.repair.outputs.backend }}" \
             >> "$GITHUB_OUTPUT"
 
-      - name: Prepare clean workspace for agent
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
-        id: workspace
-        run: |
-          python3 scripts/workflows/prepare_agent_workspace.py \
-            --mode agent-pr-repair \
-            --backend "${{ steps.repair.outputs.backend }}" \
-            --preserve-ci-scripts "$CI_SCRIPTS_DIR"
-          echo "workspace_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Append available helper scripts to prompt
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         run: |
-          python3 "$CI_SCRIPTS_DIR/render_helper_scripts_section.py" >> "$FINAL_TASK_FILE"
+          python3 scripts/workflows/render_helper_scripts_section.py >> "$FINAL_TASK_FILE"
 
       - name: Skip non-repairable failures
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route == 'skip'
@@ -373,7 +360,7 @@ jobs:
       - name: Precompute local cop-check diagnosis packet
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.verify_meta.outputs.needs_local_cop_check == 'true'
         run: |
-          python3 "$CI_SCRIPTS_DIR/precompute_repair_cop_check.py" \
+          python3 scripts/workflows/precompute_repair_cop_check.py \
             --repo-root "$PWD" \
             --changed-cops-out "$REPAIR_CHANGED_COPS_FILE" \
             --output "$REPAIR_COP_CHECK_PACKET_FILE"
@@ -388,7 +375,7 @@ jobs:
         id: prompt
         run: |
           python3 -m pip install -q tiktoken
-          TOKENS=$(python3 "$CI_SCRIPTS_DIR/count_tokens.py" "$FINAL_TASK_FILE")
+          TOKENS=$(python3 scripts/workflows/count_tokens.py "$FINAL_TASK_FILE")
           echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
           echo "=== Final prompt stats ==="
           wc -l "$FINAL_TASK_FILE"
@@ -434,14 +421,14 @@ jobs:
         env:
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" \
+          python3 scripts/workflows/guard_backend_secrets.py \
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
             emit-masks
 
       - name: Snapshot git state before agent
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         run: |
-          python3 "$CI_SCRIPTS_DIR/git_activity_snapshot.py" capture \
+          python3 scripts/workflows/git_activity_snapshot.py capture \
             --repo-root "$PWD" \
             --output "$GIT_ACTIVITY_BEFORE_FILE"
 
@@ -461,9 +448,7 @@ jobs:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          export PYTHONPATH="$PWD/scripts${PYTHONPATH:+:$PYTHONPATH}"
-
-          python3 "$CI_SCRIPTS_DIR/agent_logs.py" watch \
+          python3 scripts/workflows/agent_logs.py watch \
             --newer-than "$FINAL_TASK_FILE" --interval 30 \
             --backend "${{ steps.backend.outputs.log_format }}" &
           WATCHER_PID=$!
@@ -476,27 +461,34 @@ jobs:
         if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         run: |
           git status --short > "$AGENT_STATUS_FILE" || true
-          git log --oneline "${{ steps.workspace.outputs.workspace_sha }}"..HEAD > "$AGENT_COMMITS_FILE" || true
-          git diff --stat "${{ steps.workspace.outputs.workspace_sha }}" > "$AGENT_RECOVERY_STAT_FILE" || true
-          git diff "${{ steps.workspace.outputs.workspace_sha }}" > "$AGENT_RECOVERY_DIFF_FILE" || true
-          git diff --binary "${{ steps.workspace.outputs.workspace_sha }}" > "$AGENT_RECOVERY_PATCH_FILE" || true
-          python3 -c "
-          import os, sys; sys.path.insert(0, os.environ['CI_SCRIPTS_DIR'])
-          from agent_logs import find_logfile
-          from pathlib import Path
-          f = find_logfile(Path(os.environ['FINAL_TASK_FILE']), '${{ steps.backend.outputs.log_format }}')
-          print(f or '')
-          " > "$AGENT_LOGFILE_POINTER_FILE" 2>/dev/null || true
-          python3 "$CI_SCRIPTS_DIR/git_activity_snapshot.py" capture \
+          git log --oneline "${{ steps.prep.outputs.base_sha }}"..HEAD > "$AGENT_COMMITS_FILE" || true
+          git diff --stat "${{ steps.prep.outputs.base_sha }}" > "$AGENT_RECOVERY_STAT_FILE" || true
+          git diff "${{ steps.prep.outputs.base_sha }}" > "$AGENT_RECOVERY_DIFF_FILE" || true
+          git diff --binary "${{ steps.prep.outputs.base_sha }}" > "$AGENT_RECOVERY_PATCH_FILE" || true
+          python3 scripts/workflows/agent_logs.py find \
+            --newer-than "$FINAL_TASK_FILE" \
+            --backend "${{ steps.backend.outputs.log_format }}" > "$AGENT_LOGFILE_POINTER_FILE" 2>/dev/null || true
+          python3 scripts/workflows/git_activity_snapshot.py capture \
             --repo-root "$PWD" \
             --output "$GIT_ACTIVITY_AFTER_FILE" || true
-          python3 "$CI_SCRIPTS_DIR/git_activity_snapshot.py" report \
+          python3 scripts/workflows/git_activity_snapshot.py report \
             --before "$GIT_ACTIVITY_BEFORE_FILE" \
             --after "$GIT_ACTIVITY_AFTER_FILE" \
             --out-dir "$AGENT_GIT_ACTIVITY_DIR" || true
 
-      - name: Validate repair locally
+      - name: Validate repair change scope
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
+        id: file_guard
+        run: |
+          python3 scripts/workflows/validate_agent_changes.py \
+            --repo-root "$PWD" \
+            --base-ref "${{ steps.prep.outputs.base_sha }}" \
+            --profile "${{ steps.repair.outputs.guard_profile }}" \
+            --report-out "$AGENT_SCOPE_REPORT_FILE" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Validate repair locally
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip' && steps.file_guard.outputs.valid == 'true'
         id: verify
         env:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
@@ -517,6 +509,11 @@ jobs:
             exit 0
           fi
 
+          if [ "${{ steps.file_guard.outputs.valid }}" != "true" ]; then
+            echo "result=file_guard_failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [ "${{ steps.verify.outcome }}" = "skipped" ] || [ -z "${{ steps.verify.outputs.status }}" ]; then
             echo "result=verify_not_run" >> "$GITHUB_OUTPUT"
             exit 0
@@ -527,40 +524,18 @@ jobs:
             exit 0
           fi
 
-          if git diff --quiet && [ "$(git rev-parse HEAD)" = "${{ steps.workspace.outputs.workspace_sha }}" ]; then
-            echo "result=no_changes" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           if ! git diff --quiet; then
             git add -A
             git commit -m "Repair PR #${{ steps.pr.outputs.number }}: auto-repair (${{ steps.repair.outputs.backend }})"
           fi
 
-          git diff --binary "${{ steps.workspace.outputs.workspace_sha }}"..HEAD > "$REPAIR_APPLY_PATCH_FILE" || true
-          if [ ! -s "$REPAIR_APPLY_PATCH_FILE" ]; then
-            echo "result=no_changes" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git switch --detach "${{ steps.prep.outputs.base_sha }}"
-          git switch -C "repair-push-${{ github.run_id }}-${{ github.run_attempt }}"
-
-          if ! git apply --3way "$REPAIR_APPLY_PATCH_FILE"; then
-            echo "result=apply_failed" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git add -A
-          if git diff --cached --quiet; then
-            echo "result=no_changes" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git commit -m "Repair PR #${{ steps.pr.outputs.number }}: auto-repair (${{ steps.repair.outputs.backend }})"
-
           CURRENT_HEAD=$(git rev-parse HEAD)
           echo "head_sha=$CURRENT_HEAD" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT_HEAD" = "${{ steps.prep.outputs.base_sha }}" ]; then
+            echo "result=no_changes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git diff --stat origin/main...HEAD > "$FINAL_PR_DIFF_STAT_FILE" || true
           git diff origin/main...HEAD > "$FINAL_PR_DIFF_FILE" || true
 
@@ -577,11 +552,11 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          python3 "$CI_SCRIPTS_DIR/workflow_git.py" configure \
+          python3 scripts/workflows/workflow_git.py configure \
             --repo "${{ github.repository }}" \
             --unset-extraheader
           git push origin HEAD:${{ steps.pr.outputs.head_branch }} --force
-          python3 "$CI_SCRIPTS_DIR/workflow_git.py" promote \
+          python3 scripts/workflows/workflow_git.py promote \
             --repo "${{ github.repository }}" \
             --branch "${{ steps.pr.outputs.head_branch }}" \
             --message "Repair PR #${{ steps.pr.outputs.number }}: auto-repair (${{ steps.repair.outputs.backend }})" \
@@ -631,16 +606,18 @@ jobs:
               echo ""
               echo "The repair would have reduced the PR to an empty diff against \`origin/main\`, which this workflow treats as an invalid blanket revert."
             } > "$REPAIR_COMMENT_FILE"
-          elif [ "$RESULT" = "apply_failed" ]; then
+          elif [ "$RESULT" = "file_guard_failed" ]; then
             gh pr edit "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --add-label "needs-human" 2>/dev/null || true
             {
-              echo "## Auto-repair Could Not Materialize the Patch"
+              echo "## Auto-repair Rejected"
               echo ""
               echo "- Checks run: [#${{ steps.target.outputs.checks_run_id }}](${{ steps.target.outputs.checks_url }})"
               echo "- Backend: \`${{ steps.backend.outputs.display_label }}\`"
               echo "- Repair workflow: [#${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
               echo ""
-              echo "The agent produced changes in the temporary workspace, but those changes could not be replayed cleanly onto the original PR head."
+              echo "The workflow rejected this repair because it edited files outside the allowed scope for route \`${{ steps.repair.outputs.guard_profile }}\`."
+              echo ""
+              cat "$AGENT_SCOPE_REPORT_FILE"
             } > "$REPAIR_COMMENT_FILE"
           elif [ "$RESULT" = "agent_failed" ]; then
             gh pr edit "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --add-label "needs-human" 2>/dev/null || true
@@ -769,6 +746,13 @@ jobs:
             fi
             echo ""
 
+            if [ -s "$AGENT_SCOPE_REPORT_FILE" ]; then
+              echo "## File Scope"
+              echo ""
+              cat "$AGENT_SCOPE_REPORT_FILE"
+              echo ""
+            fi
+
             if [ -s "$FINAL_PR_DIFF_STAT_FILE" ]; then
               echo "## Final PR Diff"
               echo ""
@@ -792,7 +776,7 @@ jobs:
             if [ -n "$LOGFILE" ] && [ -f "$LOGFILE" ]; then
               echo "## Agent Conversation"
               echo ""
-              python3 "$CI_SCRIPTS_DIR/agent_logs.py" extract "$LOGFILE" --max-lines 120 2>/dev/null || true
+              python3 scripts/workflows/agent_logs.py extract "$LOGFILE" --max-lines 120 2>/dev/null || true
               echo ""
             fi
 
@@ -813,7 +797,7 @@ jobs:
         if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         id: artifact_manifest
         run: |
-          python3 "$CI_SCRIPTS_DIR/agent_artifacts.py" agent-pr-repair \
+          python3 scripts/workflows/agent_artifacts.py agent-pr-repair \
             --runtime-root "$AGENT_RUNTIME_ROOT" \
             --output "$AGENT_ARTIFACT_MANIFEST_FILE"
           {
@@ -831,7 +815,7 @@ jobs:
           CODEX_AUTH_JSON: ${{ (steps.repair.outputs.backend == 'codex-normal' || steps.repair.outputs.backend == 'codex-hard') && secrets.CODEX_AUTH_JSON || '' }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" \
+          python3 scripts/workflows/guard_backend_secrets.py \
             --ignore-missing \
             --from-env MINIMAX_API_KEY \
             --from-env ANTHROPIC_API_KEY \

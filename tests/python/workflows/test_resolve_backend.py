@@ -81,7 +81,7 @@ def test_codex_uses_codex():
     assert '"$AGENT_EVENTS_FILE"' in config["run_cmd"]
     assert '"$FINAL_TASK_FILE"' in config["run_cmd"]
     assert '"$AGENT_RESULT_FILE"' in config["run_cmd"]
-    assert '"$CI_SCRIPTS_DIR/agent_logs.py" summarize' in config["run_cmd"]
+    assert "scripts/workflows/agent_logs.py summarize" in config["run_cmd"]
 
 
 def test_unknown_backend_exits():

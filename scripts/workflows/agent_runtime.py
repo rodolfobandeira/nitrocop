@@ -12,7 +12,6 @@ from pathlib import Path
 def build_paths_from_root(workflow: str, root: Path) -> dict[str, str]:
     paths = {
         "AGENT_RUNTIME_ROOT": str(root),
-        "CI_SCRIPTS_DIR": str(root / "ci-scripts"),
         "AGENT_AGENT_DIR": str(root / "agent"),
         "AGENT_CONTEXT_DIR": str(root / "context"),
         "AGENT_RECOVERY_DIR": str(root / "recovery"),
@@ -26,6 +25,7 @@ def build_paths_from_root(workflow: str, root: Path) -> dict[str, str]:
         "AGENT_RECOVERY_STAT_FILE": str(root / "recovery" / "diff.stat"),
         "AGENT_RECOVERY_DIFF_FILE": str(root / "recovery" / "diff.diff"),
         "AGENT_RECOVERY_PATCH_FILE": str(root / "recovery" / "diff.patch"),
+        "AGENT_SCOPE_REPORT_FILE": str(root / "recovery" / "scope.md"),
         "AGENT_LOGFILE_POINTER_FILE": str(root / "recovery" / "logfile-path.txt"),
         "GIT_ACTIVITY_BEFORE_FILE": str(root / "recovery" / "git-activity" / "before.json"),
         "GIT_ACTIVITY_AFTER_FILE": str(root / "recovery" / "git-activity" / "after.json"),
@@ -41,7 +41,6 @@ def build_paths_from_root(workflow: str, root: Path) -> dict[str, str]:
                 "CLAIM_BODY_FILE": str(root / "context" / "claim-body.md"),
                 "PR_BODY_FILE": str(root / "context" / "pr-body.md"),
                 "PRIOR_ATTEMPTS_FILE": str(root / "context" / "prior-attempts.md"),
-                "AGENT_PATCH_FILE": str(root / "recovery" / "agent.patch"),
             }
         )
     elif workflow == "agent-pr-repair":
@@ -51,7 +50,6 @@ def build_paths_from_root(workflow: str, root: Path) -> dict[str, str]:
                 "PR_DIFF_STAT_FILE": str(root / "context" / "pr-diff.stat"),
                 "PR_DIFF_FILE": str(root / "context" / "pr.diff"),
                 "REPAIR_JSON_FILE": str(root / "repair" / "repair.json"),
-                "REPAIR_APPLY_PATCH_FILE": str(root / "repair" / "apply.patch"),
                 "REPAIR_VERIFY_SCRIPT": str(root / "repair" / "verify.sh"),
                 "REPAIR_VERIFY_LOG": str(root / "repair" / "verify.log"),
                 "REPAIR_COMMENT_FILE": str(root / "repair" / "comment.md"),
@@ -90,7 +88,6 @@ def current_paths(workflow: str) -> dict[str, str]:
 def ensure_dirs(paths: dict[str, str]) -> None:
     dir_keys = [
         "AGENT_RUNTIME_ROOT",
-        "CI_SCRIPTS_DIR",
         "AGENT_AGENT_DIR",
         "AGENT_CONTEXT_DIR",
         "AGENT_RECOVERY_DIR",

@@ -22,7 +22,13 @@ def test_agent_cop_fix_supports_issue_linking_and_auto_backend():
     assert "Closes #${ISSUE_NUMBER}" in content
     assert "<!-- nitrocop-cop-issue: number=${ISSUE_NUMBER} cop=${COP} -->" in content
     assert 'gh issue comment "${{ github.event.inputs.issue_number }}"' in content
-    assert 'export PYTHONPATH="$PWD/scripts${PYTHONPATH:+:$PYTHONPATH}"' in content
+    assert "docs/agent-ci.md" in content
+    assert "Switch to claimed PR branch" in content
+    assert "validate_agent_changes.py" in content
+    assert "prepare_agent_workspace.py" not in content
+    assert "CI_SCRIPTS_DIR" not in content
+    assert "tmp: clean workspace" not in content
+    assert "git apply --3way" not in content
 
 
 def test_agent_pr_repair_reads_linked_issue_and_can_update_it():
@@ -38,9 +44,14 @@ def test_agent_pr_repair_reads_linked_issue_and_can_update_it():
     assert 'cat "$FINAL_TASK_FILE"' in content
     assert "Detect local cop-check verification" in content
     assert 'steps.verify_meta.outputs.needs_local_cop_check == \'true\'' in content
-    assert 'python3 "$CI_SCRIPTS_DIR/precompute_repair_cop_check.py"' in content
-    assert 'python3 "$CI_SCRIPTS_DIR/count_tokens.py" "$FINAL_TASK_FILE"' in content
-    assert 'export PYTHONPATH="$PWD/scripts${PYTHONPATH:+:$PYTHONPATH}"' in content
+    assert "validate_agent_changes.py" in content
+    assert "guard_profile" in content
+    assert 'python3 scripts/workflows/precompute_repair_cop_check.py' in content
+    assert 'python3 scripts/workflows/count_tokens.py "$FINAL_TASK_FILE"' in content
+    assert "prepare_agent_workspace.py" not in content
+    assert "CI_SCRIPTS_DIR" not in content
+    assert "repair-workspace-" not in content
+    assert "git apply --3way" not in content
 
 
 def test_agent_pr_repair_checks_out_repo_before_running_local_scripts():
@@ -56,8 +67,10 @@ def test_agent_pr_repair_distinguishes_agent_failure_from_verify_failure():
     assert 'if: always() && steps.pr.outputs.should_run == \'true\'' in content
     assert 'if [ "${{ steps.agent.outcome }}" != "success" ]; then' in content
     assert 'echo "result=agent_failed" >> "$GITHUB_OUTPUT"' in content
+    assert 'echo "result=file_guard_failed" >> "$GITHUB_OUTPUT"' in content
     assert "## Auto-repair Agent Failed" in content
     assert "## Auto-repair Verification Did Not Run" in content
+    assert "## Auto-repair Rejected" in content
     assert "(verification did not run)" in content
 
 

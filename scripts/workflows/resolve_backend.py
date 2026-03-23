@@ -23,10 +23,10 @@ def codex_backend(model: str, reasoning_effort: str, strength: str) -> dict:
         "model_label": f"{model} ({reasoning_effort})",
         "cli": "codex",
         "setup_cmd": (
-            'python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" '
+            'python3 scripts/workflows/guard_backend_secrets.py '
             '--from-env CODEX_AUTH_JSON '
             'emit-masks && '
-            'python3 "$CI_SCRIPTS_DIR/validate_codex_auth.py" '
+            'python3 scripts/workflows/validate_codex_auth.py '
             '--from-env CODEX_AUTH_JSON '
             '--max-age-days 7 && '
             'npm install -g @openai/codex@latest && '
@@ -46,7 +46,7 @@ def codex_backend(model: str, reasoning_effort: str, strength: str) -> dict:
             '> "$AGENT_EVENTS_FILE" '
             '2> >(tee "$AGENT_LOG_FILE" >&2); '
             'STATUS=$?; '
-            'python3 "$CI_SCRIPTS_DIR/agent_logs.py" summarize '
+            'python3 scripts/workflows/agent_logs.py summarize '
             '"$AGENT_EVENTS_FILE" '
             '"$AGENT_LAST_MESSAGE_FILE" '
             '> "$AGENT_RESULT_FILE" || true; '
@@ -68,7 +68,7 @@ MINIMAX_BACKEND = {
     "model_label": "MiniMax-M2.7",
     "cli": "claude",
     "setup_cmd": (
-        'python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" '
+        'python3 scripts/workflows/guard_backend_secrets.py '
         '--from-env MINIMAX_API_KEY '
         'emit-masks && '
         'curl -fsSL https://claude.ai/install.sh | bash'
@@ -104,7 +104,7 @@ CLAUDE_NORMAL_BACKEND = {
     "model_label": "Claude Sonnet",
     "cli": "claude",
     "setup_cmd": (
-        'python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" '
+        'python3 scripts/workflows/guard_backend_secrets.py '
         '--from-env ANTHROPIC_API_KEY '
         'emit-masks && '
         'curl -fsSL https://claude.ai/install.sh | bash'
@@ -138,7 +138,7 @@ CLAUDE_HARD_BACKEND = {
     "model_label": "Claude Opus",
     "cli": "claude",
     "setup_cmd": (
-        'python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" '
+        'python3 scripts/workflows/guard_backend_secrets.py '
         '--from-env ANTHROPIC_API_KEY '
         'emit-masks && '
         'curl -fsSL https://claude.ai/install.sh | bash'

@@ -21,9 +21,8 @@ def test_build_paths_for_agent_cop_fix():
     runner_temp = Path("/tmp/runner")
     paths = agent_runtime.build_paths("agent-cop-fix", runner_temp)
     assert paths["AGENT_RUNTIME_ROOT"] == "/tmp/runner/agent-cop-fix"
-    assert paths["CI_SCRIPTS_DIR"].endswith("/agent-cop-fix/ci-scripts")
     assert paths["SUMMARY_FILE"].endswith("/agent-cop-fix/context/summary.md")
-    assert paths["AGENT_PATCH_FILE"].endswith("/agent-cop-fix/recovery/agent.patch")
+    assert paths["AGENT_SCOPE_REPORT_FILE"].endswith("/agent-cop-fix/recovery/scope.md")
     assert "REPAIR_SUMMARY_FILE" not in paths
 
 
@@ -69,7 +68,6 @@ def test_cli_emits_env_assignments_and_creates_directories():
     )
     lines = dict(line.split("=", 1) for line in result.stdout.strip().splitlines())
     assert Path(lines["AGENT_RUNTIME_ROOT"]).is_dir()
-    assert Path(lines["CI_SCRIPTS_DIR"]).is_dir()
     assert Path(lines["AGENT_REPAIR_DIR"]).is_dir()
 
 

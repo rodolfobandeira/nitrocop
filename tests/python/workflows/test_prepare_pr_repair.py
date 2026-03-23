@@ -24,6 +24,7 @@ def test_easy_linux_failure_routes_to_codex():
     result = prepare_pr_repair.classify_run(run)
     assert result["route"] == "easy"
     assert result["backend"] == "codex-hard"
+    assert result["guard_profile"] == "repair-rust-test"
     assert result["cop_check_failure"] is False
     assert "cargo clippy --profile ci -- -D warnings" in result["verification_commands"]
     assert "cargo test" in result["verification_commands"]
@@ -38,6 +39,7 @@ def test_hard_cop_check_routes_to_codex():
     result = prepare_pr_repair.classify_run(run)
     assert result["route"] == "hard"
     assert result["backend"] == "codex-hard"
+    assert result["guard_profile"] == "repair-cop-check"
     assert result["cop_check_failure"] is True
     assert any("scripts/check-cop.py" in command for command in result["verification_commands"])
 
@@ -52,6 +54,7 @@ def test_mixed_failures_escalate_to_hard():
     result = prepare_pr_repair.classify_run(run)
     assert result["route"] == "hard"
     assert result["backend"] == "codex-hard"
+    assert result["guard_profile"] == "repair-smoke"
     assert result["cop_check_failure"] is False
     assert any("cargo clippy" in command for command in result["verification_commands"])
     assert any("corpus-smoke-test.py" in command for command in result["verification_commands"])
@@ -66,7 +69,19 @@ def test_macos_only_failure_is_skipped():
     result = prepare_pr_repair.classify_run(run)
     assert result["route"] == "skip"
     assert result["backend"] == ""
+    assert result["guard_profile"] == ""
     assert result["cop_check_failure"] is False
+
+
+def test_python_workflow_failure_uses_python_scope():
+    run = {
+        "jobs": [
+            make_job("python", ["Python script tests"]),
+        ],
+    }
+    result = prepare_pr_repair.classify_run(run)
+    assert result["route"] == "easy"
+    assert result["guard_profile"] == "repair-python-workflow"
 
 
 def test_prompt_includes_route_and_failed_packet():
@@ -74,6 +89,7 @@ def test_prompt_includes_route_and_failed_packet():
     classification = {
         "route": "hard",
         "backend": "codex-hard",
+        "guard_profile": "repair-cop-check",
         "reason": "cop-check: Check cops against corpus baseline",
         "verification_commands": ["cargo build --release", "python3 scripts/check-cop.py Foo/Bar"],
         "jobs": [
@@ -101,12 +117,12 @@ def test_prompt_includes_route_and_failed_packet():
     assert "Selected backend: `codex / hard`" in prompt
     assert "Check cops against corpus baseline" in prompt
     assert "Keep the patch narrow." in prompt
+    assert "Before making changes, read `docs/agent-ci.md`." in prompt
     assert "Do not repair this PR by reverting it back to `origin/main`" in prompt
     assert "empty PR is treated as a failed repair" in prompt
     assert "/tmp/repair-corpus-standard.json" in prompt
     assert "/tmp/repair-corpus-extended.json" in prompt
     assert "read-only token is available in `GH_TOKEN`" in prompt
-    assert "temporary cleanup commit" in prompt
     assert prompt.index("## Local Corpus Context") < prompt.index("## Failed Checks Packet")
 
 
@@ -185,6 +201,7 @@ if __name__ == "__main__":
     test_hard_cop_check_routes_to_codex()
     test_mixed_failures_escalate_to_hard()
     test_macos_only_failure_is_skipped()
+    test_python_workflow_failure_uses_python_scope()
     test_prompt_includes_route_and_failed_packet()
     test_normalize_log_strips_actions_prefix_and_cleanup_noise()
     test_prefetch_corpus_context_uses_runtime_env_paths()

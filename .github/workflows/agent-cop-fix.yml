@@ -202,7 +202,11 @@ jobs:
       - name: Build final prompt
         if: steps.task.outputs.code_bugs != '0'
         run: |
-          cp "$TASK_FILE" "$FINAL_TASK_FILE"
+          {
+            echo "Before making changes, read \`docs/agent-ci.md\`."
+            echo ""
+            cat "$TASK_FILE"
+          } > "$FINAL_TASK_FILE"
 
           if [ -s "$PRIOR_ATTEMPTS_FILE" 2>/dev/null ]; then
             echo "" >> "$FINAL_TASK_FILE"
@@ -434,6 +438,20 @@ jobs:
           gem install "rubocop:$V_RC" "rubocop-performance:$V_PERF" \
             "rubocop-rails:$V_RAILS" "rubocop-rspec:$V_RSPEC" prism --no-document
 
+      - name: Switch to claimed PR branch
+        if: steps.task.outputs.code_bugs != '0'
+        id: branch_state
+        run: |
+          python3 scripts/workflows/workflow_git.py configure
+          BRANCH="${{ steps.cop.outputs.branch }}"
+          git fetch origin "$BRANCH"
+          if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+            git switch "$BRANCH"
+          else
+            git switch -c "$BRANCH" --track "origin/$BRANCH"
+          fi
+          echo "branch_base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Pre-populate offense fixtures with FN corpus examples
         if: steps.task.outputs.code_bugs != '0'
         run: |
@@ -443,26 +461,15 @@ jobs:
           FIXTURE_DIR="tests/fixtures/cops/$(echo "$DEPT_DIR" | sed 's|cop::||;s|::|/|g')"
           python3 scripts/workflows/prepopulate_fixtures.py "$TASK_FILE" "$COP" "$FIXTURE_DIR"
 
-      - name: Prepare clean workspace for agent
-        if: steps.task.outputs.code_bugs != '0'
-        run: |
-          python3 scripts/workflows/workflow_git.py configure
-          echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          python3 scripts/workflows/prepare_agent_workspace.py \
-            --mode agent-cop-fix \
-            --backend "${{ steps.selected_backend.outputs.backend }}" \
-            --preserve-ci-scripts "$CI_SCRIPTS_DIR"
-        id: prep
-
       - name: Append available helper scripts to prompt
         if: steps.task.outputs.code_bugs != '0'
         run: |
-          python3 "$CI_SCRIPTS_DIR/render_helper_scripts_section.py" >> "$FINAL_TASK_FILE"
+          python3 scripts/workflows/render_helper_scripts_section.py >> "$FINAL_TASK_FILE"
 
       - name: Snapshot git state before agent
         if: steps.task.outputs.code_bugs != '0'
         run: |
-          python3 "$CI_SCRIPTS_DIR/git_activity_snapshot.py" capture \
+          python3 scripts/workflows/git_activity_snapshot.py capture \
             --repo-root "$PWD" \
             --output "$GIT_ACTIVITY_BEFORE_FILE"
 
@@ -481,7 +488,7 @@ jobs:
         env:
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" \
+          python3 scripts/workflows/guard_backend_secrets.py \
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
             emit-masks
 
@@ -501,10 +508,8 @@ jobs:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          export PYTHONPATH="$PWD/scripts${PYTHONPATH:+:$PYTHONPATH}"
-
           # Background progress watcher
-          python3 "$CI_SCRIPTS_DIR/agent_logs.py" watch \
+          python3 scripts/workflows/agent_logs.py watch \
             --newer-than "$FINAL_TASK_FILE" --interval 30 \
             --backend "${{ steps.backend.outputs.log_format }}" &
           WATCHER_PID=$!
@@ -524,24 +529,20 @@ jobs:
         if: always() && steps.task.outputs.code_bugs != '0'
         run: |
           git status --short > "$AGENT_STATUS_FILE" || true
-          git log --oneline "${{ steps.prep.outputs.main_sha }}"..HEAD > "$AGENT_COMMITS_FILE" || true
-          git diff --stat "${{ steps.prep.outputs.main_sha }}" -- \
+          git log --oneline "${{ steps.branch_state.outputs.branch_base_sha }}"..HEAD > "$AGENT_COMMITS_FILE" || true
+          git diff --stat "${{ steps.branch_state.outputs.branch_base_sha }}" -- \
             src/cop/ tests/fixtures/cops/ bench/corpus/ > "$AGENT_RECOVERY_STAT_FILE" || true
-          git diff "${{ steps.prep.outputs.main_sha }}" -- \
+          git diff "${{ steps.branch_state.outputs.branch_base_sha }}" -- \
             src/cop/ tests/fixtures/cops/ bench/corpus/ > "$AGENT_RECOVERY_DIFF_FILE" || true
-          git diff --binary "${{ steps.prep.outputs.main_sha }}" -- \
+          git diff --binary "${{ steps.branch_state.outputs.branch_base_sha }}" -- \
             src/cop/ tests/fixtures/cops/ bench/corpus/ > "$AGENT_RECOVERY_PATCH_FILE" || true
-          python3 -c "
-          import os, sys; sys.path.insert(0, os.environ['CI_SCRIPTS_DIR'])
-          from agent_logs import find_logfile
-          from pathlib import Path
-          f = find_logfile(Path(os.environ['FINAL_TASK_FILE']), '${{ steps.backend.outputs.log_format }}')
-          print(f or '')
-          " > "$AGENT_LOGFILE_POINTER_FILE" 2>/dev/null || true
-          python3 "$CI_SCRIPTS_DIR/git_activity_snapshot.py" capture \
+          python3 scripts/workflows/agent_logs.py find \
+            --newer-than "$FINAL_TASK_FILE" \
+            --backend "${{ steps.backend.outputs.log_format }}" > "$AGENT_LOGFILE_POINTER_FILE" 2>/dev/null || true
+          python3 scripts/workflows/git_activity_snapshot.py capture \
             --repo-root "$PWD" \
             --output "$GIT_ACTIVITY_AFTER_FILE" || true
-          python3 "$CI_SCRIPTS_DIR/git_activity_snapshot.py" report \
+          python3 scripts/workflows/git_activity_snapshot.py report \
             --before "$GIT_ACTIVITY_BEFORE_FILE" \
             --after "$GIT_ACTIVITY_AFTER_FILE" \
             --out-dir "$AGENT_GIT_ACTIVITY_DIR" || true
@@ -645,7 +646,7 @@ jobs:
             if [ -n "$LOGFILE" ]; then
               echo "## Agent Conversation"
               echo ""
-              python3 "$CI_SCRIPTS_DIR/agent_logs.py" extract "$LOGFILE" 2>/dev/null || true
+              python3 scripts/workflows/agent_logs.py extract "$LOGFILE" 2>/dev/null || true
               echo ""
             fi
 
@@ -665,7 +666,7 @@ jobs:
         if: always() && steps.task.outputs.code_bugs != '0'
         id: artifact_manifest
         run: |
-          python3 "$CI_SCRIPTS_DIR/agent_artifacts.py" agent-cop-fix \
+          python3 scripts/workflows/agent_artifacts.py agent-cop-fix \
             --runtime-root "$AGENT_RUNTIME_ROOT" \
             --output "$AGENT_ARTIFACT_MANIFEST_FILE"
           {
@@ -683,7 +684,7 @@ jobs:
           CODEX_AUTH_JSON: ${{ (steps.selected_backend.outputs.backend == 'codex-normal' || steps.selected_backend.outputs.backend == 'codex-hard') && secrets.CODEX_AUTH_JSON || '' }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
-          python3 "$CI_SCRIPTS_DIR/guard_backend_secrets.py" \
+          python3 scripts/workflows/guard_backend_secrets.py \
             --ignore-missing \
             --from-env MINIMAX_API_KEY \
             --from-env ANTHROPIC_API_KEY \
@@ -711,33 +712,99 @@ jobs:
         if: steps.task.outputs.code_bugs != '0'
         id: changes
         run: |
-          UNCOMMITTED=false
-          NEW_COMMITS=false
-          if ! git diff --quiet; then
-            UNCOMMITTED=true
-          fi
-          CLEANUP_SHA=$(git log --format=%H -1 --grep="tmp: clean workspace")
-          if [ "$(git rev-parse HEAD)" != "$CLEANUP_SHA" ]; then
-            NEW_COMMITS=true
-          fi
-
-          if [ "$UNCOMMITTED" = "true" ] || [ "$NEW_COMMITS" = "true" ]; then
+          if ! git diff --quiet || [ "$(git rev-parse HEAD)" != "${{ steps.branch_state.outputs.branch_base_sha }}" ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            echo "Changes detected (uncommitted=$UNCOMMITTED, new_commits=$NEW_COMMITS)"
-            git log --oneline "$CLEANUP_SHA"..HEAD 2>/dev/null || true
+            echo "Changes detected on claimed branch"
+            git log --oneline "${{ steps.branch_state.outputs.branch_base_sha }}"..HEAD 2>/dev/null || true
             git diff --stat 2>/dev/null || true
           else
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "No changes made"
           fi
 
-      - name: Push to PR and mark ready
+      - name: Close empty draft PR
+        if: steps.task.outputs.code_bugs != '0' && steps.changes.outputs.has_changes != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          COP="${{ github.event.inputs.cop }}"
+          PR_URL="${{ steps.claim.outputs.pr_url }}"
+          ISSUE_NUMBER="${{ github.event.inputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          BACKEND_LABEL="${{ steps.selected_backend.outputs.display_label }}"
+          MODEL_LABEL_TEXT="${{ steps.backend.outputs.model_label }}"
+          MODE="${{ github.event.inputs.mode }}"
+
+          if [ -n "$ISSUE_NUMBER" ]; then
+            {
+              echo "No fix PR was produced for \`${COP}\`."
+              echo ""
+              echo "- Backend: \`${BACKEND_LABEL}\`"
+              echo "- Model: \`${MODEL_LABEL_TEXT}\`"
+              echo "- Mode: \`${MODE}\`"
+              echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              echo ""
+              echo "The agent did not produce any branch changes."
+            } > "$CLAIM_BODY_FILE"
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file "$CLAIM_BODY_FILE"
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+              --remove-label "state:pr-open" \
+              --add-label "state:backlog" 2>/dev/null || true
+          fi
+
+          gh pr close "$PR_URL" --comment "Agent produced no changes." --delete-branch
+
+      - name: Validate agent change scope
         if: steps.changes.outputs.has_changes == 'true'
+        id: file_guard
+        run: |
+          python3 scripts/workflows/validate_agent_changes.py \
+            --repo-root "$PWD" \
+            --base-ref "${{ steps.branch_state.outputs.branch_base_sha }}" \
+            --profile agent-cop-fix \
+            --report-out "$AGENT_SCOPE_REPORT_FILE" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Reject disallowed agent edits
+        if: steps.changes.outputs.has_changes == 'true' && steps.file_guard.outputs.valid != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          COP="${{ github.event.inputs.cop }}"
+          PR_URL="${{ steps.claim.outputs.pr_url }}"
+          ISSUE_NUMBER="${{ github.event.inputs.issue_number }}"
+          REPO="${{ github.repository }}"
+          gh label create needs-human --repo "$REPO" --color "b60205" 2>/dev/null || true
+          gh pr edit "$PR_URL" --repo "$REPO" --add-label "needs-human" 2>/dev/null || true
+
+          {
+            echo "## Agent Fix Rejected"
+            echo ""
+            echo "The workflow rejected this attempt because it edited files outside the allowed scope for \`agent-cop-fix\`."
+            echo ""
+            cat "$AGENT_SCOPE_REPORT_FILE"
+            echo ""
+            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > "$CLAIM_BODY_FILE"
+          gh pr comment "$PR_URL" --repo "$REPO" --body-file "$CLAIM_BODY_FILE"
+
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file "$CLAIM_BODY_FILE"
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+              --remove-label "state:pr-open,state:backlog" \
+              --add-label "state:blocked" 2>/dev/null || true
+          fi
+
+          gh pr close "$PR_URL" --comment "Agent edited files outside the allowed scope." --delete-branch
+          exit 1
+
+      - name: Finalize PR branch and mark ready
+        if: steps.changes.outputs.has_changes == 'true' && steps.file_guard.outputs.valid == 'true'
         id: pr
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          python3 "$CI_SCRIPTS_DIR/workflow_git.py" configure \
+          python3 scripts/workflows/workflow_git.py configure \
             --repo "${{ github.repository }}" \
             --unset-extraheader
 
@@ -751,67 +818,26 @@ jobs:
           ISSUE_NUMBER="${{ github.event.inputs.issue_number }}"
           REPO="${{ github.repository }}"
 
-          # Commit any uncommitted changes
-          git add -A
-          git commit -m "agent changes" --allow-empty
-
-          # Extract changes to allowed paths
-          git diff "${{ steps.prep.outputs.main_sha }}" HEAD -- \
-            src/cop/ tests/fixtures/cops/ bench/corpus/ > "$AGENT_PATCH_FILE"
-
-          # Branch from the draft PR branch
-          git fetch origin "$BRANCH"
-          git checkout "$BRANCH"
-
-          if [ ! -s "$AGENT_PATCH_FILE" ]; then
-            echo "No cop file changes found in agent output"
-            echo "has_pr=false" >> "$GITHUB_OUTPUT"
-            if [ -n "$ISSUE_NUMBER" ]; then
-              {
-                echo "No fix PR was produced for \`${COP}\`."
-                echo ""
-                echo "- Backend: \`${BACKEND_LABEL}\`"
-                echo "- Model: \`${MODEL_LABEL_TEXT}\`"
-                echo "- Mode: \`${MODE}\`"
-                echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                echo ""
-                echo "The agent produced no cop-file changes after replay."
-              } > "$CLAIM_BODY_FILE"
-              gh issue comment "$ISSUE_NUMBER" --repo "${REPO}" --body-file "$CLAIM_BODY_FILE"
-              gh issue edit "$ISSUE_NUMBER" --repo "${REPO}" \
-                --remove-label "state:pr-open" \
-                --add-label "state:backlog" 2>/dev/null || true
-            fi
-            # Close the draft PR — agent produced nothing
-            gh pr close "$PR_URL" --comment "Agent produced no changes." --delete-branch
-            exit 0
+          # Auto-format only the changed Rust cop files.
+          mapfile -t RUST_FILES < <(git diff --name-only "${{ steps.branch_state.outputs.branch_base_sha }}" -- src/cop | grep '\.rs$' || true)
+          if [ "${#RUST_FILES[@]}" -gt 0 ]; then
+            cargo fmt -- "${RUST_FILES[@]}"
           fi
-
-          if git apply --3way "$AGENT_PATCH_FILE"; then
-            echo "Patch applied cleanly"
-          else
-            echo "WARNING: patch had conflicts"
-            git checkout --theirs -- . 2>/dev/null || true
-            git add -A
-            gh pr edit "$PR_URL" --add-label "needs-rebase"
-          fi
-
-          # Auto-format Rust files (agent often skips this)
-          cargo fmt
 
           # Reject vacuous offense fixture edits before opening/readying the PR.
           cargo test --test integration offense_fixtures_have_no_unannotated_blocks
 
-          git add src/cop/ tests/fixtures/cops/ bench/corpus/
-
           RETRY_NOTE=""
           if [ "$MODE" = "retry" ]; then RETRY_NOTE=" (retry)"; fi
-          git commit --allow-empty -m "Fix ${COP}: agent-generated fix${RETRY_NOTE} ($BACKEND)"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "Fix ${COP}: agent-generated fix${RETRY_NOTE} ($BACKEND)"
+          fi
 
           # Push changes, then replace with signed commit via API
-          git push origin "$BRANCH" --force
+          git push origin HEAD:"$BRANCH" --force
 
-          eval "$(python3 "$CI_SCRIPTS_DIR/workflow_git.py" promote \
+          eval "$(python3 scripts/workflows/workflow_git.py promote \
             --repo "$REPO" \
             --branch "$BRANCH" \
             --message "Fix ${COP}: agent-generated fix${RETRY_NOTE} (${BACKEND})")"
@@ -886,7 +912,7 @@ jobs:
               echo "<details>"
               echo "<summary>Agent conversation excerpt</summary>"
               echo ""
-              python3 "$CI_SCRIPTS_DIR/agent_logs.py" extract "$LOGFILE" --max-lines 120 2>/dev/null || true
+              python3 scripts/workflows/agent_logs.py extract "$LOGFILE" --max-lines 120 2>/dev/null || true
               echo ""
               echo "</details>"
               echo ""
@@ -913,13 +939,13 @@ jobs:
 
       # --- Cleanup: close draft PR if agent failed ---
       - name: Close draft PR on failure
-        if: failure() && steps.claim.outputs.pr_url
+        if: failure() && steps.claim.outputs.pr_url && steps.file_guard.outputs.valid != 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh pr close "${{ steps.claim.outputs.pr_url }}" \
             --comment "Agent failed. See run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --delete-branch
+            --delete-branch || true
           if [ -n "${{ github.event.inputs.issue_number }}" ]; then
             cat > "$CLAIM_BODY_FILE" <<EOF
           Agent fix failed before producing a usable PR for \`${{ github.event.inputs.cop }}\`.

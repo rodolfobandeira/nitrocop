@@ -39,6 +39,13 @@ SKIPPABLE_STEP_NAMES = {
     "Complete job",
 }
 
+PYTHON_WORKFLOW_STEPS = {
+    "Format",
+    "Validate corpus manifest",
+    "No vendor include macros",
+    "Python script tests",
+}
+
 EASY_STEP_COMMANDS = {
     "Format": "cargo fmt --check",
     "Validate corpus manifest": "python3 bench/corpus/validate_manifest.py",
@@ -240,6 +247,7 @@ def classify_run(run: dict) -> dict:
     return {
         "route": route,
         "backend": backend,
+        "guard_profile": determine_guard_profile(route, jobs),
         "cop_check_failure": any(
             "Check cops against corpus baseline" in job.get("failed_step_names", [])
             for job in jobs
@@ -251,6 +259,23 @@ def classify_run(run: dict) -> dict:
         "verification_commands": commands,
         "reason": "; ".join(reasons) if reasons else "No repairable failed jobs",
     }
+
+
+def determine_guard_profile(route: str, jobs: list[dict]) -> str:
+    failed_step_names = {
+        step_name
+        for job in jobs
+        for step_name in job.get("failed_step_names", [])
+    }
+    if route == "hard":
+        if "Check cops against corpus baseline" in failed_step_names:
+            return "repair-cop-check"
+        return "repair-smoke"
+    if route == "easy":
+        if failed_step_names & PYTHON_WORKFLOW_STEPS:
+            return "repair-python-workflow"
+        return "repair-rust-test"
+    return ""
 
 
 def fetch_failed_log(repo: str, run_id: str, job_id: str) -> str:
@@ -320,6 +345,8 @@ def build_prompt(
     lines = [
         f"# PR Repair Task: PR #{pr_meta['number']}",
         "",
+        "Before making changes, read `docs/agent-ci.md`.",
+        "",
         "Repair the existing PR branch in place. Do not create a new branch or PR.",
         "Preserve the intent of the current PR and make the smallest changes needed to fix the failing checks.",
         "Do not repair this PR by reverting it back to `origin/main`, deleting the whole diff, or otherwise turning it into an empty/no-op PR.",
@@ -363,9 +390,6 @@ def build_prompt(
         "```diff",
         excerpt_diff(diff_text),
         "```",
-        "",
-        "The reduced agent workspace may include a temporary cleanup commit that is not part of the real PR.",
-        "Treat the diff excerpt above as the intended PR change, and do not reason from a broad `git diff origin/main` inside the reduced workspace.",
         "",
     ]
 
@@ -509,6 +533,7 @@ def main() -> None:
     metadata = {
         "route": classification["route"],
         "backend": classification["backend"],
+        "guard_profile": classification["guard_profile"],
         "cop_check_failure": classification["cop_check_failure"],
         "reason": classification["reason"],
         "verification_commands": classification["verification_commands"],
@@ -527,6 +552,7 @@ def main() -> None:
 
     print(f"route={classification['route']}")
     print(f"backend={classification['backend']}")
+    print(f"guard_profile={classification['guard_profile']}")
     print(f"cop_check_failure={'true' if classification['cop_check_failure'] else 'false'}")
     print(f"reason={classification['reason']}")
     print(f"failed_jobs={len(classification['jobs'])}")

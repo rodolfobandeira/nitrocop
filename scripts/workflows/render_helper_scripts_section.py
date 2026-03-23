@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a markdown section for helper scripts present in the reduced workspace."""
+"""Render a markdown section for helper scripts available in the CI checkout."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def build_section(repo_root: Path) -> str:
         "",
         "## Available Local Helper Scripts",
         "",
-        "Only these helper scripts are present in this CI workspace. Prefer the stable top-level CLI paths shown below over ad hoc commands when they directly help with diagnosis or validation.",
+        "These helper scripts are available in this CI checkout. Prefer the stable top-level CLI paths shown below over ad hoc commands when they directly help with diagnosis or validation.",
         "",
     ]
 
