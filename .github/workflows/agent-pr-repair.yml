@@ -318,26 +318,6 @@ jobs:
             fi
           fi
 
-      - name: Mark repair attempt
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          gh label create needs-human --repo "${{ github.repository }}" --color "b60205" 2>/dev/null || true
-          cat > "$REPAIR_COMMENT_FILE" <<EOF
-          ## Auto-repair Started
-
-          - Checks run: [#${{ steps.target.outputs.checks_run_id }}](${{ steps.target.outputs.checks_url }})
-          - Route: \`${{ steps.repair.outputs.route }}\`
-          - Backend: \`${{ steps.backend.outputs.display_label }}\`
-          - Model: \`${{ steps.backend.outputs.model_label }}\`
-          - Reason: ${{ steps.repair.outputs.reason }}
-          - Repair workflow: [#${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          <!-- nitrocop-auto-repair: phase=started head_sha=${{ steps.pr.outputs.head_sha }} backend=${{ steps.repair.outputs.backend }} checks_run_id=${{ steps.target.outputs.checks_run_id }} -->
-          EOF
-          gh pr comment "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --body-file "$REPAIR_COMMENT_FILE"
-
       - uses: dtolnay/rust-toolchain@stable
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         with:
@@ -392,6 +372,44 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.cop_check_failure == 'true'
         run: |
           cat "$REPAIR_COP_CHECK_PACKET_FILE" >> "$FINAL_TASK_FILE"
+
+      - name: Compute prompt stats
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
+        id: prompt
+        run: |
+          pip install -q tiktoken
+          TOKENS=$(python3 scripts/workflows/count_tokens.py "$FINAL_TASK_FILE" 2>/dev/null || echo "?")
+          echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
+          echo "=== Final prompt stats ==="
+          wc -l "$FINAL_TASK_FILE"
+          echo "Tokens: $TOKENS"
+
+      - name: Mark repair attempt
+        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh label create needs-human --repo "${{ github.repository }}" --color "b60205" 2>/dev/null || true
+          {
+            echo "## Auto-repair Started"
+            echo ""
+            echo "- Checks run: [#${{ steps.target.outputs.checks_run_id }}](${{ steps.target.outputs.checks_url }})"
+            echo "- Route: \`${{ steps.repair.outputs.route }}\`"
+            echo "- Backend: \`${{ steps.backend.outputs.display_label }}\`"
+            echo "- Model: \`${{ steps.backend.outputs.model_label }}\`"
+            echo "- Reason: ${{ steps.repair.outputs.reason }}"
+            echo "- Repair workflow: [#${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo ""
+            echo "<details>"
+            echo "<summary>Task prompt (${{ steps.prompt.outputs.tokens }} tokens)</summary>"
+            echo ""
+            cat "$FINAL_TASK_FILE"
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "<!-- nitrocop-auto-repair: phase=started head_sha=${{ steps.pr.outputs.head_sha }} backend=${{ steps.repair.outputs.backend }} checks_run_id=${{ steps.target.outputs.checks_run_id }} -->"
+          } > "$REPAIR_COMMENT_FILE"
+          gh pr comment "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --body-file "$REPAIR_COMMENT_FILE"
 
       - name: Run backend setup
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
