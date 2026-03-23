@@ -22,6 +22,13 @@ use crate::parse::source::SourceFile;
 /// **Fix:** When heredocs are present, scan from `last_end` but stop at the
 /// first newline (matching RuboCop's `/\A[^\S\n]*,/` regex). This finds commas
 /// on the heredoc opening line without entering heredoc content.
+///
+/// ## Nested heredoc FPs (2026-03)
+/// When the last element of an outer array is a sub-array containing a heredoc
+/// (e.g., `["foo.rb", <<-EOS]`), the heredoc body sits between the sub-array's
+/// `end_offset()` and the outer `]`. The `any_heredoc` check must recurse into
+/// sub-arrays to detect these nested heredocs, otherwise heredoc content gets
+/// scanned for commas producing false positives. Seen in zeitwerk, rufo, thredded.
 pub struct TrailingCommaInArrayLiteral;
 
 impl Cop for TrailingCommaInArrayLiteral {
@@ -261,6 +268,14 @@ fn is_heredoc_element(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(call) = node.as_call_node() {
         if let Some(recv) = call.receiver() {
             return is_heredoc_element(&recv);
+        }
+    }
+    // Check sub-arrays that may contain heredoc elements (e.g., ["foo.rb", <<-EOS])
+    if let Some(arr) = node.as_array_node() {
+        for child in arr.elements().iter() {
+            if is_heredoc_element(&child) {
+                return true;
+            }
         }
     }
     false

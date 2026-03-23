@@ -77,3 +77,28 @@ EOS2
 [<<~'},']
 hello
 },
+
+# Nested array with heredoc pairs — zeitwerk pattern (FP fix)
+# The last sub-array has no trailing comma; heredoc content should not be
+# confused with an array-level comma.
+files = [
+  ["foo.rb", <<-EOS],
+    require 'bar'
+    Foo = 1
+  EOS
+  ["bar.rb", <<-EOS]
+    Bar = true
+    Object.autoload(:Foo, File.expand_path('foo.rb'))
+    $trc_inception = !Object.autoload?(:Foo)
+  EOS
+]
+
+# Nested array with heredoc — last element is sub-array ending with heredoc
+x = [
+  ["a.rb", <<~RUBY],
+    class A; end
+  RUBY
+  ["b.rb", <<~RUBY]
+    class B; end
+  RUBY
+]
