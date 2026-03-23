@@ -1,13 +1,12 @@
 use crate::cop::node_type::{
     CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
-    CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_TARGET_NODE, CLASS_VARIABLE_WRITE_NODE, DEF_NODE,
+    CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_WRITE_NODE, DEF_NODE, FOR_NODE,
     GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
-    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_TARGET_NODE, GLOBAL_VARIABLE_WRITE_NODE,
-    INSTANCE_VARIABLE_AND_WRITE_NODE, INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
-    INSTANCE_VARIABLE_OR_WRITE_NODE, INSTANCE_VARIABLE_TARGET_NODE, INSTANCE_VARIABLE_WRITE_NODE,
-    LOCAL_VARIABLE_AND_WRITE_NODE, LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
-    LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_TARGET_NODE, LOCAL_VARIABLE_WRITE_NODE,
-    REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
+    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_WRITE_NODE, INSTANCE_VARIABLE_AND_WRITE_NODE,
+    INSTANCE_VARIABLE_OPERATOR_WRITE_NODE, INSTANCE_VARIABLE_OR_WRITE_NODE,
+    INSTANCE_VARIABLE_WRITE_NODE, LOCAL_VARIABLE_AND_WRITE_NODE,
+    LOCAL_VARIABLE_OPERATOR_WRITE_NODE, LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_WRITE_NODE,
+    MULTI_WRITE_NODE, REQUIRED_PARAMETER_NODE, SYMBOL_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -73,6 +72,17 @@ use crate::parse::source::SourceFile;
 /// leaving empty bare name `""`. The empty name fails the normalcase regex.
 /// RuboCop doesn't fire on `$$` because Parser gem handles it differently.
 /// Fix: skip variables with empty bare names after sigil stripping.
+///
+/// ## Corpus investigation (2026-03-23) — extended corpus
+///
+/// Extended corpus reported FP=39 across 2 repos. All FPs from pattern matching
+/// variable bindings (`in [a_1, b_2]`, `value => result_1`, `obj => { key: val_1 }`).
+/// In Parser gem, pattern matching creates `match_var` nodes, so `on_lvasgn` never
+/// fires. In Prism, the same syntax creates `LocalVariableTargetNode`, which was
+/// registered as an interested node type. Fix: removed all `*TargetNode` types from
+/// interested_node_types and instead handle them through `MultiWriteNode` (multi-
+/// assignment) and `ForNode` (for-loop), which are the only non-pattern-matching
+/// contexts where target nodes appear.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -97,24 +107,22 @@ impl Cop for VariableNumber {
             CLASS_VARIABLE_AND_WRITE_NODE,
             CLASS_VARIABLE_OPERATOR_WRITE_NODE,
             CLASS_VARIABLE_OR_WRITE_NODE,
-            CLASS_VARIABLE_TARGET_NODE,
             CLASS_VARIABLE_WRITE_NODE,
             DEF_NODE,
+            FOR_NODE,
             GLOBAL_VARIABLE_AND_WRITE_NODE,
             GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
             GLOBAL_VARIABLE_OR_WRITE_NODE,
-            GLOBAL_VARIABLE_TARGET_NODE,
             GLOBAL_VARIABLE_WRITE_NODE,
             INSTANCE_VARIABLE_AND_WRITE_NODE,
             INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
             INSTANCE_VARIABLE_OR_WRITE_NODE,
-            INSTANCE_VARIABLE_TARGET_NODE,
             INSTANCE_VARIABLE_WRITE_NODE,
             LOCAL_VARIABLE_AND_WRITE_NODE,
             LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
             LOCAL_VARIABLE_OR_WRITE_NODE,
-            LOCAL_VARIABLE_TARGET_NODE,
             LOCAL_VARIABLE_WRITE_NODE,
+            MULTI_WRITE_NODE,
             REQUIRED_PARAMETER_NODE,
             SYMBOL_NODE,
         ]
@@ -151,8 +159,6 @@ impl Cop for VariableNumber {
                 Some((n.name().as_slice(), n.name_loc()))
             } else if let Some(n) = node.as_local_variable_operator_write_node() {
                 Some((n.name().as_slice(), n.name_loc()))
-            } else if let Some(n) = node.as_local_variable_target_node() {
-                Some((n.name().as_slice(), n.location()))
             }
             // Instance variables (strip @)
             else if let Some(n) = node.as_instance_variable_write_node() {
@@ -163,8 +169,6 @@ impl Cop for VariableNumber {
                 Some((n.name().as_slice(), n.name_loc()))
             } else if let Some(n) = node.as_instance_variable_operator_write_node() {
                 Some((n.name().as_slice(), n.name_loc()))
-            } else if let Some(n) = node.as_instance_variable_target_node() {
-                Some((n.name().as_slice(), n.location()))
             }
             // Class variables (strip @@)
             else if let Some(n) = node.as_class_variable_write_node() {
@@ -175,8 +179,6 @@ impl Cop for VariableNumber {
                 Some((n.name().as_slice(), n.name_loc()))
             } else if let Some(n) = node.as_class_variable_operator_write_node() {
                 Some((n.name().as_slice(), n.name_loc()))
-            } else if let Some(n) = node.as_class_variable_target_node() {
-                Some((n.name().as_slice(), n.location()))
             }
             // Global variables (strip $)
             else if let Some(n) = node.as_global_variable_write_node() {
@@ -187,8 +189,6 @@ impl Cop for VariableNumber {
                 Some((n.name().as_slice(), n.name_loc()))
             } else if let Some(n) = node.as_global_variable_operator_write_node() {
                 Some((n.name().as_slice(), n.name_loc()))
-            } else if let Some(n) = node.as_global_variable_target_node() {
-                Some((n.name().as_slice(), n.location()))
             } else {
                 None
             };
@@ -299,6 +299,110 @@ impl Cop for VariableNumber {
                 ) {
                     diagnostics.push(diag);
                 }
+            }
+        }
+
+        // Multi-assignment targets: `val_1, val_2 = arr`
+        // In Prism, *TargetNode types appear in both multi-assignment and pattern matching.
+        // RuboCop's on_lvasgn fires for multi-assignment (Parser creates lvasgn children in
+        // mlhs), but NOT for pattern matching (Parser creates match_var nodes). By handling
+        // only MultiWriteNode targets here (instead of registering *TargetNode types
+        // directly), we correctly skip pattern matching variable bindings.
+        if let Some(mw) = node.as_multi_write_node() {
+            for target in mw.lefts().iter() {
+                self.check_target_variable(
+                    source,
+                    &target,
+                    enforced_style,
+                    &allowed_ids,
+                    &allowed_pats,
+                    diagnostics,
+                );
+            }
+            // Check the rest target (splat) if present
+            if let Some(rest) = mw.rest() {
+                if let Some(splat) = rest.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        self.check_target_variable(
+                            source,
+                            &expr,
+                            enforced_style,
+                            &allowed_ids,
+                            &allowed_pats,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            for target in mw.rights().iter() {
+                self.check_target_variable(
+                    source,
+                    &target,
+                    enforced_style,
+                    &allowed_ids,
+                    &allowed_pats,
+                    diagnostics,
+                );
+            }
+        }
+
+        // For-loop index: `for val_1 in collection`
+        if let Some(for_node) = node.as_for_node() {
+            let index = for_node.index();
+            self.check_target_variable(
+                source,
+                &index,
+                enforced_style,
+                &allowed_ids,
+                &allowed_pats,
+                diagnostics,
+            );
+        }
+    }
+}
+
+impl VariableNumber {
+    /// Check a target variable node from MultiWriteNode or ForNode.
+    /// Handles LocalVariableTargetNode, InstanceVariableTargetNode,
+    /// ClassVariableTargetNode, and GlobalVariableTargetNode.
+    fn check_target_variable(
+        &self,
+        source: &SourceFile,
+        target: &ruby_prism::Node<'_>,
+        enforced_style: &str,
+        allowed_ids: &[String],
+        allowed_pats: &[String],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let (name_bytes, loc) = if let Some(n) = target.as_local_variable_target_node() {
+            (n.name().as_slice(), n.location())
+        } else if let Some(n) = target.as_instance_variable_target_node() {
+            (n.name().as_slice(), n.location())
+        } else if let Some(n) = target.as_class_variable_target_node() {
+            (n.name().as_slice(), n.location())
+        } else if let Some(n) = target.as_global_variable_target_node() {
+            (n.name().as_slice(), n.location())
+        } else {
+            return;
+        };
+
+        let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
+        let bare = name_str.trim_start_matches('@').trim_start_matches('$');
+        let is_bare = bare.len() == name_str.len();
+        if bare.is_empty() {
+            return;
+        }
+        if !is_allowed(bare, allowed_ids, allowed_pats) {
+            if let Some(diag) = check_number_style(
+                self,
+                source,
+                bare,
+                &loc,
+                enforced_style,
+                "variable",
+                is_bare,
+            ) {
+                diagnostics.push(diag);
             }
         }
     }

@@ -27,3 +27,10 @@ def foo(baz_2: nil); end
 :""
 # Special global $$ (PID) — bare name is empty after sigil stripping
 $$ = 1
+# Pattern matching variable bindings (match_var in Parser, LocalVariableTargetNode
+# in Prism) are NOT checked by RuboCop (on_lvasgn doesn't fire for match_var nodes)
+case [1, 2]
+in [a_1, b_2]
+end
+value => result_1
+obj => { key: val_1 }

@@ -35,6 +35,16 @@ use crate::parse::source::SourceFile;
 /// with SymbolNode children. The CodeMap marks SymbolNodes as non-code, so the
 /// check_source scanner skips them. Fix: added check_node for AliasMethodNode
 /// to inspect the bare method name symbols directly.
+///
+/// ## Corpus investigation (2026-03-23) — extended corpus
+///
+/// Extended corpus reported FP=10 from Pluvie/italian-ruby. All FPs from
+/// `alias :non_è_nullo? :esiste?` — explicit `:` symbol notation in alias
+/// statements. RuboCop only checks `tIDENTIFIER` and `tCONSTANT` tokens, not
+/// `tSYMBOL`. In Prism, `alias :foo :bar` produces SymbolNodes with `:` in
+/// `opening_loc`, while `alias foo bar` produces SymbolNodes without opening.
+/// Fix: skip alias name nodes that have an `opening_loc` (explicit symbol
+/// notation).
 pub struct AsciiIdentifiers;
 
 impl Cop for AsciiIdentifiers {
@@ -176,6 +186,13 @@ impl Cop for AsciiIdentifiers {
                 Some(s) => s,
                 None => continue,
             };
+            // Skip explicit symbol notation (alias :foo :bar). RuboCop only
+            // checks tIDENTIFIER/tCONSTANT tokens, not tSYMBOL tokens.
+            // In Prism, `alias foo bar` has no opening_loc on the SymbolNode,
+            // while `alias :foo :bar` has `:` as opening_loc.
+            if sym.opening_loc().is_some() {
+                continue;
+            }
             let name_bytes = sym.unescaped();
             if name_bytes.iter().all(|&b| b.is_ascii()) {
                 continue;
