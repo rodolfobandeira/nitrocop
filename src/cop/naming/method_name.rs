@@ -64,6 +64,14 @@ use ruby_prism::Visit;
 /// check was matching `module Types` as an emitter, but RuboCop only checks
 /// `:class` children (not `:module`). Fixed `collect_emitter_name` to only
 /// collect class nodes, matching `node.parent.each_child_node(:class)`.
+///
+/// ## Corpus investigation (2026-03-23) — extended corpus
+///
+/// Extended corpus reported FP=6 (all vendor-path repos), FN=1.
+/// FN=1: `def self.String(s)` in skylight/vendor/cli/highline. The
+/// `has_class_emitter_in_scope` check may be incorrectly allowing this because
+/// `HighLine::String` is referenced in the method body. Needs deeper investigation
+/// of the emitter scope logic. Deferred (1 FN in vendored code).
 pub struct MethodName;
 
 /// Bundles config values needed for method name checking.

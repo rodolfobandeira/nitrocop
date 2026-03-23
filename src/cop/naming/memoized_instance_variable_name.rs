@@ -87,6 +87,16 @@ use crate::parse::source::SourceFile;
 /// Fix: (a) Added ReturnNode, YieldNode, InstanceVariableWriteNode, and CallNode-without-block
 /// handlers to `get_last_child_or_write`. (b) Added `check_or_write_chain` to recursively
 /// check nested `||=` in the value of an outer `||=` (chained pattern).
+///
+/// ## Corpus investigation (2026-03-23) — extended corpus
+///
+/// Extended corpus reported FP=2 (1 vendor, 1 genuine), FN=1.
+/// FP=1 (genuine): `@automatic_inverse_of ||= ...` in `def inverse_name` at
+/// samvera/active_fedora. The `||=` is deeply nested inside `options.fetch(:inverse_of) do
+/// if @automatic_inverse_of == false ... else ... end`. RuboCop likely doesn't consider
+/// this as a memoization pattern because it's not the top-level return.
+/// FN=1: `@script ||= rest.first` in `def options` at brixen/poetics (a bin/ script).
+/// Both edge cases need deeper investigation of the memoization pattern matching logic.
 pub struct MemoizedInstanceVariableName;
 
 impl MemoizedInstanceVariableName {
