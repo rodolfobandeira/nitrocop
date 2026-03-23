@@ -35,3 +35,7 @@ a = *::Array.new(3) { 42 }
 # Single-element array literal with Array.new
 [*Array.new(foo)]
  ^^^^^^^^^^^^^^^ Lint/RedundantSplatExpansion: Replace splat expansion with comma separated values.
+
+# Array.new inside [] method call in assignment context — flagged
+ns = NoteSet[*Array.new(n) { |i| notes[(d + (i * 2)) % size] }]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/RedundantSplatExpansion: Replace splat expansion with comma separated values.
