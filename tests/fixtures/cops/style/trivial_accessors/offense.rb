@@ -44,9 +44,11 @@ describe "outer" do
   end
 end
 
-# Singleton methods on objects should be flagged
-obj = Object.new
-def obj.status
-^^^ Style/TrivialAccessors: Use `attr_reader` to define trivial reader methods.
-  @status
+# Singleton methods on objects inside blocks should be flagged
+describe "test" do
+  obj = Object.new
+  def obj.status
+  ^^^ Style/TrivialAccessors: Use `attr_reader` to define trivial reader methods.
+    @status
+  end
 end

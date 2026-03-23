@@ -216,58 +216,55 @@ impl RedundantCondition {
         Self::nodes_equal(source, condition, &true_args[0])
     }
 
-    /// Handle an if-like node (both IfNode and UnlessNode)
-    fn check_if_like(
+    /// Handle an unless node: condition == else_branch means offense
+    fn check_unless(
+        &self,
+        source: &SourceFile,
+        condition: &ruby_prism::Node<'_>,
+        body_stmts: Option<ruby_prism::StatementsNode<'_>>,
+        else_stmts: Option<ruby_prism::StatementsNode<'_>>,
+        kw_offset: usize,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let else_stmts = match else_stmts {
+            Some(s) => s,
+            None => return,
+        };
+        let unless_body = match body_stmts {
+            Some(s) => s,
+            None => return,
+        };
+        let unless_body_nodes: Vec<_> = unless_body.body().into_iter().collect();
+        if unless_body_nodes.len() != 1 {
+            return;
+        }
+        let else_body: Vec<_> = else_stmts.body().into_iter().collect();
+        if else_body.len() != 1 {
+            return;
+        }
+        if Self::nodes_equal(source, condition, &else_body[0]) {
+            diagnostics.push(self.make_diagnostic_at(
+                source,
+                kw_offset,
+                "Use double pipes `||` instead.",
+            ));
+        }
+    }
+
+    /// Handle an if node (including ternary): checks all offense patterns
+    #[allow(clippy::too_many_lines)]
+    fn check_if(
         &self,
         source: &SourceFile,
         condition: &ruby_prism::Node<'_>,
         true_stmts: Option<ruby_prism::StatementsNode<'_>>,
         else_stmts: Option<ruby_prism::StatementsNode<'_>>,
         is_ternary: bool,
-        is_unless: bool,
         kw_offset: usize,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let _allowed_methods = config.get_string_array("AllowedMethods");
-
-        // For unless: condition == else_branch means offense
-        // For if: condition == true_branch means offense
-        if is_unless {
-            // unless: check if condition matches else_branch
-            let else_stmts = match else_stmts {
-                Some(s) => s,
-                None => return,
-            };
-
-            // Multi-line else check (for unless, the else is the "true" side)
-            // Vendor doesn't have special multi-line check for unless else
-            // but the check is on the "other" branch (the unless body)
-            let unless_body = match true_stmts {
-                Some(s) => s,
-                None => return,
-            };
-            let unless_body_nodes: Vec<_> = unless_body.body().into_iter().collect();
-            if unless_body_nodes.len() != 1 {
-                return;
-            }
-
-            let else_body: Vec<_> = else_stmts.body().into_iter().collect();
-            if else_body.len() != 1 {
-                return;
-            }
-
-            if Self::nodes_equal(source, condition, &else_body[0]) {
-                diagnostics.push(self.make_diagnostic_at(
-                    source,
-                    kw_offset,
-                    "Use double pipes `||` instead.",
-                ));
-            }
-            return;
-        }
-
-        // if: get true branch
+        // Get true branch
         let true_stmts = match true_stmts {
             Some(s) => s,
             None => return,
@@ -292,17 +289,14 @@ impl RedundantCondition {
 
         let else_stmts_unwrapped = else_stmts.unwrap();
 
-        // Else branch guards
+        // Else branch guards (not for ternary)
         if !is_ternary {
-            // Multi-line else check
             if Self::else_is_multiline(source, &else_stmts_unwrapped) {
                 return;
             }
-            // use_if_branch?: else body is an if/ternary
             if Self::else_body_is_if(&else_stmts_unwrapped) {
                 return;
             }
-            // use_hash_key_assignment?: else body is []=
             if Self::else_body_is_hash_key_assignment(&else_stmts_unwrapped) {
                 return;
             }
@@ -329,7 +323,6 @@ impl RedundantCondition {
                     let method_str = std::str::from_utf8(method_name).unwrap_or("");
                     let is_allowed = allowed.iter().any(|m| m == method_str);
                     if !is_allowed {
-                        // Also check else branch exists and is not true_type
                         let else_body: Vec<_> = else_stmts_unwrapped.body().into_iter().collect();
                         let else_is_true =
                             else_body.len() == 1 && else_body[0].as_true_node().is_some();
@@ -441,13 +434,12 @@ impl Cop for RedundantCondition {
                 None
             };
 
-            self.check_if_like(
+            self.check_if(
                 source,
                 &if_node.predicate(),
                 if_node.statements(),
                 else_stmts,
                 is_ternary,
-                false, // not unless
                 kw_offset,
                 config,
                 diagnostics,
@@ -467,15 +459,12 @@ impl Cop for RedundantCondition {
             // Get else statements
             let else_stmts = unless_node.else_clause().and_then(|e| e.statements());
 
-            self.check_if_like(
+            self.check_unless(
                 source,
                 &unless_node.predicate(),
                 unless_node.statements(),
                 else_stmts,
-                false, // not ternary
-                true,  // is unless
                 kw_offset,
-                config,
                 diagnostics,
             );
         }

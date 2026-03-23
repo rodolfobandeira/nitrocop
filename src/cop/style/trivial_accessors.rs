@@ -264,4 +264,17 @@ impl<'pr> Visit<'pr> for TrivialAccessorsVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TrivialAccessors, "cops/style/trivial_accessors");
+
+    #[test]
+    fn block_scope_reader() {
+        let source = b"describe \"something\" do\n  def app\n    @app\n  end\nend\n";
+        let diagnostics = crate::testutil::run_cop(&TrivialAccessors, source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Expected 1 offense for trivial reader inside block, got {}: {:?}",
+            diagnostics.len(),
+            diagnostics
+        );
+    }
 }
