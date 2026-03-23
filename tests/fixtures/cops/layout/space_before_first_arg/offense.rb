@@ -13,11 +13,11 @@ something   y, z
 
 # Extra space with receiver
 a.something  y, z
-            ^^ Layout/SpaceBeforeFirstArg: Put one space between the method name and the first argument.
+           ^^ Layout/SpaceBeforeFirstArg: Put one space between the method name and the first argument.
 
 # Extra space with safe navigation
 a&.something  y, z
-             ^^ Layout/SpaceBeforeFirstArg: Put one space between the method name and the first argument.
+            ^^ Layout/SpaceBeforeFirstArg: Put one space between the method name and the first argument.
 
 # Extra spaces not aligned with anything on adjacent lines
 describe  "with http basic auth features" do

@@ -48,3 +48,11 @@ x = 1
 
 # Extra spaces around => (not aligned)
 {'key' => 'val'}
+
+# Extra space around operator preceded by aligned << inside a string (should not suppress)
+x += foo
+'yz << bar'
+
+# Extra space before operator preceded by aligned << inside a string (text scanner)
+x = foo
+'yz = bar'

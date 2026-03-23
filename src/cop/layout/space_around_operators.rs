@@ -120,6 +120,7 @@ impl Cop for SpaceAroundOperators {
         let mut op_checker = OperatorChecker {
             cop: self,
             source,
+            code_map,
             diagnostics: Vec::new(),
             corrections: Vec::new(),
             has_corrections: corrections.is_some(),
@@ -228,6 +229,7 @@ impl Cop for SpaceAroundOperators {
                             check_text_scanner_extra_space(
                                 self,
                                 source,
+                                code_map,
                                 i,
                                 i + 2,
                                 op_str,
@@ -337,6 +339,7 @@ impl Cop for SpaceAroundOperators {
                         check_text_scanner_extra_space(
                             self,
                             source,
+                            code_map,
                             i,
                             i + 1,
                             "=",
@@ -362,6 +365,7 @@ impl Cop for SpaceAroundOperators {
 fn check_text_scanner_extra_space(
     cop: &SpaceAroundOperators,
     source: &SourceFile,
+    code_map: &CodeMap,
     op_start: usize,
     op_end: usize,
     op_str: &str,
@@ -383,7 +387,7 @@ fn check_text_scanner_extra_space(
         }
     }
     // AllowForAlignment: skip if aligned with operator on adjacent line
-    if is_aligned_standalone(source, op_start, op_bytes) {
+    if is_aligned_standalone(source, op_start, op_bytes, Some(code_map)) {
         return;
     }
     // Skip if trailing space extends to a comment on the same line
@@ -500,7 +504,15 @@ fn char_col_to_bytes(line: &[u8], char_col: usize) -> Option<usize> {
 /// 1. Same operator at same char column
 /// 2. Word/space boundary at same column (aligned_words in RuboCop)
 /// 3. Cross-operator alignment (operators ending at same column)
-fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> bool {
+///
+/// When `code_map` is provided, alignment candidates on adjacent lines are
+/// verified to be actual code (not inside strings or comments).
+fn is_aligned_standalone(
+    source: &SourceFile,
+    start: usize,
+    op_bytes: &[u8],
+    code_map: Option<&CodeMap>,
+) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
     while ls > 0 && bytes[ls - 1] != b'\n' {
@@ -516,7 +528,9 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
     // All alignment operators are ASCII, so char length == byte length.
     let char_end_col = char_col + op_bytes.len();
     // Pass 1: closest non-blank, non-comment line (no indentation filter)
-    if check_alignment_standalone(&lines, line_idx, char_col, char_end_col, op_bytes, None) {
+    if check_alignment_standalone(
+        source, &lines, line_idx, char_col, char_end_col, op_bytes, None, code_map,
+    ) {
         return true;
     }
     // Pass 2: search for same-indentation lines further out
@@ -525,22 +539,26 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(0);
     check_alignment_standalone(
+        source,
         &lines,
         line_idx,
         char_col,
         char_end_col,
         op_bytes,
         Some(my_indent),
+        code_map,
     )
 }
 
 fn check_alignment_standalone(
+    source: &SourceFile,
     lines: &[&[u8]],
     line_idx: usize,
     char_col: usize,
     char_end_col: usize,
     op_bytes: &[u8],
     indent_filter: Option<usize>,
+    code_map: Option<&CodeMap>,
 ) -> bool {
     for up in [true, false] {
         let mut check_idx = if up {
@@ -578,11 +596,18 @@ fn check_alignment_standalone(
                     // This handles lines where multi-byte chars (e.g. curly-quote string
                     // keys) appear before the operator, shifting the byte offset.
                     if let Some(byte_col) = char_col_to_bytes(line_bytes, char_col) {
+                        // Compute absolute byte offset for code_map checks.
+                        // check_idx is 0-based, line_start_offset takes 1-based line number.
+                        let abs_offset = source.line_start_offset(check_idx + 1) + byte_col;
+
                         // Check 1: same operator at same char column
                         if byte_col + op_bytes.len() <= line_bytes.len()
                             && &line_bytes[byte_col..byte_col + op_bytes.len()] == op_bytes
                         {
-                            return true;
+                            // Verify the matched operator is actually code, not inside a string
+                            if code_map.is_none_or(|cm| cm.is_code(abs_offset)) {
+                                return true;
+                            }
                         }
                         // Check 2: word/space boundary at same column (aligned_words)
                         if byte_col > 0
@@ -592,11 +617,25 @@ fn check_alignment_standalone(
                             && line_bytes[byte_col] != b' '
                             && line_bytes[byte_col] != b'\t'
                         {
-                            return true;
+                            // Verify the word boundary is in code
+                            if code_map.is_none_or(|cm| cm.is_code(abs_offset)) {
+                                return true;
+                            }
                         }
                     }
                     // Check 3: cross-operator alignment (operators ending at same char column)
-                    if line_has_operator_ending_at_char_col(line_bytes, char_end_col) {
+                    if let Some(byte_end_col) = char_col_to_bytes(line_bytes, char_end_col) {
+                        let abs_end_offset = source.line_start_offset(check_idx + 1) + byte_end_col;
+                        // Only check cross-operator alignment if the end position is in code
+                        if code_map.is_none_or(|cm| {
+                            byte_end_col > 0 && cm.is_code(abs_end_offset.saturating_sub(1))
+                        }) && line_has_operator_ending_at_col(line_bytes, byte_end_col)
+                        {
+                            return true;
+                        }
+                    } else if code_map.is_none()
+                        && line_has_operator_ending_at_char_col(line_bytes, char_end_col)
+                    {
                         return true;
                     }
                     break;
@@ -684,6 +723,7 @@ const MATCH_OPERATORS: &[&[u8]] = &[b"=~", b"!~", b"==="];
 struct OperatorChecker<'a> {
     cop: &'a SpaceAroundOperators,
     source: &'a SourceFile,
+    code_map: &'a CodeMap,
     diagnostics: Vec<Diagnostic>,
     corrections: Vec<crate::correction::Correction>,
     has_corrections: bool,
@@ -699,7 +739,7 @@ impl OperatorChecker<'_> {
     /// Delegates to the standalone alignment checker which supports
     /// cross-operator alignment (e.g., `||=` aligned with `=`).
     fn is_aligned_with_adjacent(&self, start: usize, op_bytes: &[u8]) -> bool {
-        is_aligned_standalone(self.source, start, op_bytes)
+        is_aligned_standalone(self.source, start, op_bytes, Some(self.code_map))
     }
 
     /// Check operator spacing for a "should have space" operator.
