@@ -179,6 +179,10 @@ fn check_if_node(source: &SourceFile, if_node: &ruby_prism::IfNode<'_>, param_na
             if then.len() == 1 && is_param_read(&then[0], param_name) {
                 return true;
             }
+            // `next param if cond` — modifier if with next-value, no else
+            if then.len() == 1 && is_next_with_param(&then[0], param_name) {
+                return true;
+            }
         }
         return false;
     }
@@ -234,10 +238,14 @@ fn check_unless_node(
     let then_stmts = get_unless_then_stmts(unless_node);
     let else_stmts = get_unless_else_stmts(unless_node);
 
-    // Pattern: unless cond; param; end (no else — implicit nil → reject)
+    // Pattern: unless cond; param; end (no else — implicit nil, reject)
     if else_stmts.is_none() {
         if let Some(ref then) = then_stmts {
             if then.len() == 1 && is_param_read(&then[0], param_name) {
+                return true;
+            }
+            // `next param unless cond` — modifier unless with next-value
+            if then.len() == 1 && is_next_with_param(&then[0], param_name) {
                 return true;
             }
         }
@@ -332,12 +340,6 @@ fn check_guard_clause(
 
     false
 }
-
-/// Also need to handle single-statement `next param if cond` (modifier if with next-value).
-/// This appears as a single IfNode where the then branch is `next param`.
-/// Already covered in check_single_conditional → check_if_node when mapped to
-/// the pattern: if cond; next param; end (no else, implicit nil).
-/// But we need to recognize `next param` as a valid pattern.
 
 /// Extract the first block parameter name (e.g., `|x|` -> "x").
 fn get_block_param_name(block_node: &ruby_prism::BlockNode<'_>) -> Option<Vec<u8>> {
