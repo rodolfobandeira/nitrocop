@@ -35,3 +35,8 @@ begin
 rescue *Array.new(3) { 42 }
   bar
 end
+
+# Array.new in paren-free method call — not flagged (RuboCop grandparent check)
+expect(result).to include *Array.new(3, SomeClass)
+do_something *Array.new(5) { |i| :"item#{i}" }
+yield *Array.new(count) { |i| i * 2 }
