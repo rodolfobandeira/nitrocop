@@ -159,7 +159,7 @@ impl Cop for NegatedIfElseCondition {
         // Both empty: `if !x; else; end` — not flagged.
         let else_has_content = else_node
             .statements()
-            .is_some_and(|stmts| stmts.body().len() > 0);
+            .is_some_and(|stmts| !stmts.body().is_empty());
         if !else_has_content {
             return;
         }

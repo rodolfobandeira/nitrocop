@@ -106,19 +106,14 @@ struct BranchInfo<'pr> {
 
 impl<'pr> BranchInfo<'pr> {
     fn from_stmts(stmts: Option<ruby_prism::StatementsNode<'pr>>) -> Self {
-        let count = stmts
-            .as_ref()
-            .map(|s| s.body().iter().count())
-            .unwrap_or(0);
+        let count = stmts.as_ref().map(|s| s.body().iter().count()).unwrap_or(0);
         Self { stmts, count }
     }
 }
 
 impl IdenticalConditionalBranches {
     /// Collect all branches from an if/elsif/else chain, expanding nested elsifs.
-    fn collect_if_branches<'pr>(
-        if_node: &ruby_prism::IfNode<'pr>,
-    ) -> Option<Vec<BranchInfo<'pr>>> {
+    fn collect_if_branches<'pr>(if_node: &ruby_prism::IfNode<'pr>) -> Option<Vec<BranchInfo<'pr>>> {
         let mut branches = Vec::new();
         branches.push(BranchInfo::from_stmts(if_node.statements()));
 
@@ -334,8 +329,7 @@ fn is_assignment_to_condition(
     if let Some(call_node) = condition.as_call_node() {
         if let Some(receiver) = call_node.receiver() {
             let recv_loc = receiver.location();
-            let recv_bytes =
-                &source.as_bytes()[recv_loc.start_offset()..recv_loc.end_offset()];
+            let recv_bytes = &source.as_bytes()[recv_loc.start_offset()..recv_loc.end_offset()];
             let recv_src = String::from_utf8_lossy(recv_bytes);
             let recv_src = recv_src.trim();
             if lhs == recv_src {
@@ -436,13 +430,7 @@ impl Cop for IdenticalConditionalBranches {
             // Check heads (first statement in each branch)
             let condition = if_node.predicate();
             let last_child = is_last_child_of_parent(node, parse_result);
-            self.check_heads(
-                source,
-                &branches,
-                Some(&condition),
-                last_child,
-                diagnostics,
-            );
+            self.check_heads(source, &branches, Some(&condition), last_child, diagnostics);
         } else if let Some(case_node) = node.as_case_node() {
             let branches = match Self::collect_case_branches(&case_node) {
                 Some(b) => b,

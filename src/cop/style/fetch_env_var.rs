@@ -44,7 +44,8 @@ impl FetchEnvVar {
     /// RuboCop's pattern `(const nil? :ENV)` requires nil parent, which excludes `::ENV`.
     /// We explicitly check and reject ConstantPathNode to satisfy prism_pitfalls.
     fn is_env_receiver(node: &ruby_prism::Node<'_>) -> bool {
-        if node.as_constant_read_node()
+        if node
+            .as_constant_read_node()
             .is_some_and(|c| c.name().as_slice() == b"ENV")
         {
             return true;
