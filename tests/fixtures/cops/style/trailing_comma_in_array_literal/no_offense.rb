@@ -51,3 +51,29 @@ first content
 EOS1
 second content
 EOS2
+
+# Heredoc content with comma-like text (FP fix — zeitwerk pattern)
+# The heredoc content and terminator should not be confused with array commas
+[
+  "foo.rb",
+  <<-EOS
+    some content,
+    more content,
+  EOS
+]
+
+# Heredoc with CSS/SASS content containing commas (FP fix — thredded pattern)
+[
+  "header",
+  <<~SASS
+    .messageboard,
+    .topic {
+      color: red;
+    }
+  SASS
+]
+
+# Heredoc delimiter that includes special chars (FP fix — rufo pattern)
+[<<~'},']
+hello
+},
