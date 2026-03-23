@@ -120,6 +120,12 @@ syms = %i(foo  bar  baz)
 words = %W(hello  world  #{name})
 isyms = %I(hello  world)
 
+# Single tab between tokens is not extra spacing (1 whitespace char)
+data = ['ADJ',	'Adjective']
+x =	1
+when 0b0001	then process
+fill_in 'field',	with: value
+
 # Backslash line continuation — spacing before \ is not flagged
 expected =  \
   "Real HTTP connections are disabled"

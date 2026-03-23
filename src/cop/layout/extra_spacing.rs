@@ -147,8 +147,11 @@ impl Cop for ExtraSpacing {
                     }
                     let space_count = i - space_start;
 
-                    // Flag if: multiple characters, or any tabs (a tab is always >1 col)
-                    if (space_count > 1 || has_tab) && i < line.len() {
+                    // Flag if: multiple whitespace characters (2+ spaces/tabs).
+                    // A single tab is 1 whitespace character and is NOT extra spacing,
+                    // matching RuboCop's token-based approach which counts characters
+                    // in the gap between tokens, not visual column width.
+                    if space_count > 1 && i < line.len() {
                         // Skip spacing before backslash line continuation at end of line.
                         // RuboCop's token-based approach doesn't see `\` as a token, so
                         // the space between the last token and `\` is never flagged.
@@ -318,13 +321,17 @@ impl<'pr> Visit<'pr> for WordArrayCollector {
                 || opener.starts_with(b"%i")
                 || opener.starts_with(b"%I")
             {
-                // Mark the interior (between opening and closing delimiters) as ignored
-                let start = opening.end_offset();
-                let end = node
-                    .closing_loc()
-                    .map_or(node.location().end_offset(), |c| c.start_offset());
-                if end > start {
-                    self.ranges.push(start..end);
+                // Only ignore interior of non-empty word/symbol arrays.
+                // Empty arrays like %w(  ) or %i(  ) should still have
+                // their extra spaces flagged, matching RuboCop behavior.
+                if !node.elements().is_empty() {
+                    let start = opening.end_offset();
+                    let end = node
+                        .closing_loc()
+                        .map_or(node.location().end_offset(), |c| c.start_offset());
+                    if end > start {
+                        self.ranges.push(start..end);
+                    }
                 }
             }
         }
