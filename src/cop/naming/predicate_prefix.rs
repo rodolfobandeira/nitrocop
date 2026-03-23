@@ -29,6 +29,17 @@ use crate::parse::source::SourceFile;
 /// - Fix: changed `build_directive_legacy_aliases` in `directives.rs` to only include
 ///   renames where the short name is the same (e.g., `Lint/Eval` → `Security/Eval`),
 ///   excluding same-department renames with changed short names.
+///
+/// ## Corpus investigation (2026-03-23) — extended corpus
+///
+/// Extended corpus reported FP=2 (1 vendor-path, 1 directive).
+/// FP=1 (directive): `has_tag?` in mysociety/alaveteli with
+/// `# rubocop:disable Naming::PredicateName` (old cop name, `::` separator).
+/// RuboCop apparently DOES honor the old name `PredicateName` as a disable for
+/// `PredicatePrefix` in some configurations, contradicting the earlier fix that
+/// stopped honoring it. May need to re-investigate the directive alias resolution
+/// for renames with changed short names — RuboCop's Registry might resolve them
+/// differently depending on version. Deferred (1 FP).
 pub struct PredicatePrefix;
 
 impl PredicatePrefix {

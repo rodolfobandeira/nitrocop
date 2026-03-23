@@ -87,6 +87,16 @@ use crate::parse::source::SourceFile;
 /// interpolation, it fell through to `check_strings` (false by default) instead of
 /// `check_symbols` (true). Fixed by adding a `symbol_ranges` check in the `!in_code`
 /// branch of the interpolation path.
+///
+/// ## Corpus investigation (2026-03-23) — extended corpus
+///
+/// Extended corpus reported FN=2 from `undef new_slave, new_safe_slave` in ruby/tk.
+/// In Prism, `undef foo` creates `UndefNode` with `SymbolNode` children. The CodeMap
+/// marks ALL SymbolNodes as non-code, so the `check_source` scanner classifies `undef`
+/// method names as symbols/non-code, following `check_strings` (false by default) instead
+/// of `check_identifiers` (true). RuboCop tokenizes `undef` arguments as `tIDENTIFIER`,
+/// so they follow `check_identifiers`. Fix would require either CodeMap changes to not mark
+/// `undef` SymbolNodes as non-code, or a `check_node` handler for `UndefNode`. Deferred.
 pub struct InclusiveLanguage;
 
 /// Global cache of compiled flagged terms, keyed by CopConfig pointer.
