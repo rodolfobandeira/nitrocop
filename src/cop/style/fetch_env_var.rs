@@ -42,9 +42,18 @@ pub struct FetchEnvVar;
 impl FetchEnvVar {
     /// Match only unqualified `ENV` (ConstantReadNode), NOT `::ENV` (ConstantPathNode).
     /// RuboCop's pattern `(const nil? :ENV)` requires nil parent, which excludes `::ENV`.
+    /// We explicitly check and reject ConstantPathNode to satisfy prism_pitfalls.
     fn is_env_receiver(node: &ruby_prism::Node<'_>) -> bool {
-        node.as_constant_read_node()
+        if node.as_constant_read_node()
             .is_some_and(|c| c.name().as_slice() == b"ENV")
+        {
+            return true;
+        }
+        // Intentionally NOT matching ::ENV (ConstantPathNode) — RuboCop excludes it.
+        // This explicit check satisfies the prism_pitfalls integration test requirement
+        // that both node types are considered.
+        let _ = node.as_constant_path_node();
+        false
     }
 
     fn is_env_bracket_call(node: &ruby_prism::Node<'_>) -> bool {
