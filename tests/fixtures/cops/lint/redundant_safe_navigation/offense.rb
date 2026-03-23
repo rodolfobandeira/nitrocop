@@ -99,3 +99,37 @@ condition&.respond_to?(:method) || fallback
 # Backtick literal receiver — always returns String, &. is redundant
 `cat /tmp/pid`&.strip
               ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# Negation with ! wrapping AllowedMethod in || (standalone)
+!charge&.is_a?(Klass) || fallback
+       ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# respond_to? with string argument (not symbol) in &&
+obj&.respond_to?('some_method?') && obj.some_method?
+   ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# Negation with ! in standalone || expression
+!item&.is_a?(Widget) || !(item&.active? || item&.pending?)
+     ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# AllowedMethod in ternary condition (via &&)
+obj&.is_a?(String) && obj.valid? ? 'yes' : 'no'
+   ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# Chained calls ending with &.is_a? in || false
+node.args&.last&.is_a?(TrueNode) || false
+               ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# AllowedMethod in && inside parentheses inside ||
+node.nil? || (node&.name&.to_s == "foo" && node.parent&.is_a?(SelfNode))
+                                                      ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+
+# if with parenthesized && inside condition
+if persisted? && active? && (!obj&.is_a?(Klass) || !(obj&.running?))
+                                 ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.
+  do_something
+end
+
+# Assignment with ||= and parenthesized &&
+zone ||= (user&.is_a?(Admin) && user.valid?) ? user.zone : default
+              ^^ Lint/RedundantSafeNavigation: Redundant safe navigation detected, use `.` instead.

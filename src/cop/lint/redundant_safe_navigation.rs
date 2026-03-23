@@ -371,6 +371,14 @@ impl<'a> ConditionalAllowedMethodVisitor<'a> {
             return;
         }
 
+        // Recurse through statements (body of parentheses)
+        if let Some(stmts) = node.as_statements_node() {
+            for stmt in stmts.body().iter() {
+                self.visit_conditional_subtree(&stmt);
+            }
+            return;
+        }
+
         // Recurse through prefix ! (not)
         if let Some(prefix) = node.as_call_node() {
             // Already handled above
