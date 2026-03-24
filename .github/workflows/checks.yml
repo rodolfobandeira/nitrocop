@@ -10,6 +10,26 @@ on:
   pull_request:
 
 jobs:
+  # Shared Linux release build — cop-check shards and corpus-smoke-test download
+  # this artifact instead of rebuilding (~2 min saved per job).
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          ref: ${{ inputs.ref || '' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: nitrocop-linux
+          path: target/release/nitrocop
+          retention-days: 1
+
   build-and-test:
     timeout-minutes: 15
     strategy:
@@ -136,7 +156,7 @@ jobs:
           fi
 
   cop-check:
-    needs: cop-detect
+    needs: [cop-detect, build-linux]
     if: needs.cop-detect.outputs.has_cops == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -150,11 +170,11 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release
+      - uses: actions/download-artifact@v6
+        with:
+          name: nitrocop-linux
+          path: target/release
+      - run: chmod +x target/release/nitrocop
 
       - uses: ruby/setup-ruby@v1
 
@@ -219,6 +239,7 @@ jobs:
   # catch systemic regressions (file discovery, config, plugin loading, directives)
   # before they reach the full 1000-repo corpus oracle.
   corpus-smoke-test:
+    needs: build-linux
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -227,11 +248,11 @@ jobs:
           submodules: true
           ref: ${{ inputs.ref || '' }}
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release
+      - uses: actions/download-artifact@v6
+        with:
+          name: nitrocop-linux
+          path: target/release
+      - run: chmod +x target/release/nitrocop
 
       - uses: ruby/setup-ruby@v1
 
