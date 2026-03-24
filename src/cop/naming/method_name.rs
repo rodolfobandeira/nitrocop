@@ -74,14 +74,12 @@ use ruby_prism::Visit;
 /// `config/mod.rs` by applying `fallback_default_excludes()` in the no-config case.
 ///
 /// FN=1: `def self.String(s)` in skylight/vendor/cli/highline/string_extensions.rb.
-/// Unit tests confirm the `has_class_emitter_in_scope` logic correctly flags
-/// `def self.String` when no `class String` sibling exists. The FN likely stems
-/// from a more complex file structure in the actual corpus file (possibly a
-/// `class String < ::String` defined later in the same class body, which nitrocop
-/// correctly recognizes as an emitter but RuboCop may handle differently in
-/// `c.loc.name.is?(name.to_s)` due to inheritance syntax). Cannot reproduce
-/// without the actual source file (extended-corpus-only repo). Deferred (1 FN
-/// in vendored code, 100.0% match rate on 28,934 offenses).
+/// Root cause: `class HighLine::String < ::String` in the same scope. In Parser
+/// AST, `c.loc.name` for a namespaced class covers the full path text
+/// (`HighLine::String`), so `c.loc.name.is?("String")` returns false. nitrocop
+/// was using `last_constant_segment()` to extract just `String`, creating a
+/// false emitter match. Fix: use the full constant path source text instead of
+/// just the last segment in `collect_emitter_name`.
 pub struct MethodName;
 
 /// Bundles config values needed for method name checking.
@@ -703,24 +701,14 @@ fn collect_direct_child_emitters(body: Option<ruby_prism::Node<'_>>) -> Vec<Vec<
 fn collect_emitter_name(node: ruby_prism::Node<'_>, emitters: &mut Vec<Vec<u8>>) {
     // RuboCop only checks :class children, NOT :module children.
     // See configurable_formatting.rb: node.parent.each_child_node(:class)
+    //
+    // RuboCop uses `c.loc.name.is?(name.to_s)` which compares the method name
+    // against the FULL constant path source text. For `class HighLine::String`,
+    // `c.loc.name.source` is `"HighLine::String"`, so `is?("String")` returns
+    // false. We must use the full path, not just the last segment.
     if let Some(class_node) = node.as_class_node() {
-        emitters
-            .push(last_constant_segment(class_node.constant_path().location().as_slice()).to_vec());
+        emitters.push(class_node.constant_path().location().as_slice().to_vec());
     }
-}
-
-fn last_constant_segment(path: &[u8]) -> &[u8] {
-    let mut start = 0;
-    let mut i = 0;
-    while i + 1 < path.len() {
-        if path[i] == b':' && path[i + 1] == b':' {
-            start = i + 2;
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    &path[start..]
 }
 
 #[cfg(test)]
@@ -854,6 +842,19 @@ mod tests {
         assert!(
             diags.is_empty(),
             "def self.String with class String sibling should be allowed"
+        );
+    }
+
+    #[test]
+    fn class_emitter_with_namespaced_class_is_not_emitter() {
+        // class HighLine::String has loc.name "HighLine::String", not "String"
+        // RuboCop's c.loc.name.is?("String") returns false for namespaced classes
+        let source = b"class HighLine\n  def self.String(s)\n    HighLine::String.new(s)\n  end\n  class HighLine::String < ::String\n  end\nend\n";
+        let diags = crate::testutil::run_cop_full(&MethodName, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "def self.String with class HighLine::String sibling should be flagged (namespaced class is not an emitter)"
         );
     }
 }
