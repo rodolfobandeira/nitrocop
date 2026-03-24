@@ -2009,20 +2009,19 @@ def cmd_dispatch_issues(args: argparse.Namespace) -> int:
         )
         if args.dry_run:
             continue
-        subprocess.run(
-            [
-                "gh", "workflow", "run", "agent-cop-fix.yml",
-                "--repo", repo,
-                "-f", f"cop={cop}",
-                "-f", f"backend={backend_family}",
-                "-f", f"strength={strength}",
-                "-f", "mode=fix",
-                "-f", f"issue_number={issue['number']}",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        cmd = [
+            "gh", "workflow", "run", "agent-cop-fix.yml",
+            "--repo", repo,
+            "-f", f"cop={cop}",
+            "-f", f"backend={backend_family}",
+            "-f", f"strength={strength}",
+            "-f", "mode=fix",
+            "-f", f"issue_number={issue['number']}",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"ERROR dispatching {cop}: {proc.stderr.strip()}", file=sys.stderr)
+            proc.check_returncode()
 
     print(json.dumps(result, indent=2))
     return 0
