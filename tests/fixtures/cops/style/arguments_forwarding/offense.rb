@@ -53,3 +53,24 @@ def before_action(*args, **opts, &block)
   set_callback(:action, :before, *args, **opts, &block)
                                  ^^^^^^^^^^^^^^^^^^^^^^ Style/ArgumentsForwarding: Use shorthand syntax `...` for arguments forwarding.
 end
+
+# Anonymous forwarding with yield
+def foo_yield(*args)
+              ^^^^^ Style/ArgumentsForwarding: Use anonymous positional arguments forwarding (`*`).
+  yield(*args)
+        ^^^^^ Style/ArgumentsForwarding: Use anonymous positional arguments forwarding (`*`).
+end
+
+# Anonymous kwargs forwarding with yield
+def bar_yield(**kwargs)
+              ^^^^^^^^ Style/ArgumentsForwarding: Use anonymous keyword arguments forwarding (`**`).
+  yield(**kwargs)
+        ^^^^^^^^ Style/ArgumentsForwarding: Use anonymous keyword arguments forwarding (`**`).
+end
+
+# Anonymous block only forwarding to yield
+def baz_yield(&block)
+              ^^^^^^ Style/ArgumentsForwarding: Use anonymous block arguments forwarding (`&`).
+  yield(&block)
+        ^^^^^^ Style/ArgumentsForwarding: Use anonymous block arguments forwarding (`&`).
+end

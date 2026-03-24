@@ -198,6 +198,18 @@ impl Cop for ArgumentsForwarding {
                 }
             }
         } else if ruby_version >= 3.2 && use_anonymous {
+            // Ruby 3.3.0 had a bug where anonymous forwarding inside a block was a
+            // syntax error. For Ruby < 3.4, if ANY classified send is inside a block,
+            // skip all anonymous forwarding (matching RuboCop's
+            // `all_forwarding_offenses_correctable?`).
+            if ruby_version < 3.4
+                && send_classifications
+                    .iter()
+                    .any(|sc| sc.inside_block)
+            {
+                return;
+            }
+
             // Anonymous forwarding: report each forwardable arg with redundant name individually
             self.report_anonymous_forwarding(
                 source,
@@ -328,6 +340,8 @@ struct SendClassification {
     forwards_rest: Option<usize>,
     forwards_kwrest: Option<usize>,
     forwards_block: Option<usize>,
+    /// Whether this call is inside a block (relevant for Ruby < 3.4 anonymous forwarding)
+    inside_block: bool,
 }
 
 impl SendClassification {
@@ -466,6 +480,7 @@ fn classify_send_nodes(
         kwrest_name: kwrest_name.map(|n| n.as_slice().to_vec()),
         block_name: block_name.map(|n| n.as_slice().to_vec()),
         results: Vec::new(),
+        block_depth: 0,
     };
     finder.visit(body);
     finder.results
@@ -476,6 +491,8 @@ struct SendClassifier {
     kwrest_name: Option<Vec<u8>>,
     block_name: Option<Vec<u8>>,
     results: Vec<SendClassification>,
+    /// Depth of block nesting (> 0 means inside a block)
+    block_depth: usize,
 }
 
 impl SendClassifier {
@@ -556,6 +573,7 @@ impl SendClassifier {
                 forwards_rest,
                 forwards_kwrest,
                 forwards_block,
+                inside_block: self.block_depth > 0,
             })
         } else {
             None
@@ -576,6 +594,28 @@ impl<'pr> Visit<'pr> for SendClassifier {
             self.results.push(sc);
         }
         ruby_prism::visit_super_node(self, node);
+    }
+
+    fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'pr>) {
+        // yield has arguments but no block
+        if let Some(sc) = self.classify_call(node.arguments(), None) {
+            self.results.push(sc);
+        }
+        ruby_prism::visit_yield_node(self, node);
+    }
+
+    // Track block nesting depth for the Ruby 3.3 anonymous-forwarding-in-block bug
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        self.block_depth += 1;
+        ruby_prism::visit_block_node(self, node);
+        self.block_depth -= 1;
+    }
+
+    // Lambda blocks also count
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        self.block_depth += 1;
+        ruby_prism::visit_lambda_node(self, node);
+        self.block_depth -= 1;
     }
 
     // Don't recurse into nested defs
