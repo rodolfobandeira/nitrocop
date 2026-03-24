@@ -177,6 +177,37 @@ use crate::parse::source::SourceFile;
 /// FN=28: Various modifier guard patterns (return/next/break if) followed by
 /// code without a blank line. Not addressed in this batch — requires deeper
 /// investigation of the text-based next-sibling classification.
+///
+/// ## Corpus investigation (2026-03-23, batch 2: FP=0, FN=45)
+///
+/// Three root causes identified for FN:
+///
+/// 1. **`is_ident_char` excluded `!` and `?`**: Ruby method names can end in
+///    `!` or `?` (e.g., `next!`, `fail!`, `include?`). The word boundary check
+///    treated `!`/`?` as non-ident characters, so `next` matched in `next!` and
+///    `fail` matched in `fail!`. The next-sibling guard-line classification then
+///    falsely suppressed the offense. Fix: include `!` and `?` in `is_ident_char`.
+///
+/// 2. **Qualified receiver calls like `::Kernel.raise`**: `contains_modifier_guard`
+///    matched `raise` inside `::Kernel.raise ... if cond` because `.` was a valid
+///    word boundary. RuboCop's `match_guard_clause?` requires `(send nil? ...)` —
+///    bare calls with no receiver. Fix: added `contains_guard_keyword_at_top_level`
+///    which rejects matches preceded by `.`.
+///
+/// 3. **UTF-8 byte/char offset mismatch**: The embedded-expression check used
+///    `end_col` (UTF-8 character count from `offset_to_line_col`) as a byte index
+///    into the raw line. For lines with multi-byte characters (emojis like `✅`,
+///    `✓`, CJK characters), the character count is smaller than the byte offset,
+///    causing the cop to think there was code after the guard on the same line and
+///    skip real offenses. Fix: compute byte position using `effective_end_offset`
+///    minus the line's start byte offset.
+///
+/// 4. **Block-form `if...else...end` skip was too broad**: The previous FP=1 fix
+///    blanket-skipped all `if...else...end` nodes. But RuboCop DOES flag
+///    `if...raise...else...end` as guard clauses (it checks `if_branch.guard_clause?`,
+///    not whether there's an else). The suppression only applies when the `if` node
+///    has no right_sibling (embedded in assignment like `ret = if...else...end`).
+///    Fix: only skip when the `if` keyword has code before it on the same line.
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.

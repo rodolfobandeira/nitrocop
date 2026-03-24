@@ -557,11 +557,11 @@ fn is_aligned_standalone(
     ) {
         return true;
     }
-    // Pass 3: for assignment-like operators (ending with `=`), search through
+    // Pass 3: for simple `=` assignment operators only, search through
     // assignment groups at the same indentation, skipping non-assignment lines.
-    // This mirrors RuboCop's `relevant_assignment_lines` behavior.
-    let last_byte = *op_bytes.last().unwrap_or(&0);
-    if last_byte == b'=' {
+    // This mirrors RuboCop's `excess_leading_space?` which uses a more permissive
+    // `aligned_with_equals_sign` for `type == :assignment` only (not compound +=, etc.).
+    if op_bytes == b"=" {
         return check_assignment_group_alignment(
             source,
             &lines,

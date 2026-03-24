@@ -225,3 +225,10 @@ type  = rate_detail.type
 a  = 1
 foo(bar)
 b  = 2
+
+# Standalone extra-space assignment (no subsequent assignment → not flagged, per RuboCop)
+x  = 1
+
+# Extra space before = followed by string containing = (no real subsequent assignment)
+x   = foo
+'yz = bar'
