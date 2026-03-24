@@ -1,7 +1,7 @@
 use crate::cop::node_type::{
-    CALL_NODE, CLASS_VARIABLE_WRITE_NODE, CONSTANT_WRITE_NODE, ELSE_NODE,
-    GLOBAL_VARIABLE_WRITE_NODE, IF_NODE, INSTANCE_VARIABLE_WRITE_NODE, LOCAL_VARIABLE_WRITE_NODE,
-    TRUE_NODE, UNLESS_NODE,
+    CALL_NODE, CLASS_VARIABLE_WRITE_NODE, CONSTANT_PATH_WRITE_NODE, CONSTANT_WRITE_NODE,
+    ELSE_NODE, GLOBAL_VARIABLE_WRITE_NODE, IF_NODE, INSTANCE_VARIABLE_WRITE_NODE,
+    LOCAL_VARIABLE_WRITE_NODE, TRUE_NODE, UNLESS_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -26,6 +26,22 @@ use crate::parse::source::SourceFile;
 ///
 /// Fixed by adding unless handling, no-else pattern, assignment/method branches,
 /// and else-branch guards for hash key assignment and ternary-in-else.
+///
+/// ## Investigation notes (2026-03-24)
+///
+/// Root causes of remaining FP (2):
+/// - Predicate call with block (`pred? { ... } ? true : nil`): in RuboCop AST, a call
+///   with a block is a `block` node (not `send`), so `cond.call_type?` returns false.
+///   In Prism, the block is part of the CallNode. Fix: skip when `call.block().is_some()`.
+/// - `unless` with condition in else branch: `check_unless` was comparing condition with
+///   else_body instead of unless_body. In RuboCop, `if_branch` for `unless` is the unless
+///   body (runs when condition is false), so `condition == if_branch` checks unless_body.
+///
+/// Root causes of remaining FN (13):
+/// - `ConstantPathWriteNode` (`Mod::CONST = ...`) was not recognized as an assignment node.
+///   RuboCop's `casgn` covers both `ConstantWriteNode` and `ConstantPathWriteNode`.
+/// - The `unless` body comparison was inverted (checking else_body instead of body),
+///   causing some valid `unless` cases to be missed.
 pub struct RedundantCondition;
 
 impl RedundantCondition {
@@ -410,6 +426,7 @@ impl Cop for RedundantCondition {
         &[
             CALL_NODE,
             CLASS_VARIABLE_WRITE_NODE,
+            CONSTANT_PATH_WRITE_NODE,
             CONSTANT_WRITE_NODE,
             ELSE_NODE,
             GLOBAL_VARIABLE_WRITE_NODE,
