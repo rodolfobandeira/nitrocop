@@ -180,6 +180,9 @@ jobs:
           ref: ${{ steps.pr.outputs.head_branch }}
           persist-credentials: false
 
+      - uses: astral-sh/setup-uv@v6
+        if: steps.pr.outputs.should_run == 'true'
+
       - name: Initialize runtime layout
         if: steps.pr.outputs.should_run == 'true'
         run: |
@@ -379,7 +382,6 @@ jobs:
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         id: prompt
         run: |
-          python3 -m pip install -q tiktoken
           TOKENS=$(python3 scripts/workflows/count_tokens.py "$FINAL_TASK_FILE")
           echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
           echo "=== Final prompt stats ==="

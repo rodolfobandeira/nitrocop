@@ -61,13 +61,7 @@ EASY_STEP_COMMANDS = {
     "Validate corpus manifest": "python3 bench/corpus/validate_manifest.py",
     "No vendor include macros": "bash scripts/workflows/check_no_vendor_include_macros.sh",
     "Gem builder tests": "ruby gem/test/gem_builder_test.rb",
-    "Python script tests": (
-        "pip install -q tiktoken\n"
-        "for f in tests/python/test_*.py; do\n"
-        "  echo \"=== $f ===\"\n"
-        "  python3 \"$f\"\n"
-        "done"
-    ),
+    "Python script tests": "uv run pytest tests/python/ -v",
     "Clippy": "cargo clippy --profile ci -- -D warnings",
     "Build": "cargo build --profile ci",
     "Build release binary": "cargo build --release",

@@ -45,11 +45,13 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: python3 scripts/workflows/lint_python_module_names.py
 
+      - name: Set up uv
+        if: matrix.os == 'ubuntu-24.04'
+        uses: astral-sh/setup-uv@v6
+
       - name: Python lint
         if: matrix.os == 'ubuntu-24.04'
-        run: |
-          python3 -m pip install -q ruff
-          python3 -m ruff check scripts tests/python bench/corpus
+        run: uv run ruff check scripts tests/python bench/corpus
 
       - name: Gem builder tests
         if: matrix.os == 'ubuntu-24.04'
@@ -57,9 +59,7 @@ jobs:
 
       - name: Python script tests
         if: matrix.os == 'ubuntu-24.04'
-        run: |
-          pip install -q tiktoken pytest
-          python3 -m pytest tests/python/ -v
+        run: uv run pytest tests/python/ -v
 
       - name: Clippy
         if: matrix.os == 'ubuntu-24.04'

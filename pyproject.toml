@@ -1,3 +1,13 @@
+[project]
+name = "nitrocop-scripts"
+version = "0.0.0"
+requires-python = ">=3.9"
+dependencies = [
+  "ruff",
+  "pytest",
+  "tiktoken",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 python_files = ["test_*.py"]

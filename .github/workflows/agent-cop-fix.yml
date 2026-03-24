@@ -86,6 +86,8 @@ jobs:
           key: agent-target-${{ hashFiles('Cargo.lock') }}
           restore-keys: agent-target-
 
+      - uses: astral-sh/setup-uv@v6
+
       - name: Initialize runtime layout
         run: |
           python3 scripts/workflows/agent_runtime.py agent-cop-fix \
@@ -174,7 +176,6 @@ jobs:
           echo "code_bugs=$CODE_BUGS" >> "$GITHUB_OUTPUT"
           echo "Code bugs: $CODE_BUGS, Config issues: $CONFIG_ISSUES"
 
-          python3 -m pip install -q tiktoken
           TOKENS=$(python3 scripts/workflows/count_tokens.py "$TASK_FILE")
           echo "tokens=$TOKENS" >> "$GITHUB_OUTPUT"
           echo "Tokens: $TOKENS"
