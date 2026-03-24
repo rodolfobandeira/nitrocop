@@ -14,6 +14,15 @@ use crate::parse::source::SourceFile;
 ///   InterpolatedXStringNode, and RegularExpressionNode/InterpolatedRegularExpressionNode
 ///   are all treated as literal? by RuboCop's Parser gem but were missing from
 ///   is_constant_portion(). Added all of these node types.
+///
+/// Corpus investigation round 2 (FP=3, FN=5):
+/// - FP: InterpolatedStringNode (dstr) is considered literal? in Parser gem but was
+///   missing from is_constant_portion(). When dstr appears on RHS (e.g. `0 != "...#{x}"`),
+///   both sides should be constant → no offense. Fixed by adding InterpolatedStringNode.
+/// - FP: RuboCop has an `interpolation?` check that skips offenses when LHS is a dstr
+///   or interpolated regexp, even when RHS is non-constant. Added is_interpolation() check.
+/// - FN: Hash literals with all-literal keys/values (e.g. `{"foo" => ["bar"]} == params`)
+///   were not recognized as constant portions. Added is_literal_hash().
 pub struct YodaCondition;
 
 /// RuboCop's `constant_portion?` checks `node.literal? || node.const_type?`.
@@ -41,7 +50,9 @@ fn is_constant_portion(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_interpolated_symbol_node().is_some()
         || node.as_regular_expression_node().is_some()
         || node.as_interpolated_regular_expression_node().is_some()
+        || node.as_interpolated_string_node().is_some()
         || is_literal_array(node)
+        || is_literal_hash(node)
 }
 
 /// Check if a node is an array where all elements are constant portions
@@ -52,6 +63,31 @@ fn is_literal_array(node: &ruby_prism::Node<'_>) -> bool {
     } else {
         false
     }
+}
+
+/// Check if a node is a hash where all keys and values are constant portions
+/// (matching RuboCop's recursive `literal?` check for hashes).
+fn is_literal_hash(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(hash) = node.as_hash_node() {
+        hash.elements().iter().all(|el| {
+            if let Some(assoc) = el.as_assoc_node() {
+                is_constant_portion(&assoc.key()) && is_constant_portion(&assoc.value())
+            } else {
+                // AssocSplatNode (**foo) is not constant
+                false
+            }
+        })
+    } else {
+        false
+    }
+}
+
+/// Check if a node is an interpolated string (dstr) or interpolated regexp,
+/// matching RuboCop's `interpolation?` method. When the LHS has interpolation,
+/// the Yoda condition check is skipped entirely.
+fn is_interpolation(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_interpolated_string_node().is_some()
+        || (node.as_interpolated_regular_expression_node().is_some())
 }
 
 impl Cop for YodaCondition {
@@ -122,9 +158,22 @@ impl Cop for YodaCondition {
         let require_yoda = enforced_style == "require_for_all_comparison_operators"
             || enforced_style == "require_for_equality_operators_only";
 
+        let lhs_constant = is_constant_portion(&receiver);
+        let rhs_constant = is_constant_portion(&arg_list[0]);
+
+        // Both constant or both non-constant: not a Yoda issue
+        if lhs_constant == rhs_constant {
+            return;
+        }
+
+        // RuboCop skips when LHS has interpolation (dstr or interpolated regexp)
+        if is_interpolation(&receiver) {
+            return;
+        }
+
         if require_yoda {
             // Require Yoda: flag when literal is on the RIGHT (non-Yoda)
-            if !is_constant_portion(&receiver) && is_constant_portion(&arg_list[0]) {
+            if !lhs_constant && rhs_constant {
                 let loc = call.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
@@ -136,7 +185,7 @@ impl Cop for YodaCondition {
             }
         } else {
             // Forbid Yoda: flag when literal is on the LEFT (Yoda)
-            if is_constant_portion(&receiver) && !is_constant_portion(&arg_list[0]) {
+            if lhs_constant && !rhs_constant {
                 let loc = call.location();
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(

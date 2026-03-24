@@ -95,7 +95,8 @@ impl Cop for MapCompactWithConditionalBlock {
                 }
             }
         } else if method_name == b"filter_map" {
-            // filter_map call — check if it has a conditional block
+            // filter_map call — check if it has a conditional block that can be
+            // replaced with select/reject
             if let Some(block) = call.block() {
                 if let Some(block_node) = block.as_block_node() {
                     if check_block_body(source, &block_node) {
@@ -105,7 +106,8 @@ impl Cop for MapCompactWithConditionalBlock {
                             source,
                             line,
                             column,
-                            "Use `filter_map` instead of `map { ... }.compact`.".to_string(),
+                            "Replace `filter_map { ... }` with `select` or `reject`."
+                                .to_string(),
                         ));
                     }
                 }
@@ -341,13 +343,30 @@ fn check_guard_clause(
     false
 }
 
-/// Extract the first block parameter name (e.g., `|x|` -> "x").
+/// Extract the single block parameter name (e.g., `|x|` -> "x").
+/// Returns `None` if the block has zero or multiple parameters, matching
+/// the vendor RuboCop node pattern `(args $(arg _))` which requires exactly
+/// one positional argument.
 fn get_block_param_name(block_node: &ruby_prism::BlockNode<'_>) -> Option<Vec<u8>> {
     let params = block_node.parameters()?;
     let block_params = params.as_block_parameters_node()?;
     let parameters = block_params.parameters()?;
     let requireds = parameters.requireds();
-    let first = requireds.iter().next()?;
+    let mut iter = requireds.iter();
+    let first = iter.next()?;
+    // Must have exactly one required parameter
+    if iter.next().is_some() {
+        return None;
+    }
+    // Also reject if there are optional, rest, keyword, or other param types
+    if parameters.optionals().iter().next().is_some()
+        || parameters.rest().is_some()
+        || parameters.keywords().iter().next().is_some()
+        || parameters.keyword_rest().is_some()
+        || parameters.block().is_some()
+    {
+        return None;
+    }
     let req_param = first.as_required_parameter_node()?;
     Some(req_param.name().as_slice().to_vec())
 }
