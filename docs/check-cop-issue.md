@@ -82,32 +82,17 @@ The difference is more subtle: when `cwd` is inside the repo (check-cop style), 
 
 ## Options to Fix
 
-### Option A: Run oracle from inside each repo (cd into DEST)
+### Option A: Run oracle from inside each repo (cd into DEST) — FAILED
 
-Change the oracle to `cd` into each repo before running both tools:
-
-```bash
-pushd "$DEST"
-env BUNDLE_GEMFILE=$WORKSPACE/bench/corpus/Gemfile \
-    BUNDLE_PATH=$WORKSPACE/bench/corpus/vendor/bundle \
-    GIT_CEILING_DIRECTORIES=$(dirname "$PWD") \
-$WORKSPACE/bin/nitrocop --preview --format json --no-cache \
-    --config "$REPO_CONFIG" . \
-    > "$WORKSPACE/results/nitrocop/${REPO_ID}.json" 2>"$WORKSPACE/results/nitrocop/${REPO_ID}.err" || rc=$?
-popd
-```
-
-This makes `cwd` inside the repo, matching check-cop.py. Both tools would skip gitignored files. The RuboCop invocation needs the same change.
-
-**Downside**: The `resolve_symlink_paths.py` and `extract_context.py` steps run after and reference `$DEST` — they should still work since the repo dir exists.
-
-**This is the recommended fix.** It needs CI testing first (see Debugging section below).
+Tried in commit 12f56f2a, reverted in 8c345a5b. Changing the oracle to `cd "$DEST"` and use `.` as the target dropped conformance from **98.9% to 0.0%** — RuboCop's config resolution completely broke when `cwd` changed. The oracle's invocation style (cwd=workspace root, repo as path argument) is load-bearing for RuboCop and cannot be changed.
 
 ### Option B: Make check-cop replicate the oracle's outside-repo behavior
 
 Clone repos to a temp directory outside the git tree (e.g., `/tmp/corpus/<id>/`) and run from a neutral parent. This matches the oracle's cwd-outside-repo behavior.
 
-**Downside**: Slower (copies repos), preserves the arguably-wrong behavior of processing gitignored files, requires disk space for copies.
+**This is now the recommended approach** since Option A failed catastrophically.
+
+The oracle's invocation style is load-bearing for RuboCop's config resolution. Instead of changing the oracle, make check-cop.py match it.
 
 ### Option C: Allow a per-cop threshold in CI cop-check
 
@@ -171,16 +156,10 @@ CI runners use the same Ubuntu 24.04 environment as the oracle and cop-check. **
 
 ## Next Steps
 
-1. **Create `debug/check-cop-discrepancy` branch** with the debug workflow step above. Push it and check the CI output to confirm the discrepancy reproduces on Linux CI (not just macOS).
+1. **Rerun the standard corpus oracle** to restore the known-good baseline (the Option A attempt corrupted it).
 
-2. **Test Option A on CI** in the same debug branch: change the oracle's nitrocop invocation to `cd "$DEST" && ... .` and compare the offense count. If it drops from 540 to ~502, Option A works.
+2. **Try Option B**: Make check-cop.py match the oracle by running from a neutral directory outside the git tree with the repo as a path argument. This avoids changing the oracle at all.
 
-3. **Apply the fix to `corpus-oracle.yml`** — both the nitrocop and RuboCop invocations need the same `cd` change so they continue to agree.
+3. If Option B doesn't work, **try Option D**: Add `--no-gitignore` to nitrocop for corpus runs so both tools consistently process all files regardless of `.gitignore`.
 
-4. **Rerun both standard and extended corpus oracles** to refresh all baselines.
-
-5. **Verify `check-cop.py --rerun` matches** the new baseline for Style/MixinUsage (should be 0 FP, 0 FN).
-
-6. **Merge PR #151** (Style/MixinUsage PreExecutionNode fix) once cop-check passes.
-
-7. **Re-dispatch Style/MixinUsage** if PR #151 was closed — the fix is correct and just needs the baseline to match.
+4. Once check-cop matches the oracle, **merge PR #151** (Style/MixinUsage) and **re-dispatch** remaining cops.
