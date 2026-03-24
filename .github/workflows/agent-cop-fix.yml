@@ -121,6 +121,29 @@ jobs:
           permission-metadata: read
           permission-pull-requests: read
 
+      # --- Wait for main to be healthy before expensive build/agent work ---
+      - name: Wait for healthy main
+        env:
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
+        run: |
+          MAX_WAIT=600  # 10 minutes
+          INTERVAL=30
+          ELAPSED=0
+          while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
+            CONCLUSION=$(gh run list --workflow=checks.yml --branch=main \
+              --repo "${{ github.repository }}" --limit 1 \
+              --json conclusion,status -q '.[0].conclusion // .[0].status // "unknown"')
+            if [ "$CONCLUSION" = "success" ]; then
+              echo "::notice::Main Checks is green — proceeding"
+              exit 0
+            fi
+            echo "Main Checks status: $CONCLUSION — waiting ${INTERVAL}s (${ELAPSED}s/${MAX_WAIT}s)"
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          echo "::error::Main Checks did not go green within ${MAX_WAIT}s (last: $CONCLUSION)"
+          exit 1
+
       # --- Build (before task generation for pre-diagnostic) ---
 
       # mold linker: cuts relink time from 30-60s to 2-5s for incremental builds

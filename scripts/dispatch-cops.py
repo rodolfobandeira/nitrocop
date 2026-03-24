@@ -1967,8 +1967,39 @@ def sorted_dispatch_candidates(issues: list[dict]) -> list[dict]:
     return sorted(issues, key=key)
 
 
+def _main_checks_healthy(repo: str) -> tuple[bool, str]:
+    """Check if the latest Checks run on main succeeded."""
+    try:
+        result = subprocess.run(
+            ["gh", "run", "list", "--workflow=checks.yml", "--branch=main",
+             "--repo", repo, "--limit", "1", "--json", "conclusion,status",
+             "-q", ".[0] // empty"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if not result.stdout.strip():
+            return True, "no runs found"
+        import json as _json
+        run = _json.loads(result.stdout.strip())
+        status = run.get("status", "")
+        conclusion = run.get("conclusion", "")
+        if status != "completed":
+            return False, f"latest Checks on main is still {status}"
+        if conclusion == "success":
+            return True, "passing"
+        return False, f"latest Checks on main concluded: {conclusion}"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return True, "could not check (proceeding anyway)"
+
+
 def cmd_dispatch_issues(args: argparse.Namespace) -> int:
     repo = args.repo
+
+    healthy, health_reason = _main_checks_healthy(repo)
+    if not healthy and not args.dry_run:
+        print(f"ERROR: {health_reason}. Fix main before dispatching.", file=sys.stderr)
+        print("Use --dry-run to see what would be dispatched without this gate.", file=sys.stderr)
+        return 1
+
     issues = list_tracker_issues(repo)
     dept_filter = args.department
     eligible = [
