@@ -8,31 +8,38 @@ use crate::parse::source::SourceFile;
 
 /// Style/MutableConstant: freeze mutable objects assigned to constants.
 ///
-/// ## Root cause analysis (corpus FP=23, FN=395)
+/// ## Root cause analysis (extended corpus FP=336, FN=119, 98.7% match)
 ///
-/// **FN root causes:**
+/// **FN root causes (resolved):**
 /// - Missing `CONST ||= value` handling (`ConstantOrWriteNode` / `ConstantPathOrWriteNode`)
 /// - `frozen_string_literal: true` incorrectly suppressed interpolated strings;
 ///   Ruby 3.0+ only freezes non-interpolated string literals with the magic comment
 /// - `EnforcedStyle: strict` not implemented — strict mode flags all non-frozen
 ///   non-immutable RHS values (including method calls like `Something.new`)
 /// - Missing `shareable_constant_value` magic comment handling (caused FPs)
+/// - Missing XStringNode (backtick literal) and InterpolatedXStringNode handling;
+///   these are mutable literals per RuboCop's MUTABLE_LITERALS = %i[str dstr xstr ...]
 ///
-/// **FP root causes:**
+/// **FP root causes (resolved):**
 /// - `shareable_constant_value: literal` / `experimental_everything` / `experimental_copy`
 ///   magic comments suppress offenses in Ruby 3.0+, but were not implemented
-/// - Some FPs from flagging constants in files with `shareable_constant_value` set
 pub struct MutableConstant;
 
 impl MutableConstant {
-    /// Check if a node is a mutable literal (array, hash, string).
+    /// Check if a node is a mutable literal (array, hash, string, xstring).
     /// In `literals` mode, only literal values are flagged.
+    /// Matches RuboCop's MUTABLE_LITERALS = %i[str dstr xstr array hash regexp irange erange]
+    /// (regexp/range are excluded via frozen_regexp_or_range_literals? for Ruby 3.0+).
     fn is_mutable_literal(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
         node.as_array_node().is_some()
             || node.as_hash_node().is_some()
             || node.as_keyword_hash_node().is_some()
             || node.as_string_node().is_some()
             || Self::is_interpolated_string(source, node)
+            // XStringNode = backtick literal (`command`), always mutable
+            || node.as_x_string_node().is_some()
+            // InterpolatedXStringNode = backtick with interpolation (`cmd #{x}`)
+            || node.as_interpolated_x_string_node().is_some()
     }
 
     /// Check if node is a non-interpolated string literal (StringNode only, no heredocs
@@ -252,6 +259,9 @@ impl MutableConstant {
     /// Check if the source file has `# frozen_string_literal: true` in the
     /// first few lines (before any code). This magic comment makes plain string
     /// literals frozen (but NOT interpolated strings in Ruby 3.0+).
+    ///
+    /// Supports both simple format (`# frozen_string_literal: true`) and
+    /// Emacs format (`# -*- frozen_string_literal: true -*-`).
     fn has_frozen_string_literal_true(source: &SourceFile) -> bool {
         let lines = source.lines();
         for (i, line) in lines.enumerate() {
@@ -268,8 +278,21 @@ impl MutableConstant {
             }
             if let Some(rest) = s.strip_prefix('#') {
                 let rest = rest.trim_start();
+                // Simple format: # frozen_string_literal: true
                 if let Some(value) = rest.strip_prefix("frozen_string_literal:") {
                     return value.trim() == "true";
+                }
+                // Emacs format: # -*- frozen_string_literal: true -*-
+                if rest.starts_with("-*-") && rest.ends_with("-*-") {
+                    // Extract token content between -*- markers
+                    let inner = &rest[3..rest.len() - 3].trim();
+                    // Split by ';' for multiple directives
+                    for directive in inner.split(';') {
+                        let directive = directive.trim();
+                        if let Some(value) = directive.strip_prefix("frozen_string_literal:") {
+                            return value.trim() == "true";
+                        }
+                    }
                 }
             }
         }
@@ -296,12 +319,27 @@ impl MutableConstant {
             let s = s.trim();
             if let Some(rest) = s.strip_prefix('#') {
                 let rest = rest.trim_start();
+                // Simple format: # shareable_constant_value: literal
                 if let Some(value) = rest.strip_prefix("shareable_constant_value:") {
                     let value = value.trim();
                     result = matches!(
                         value,
                         "literal" | "experimental_everything" | "experimental_copy"
                     );
+                }
+                // Emacs format: # -*- shareable_constant_value: literal -*-
+                if rest.starts_with("-*-") && rest.ends_with("-*-") {
+                    let inner = &rest[3..rest.len() - 3].trim();
+                    for directive in inner.split(';') {
+                        let directive = directive.trim();
+                        if let Some(value) = directive.strip_prefix("shareable_constant_value:") {
+                            let value = value.trim();
+                            result = matches!(
+                                value,
+                                "literal" | "experimental_everything" | "experimental_copy"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -436,4 +474,64 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(MutableConstant, "cops/style/mutable_constant");
 
+    /// XStringNode (backtick) should be flagged even with frozen_string_literal: true.
+    /// The magic comment only freezes str/dstr, not xstr.
+    #[test]
+    fn xstring_flagged_with_frozen_string_literal() {
+        let cop = MutableConstant;
+        let source = b"# frozen_string_literal: true\n\nCONST = `uname`\n";
+        let diags =
+            crate::testutil::run_cop_full_internal(&cop, source, CopConfig::default(), "test.rb");
+        assert_eq!(
+            diags.len(),
+            1,
+            "xstring should be flagged even with frozen_string_literal: true, got {:?}",
+            diags
+        );
+    }
+
+    /// Plain strings should NOT be flagged with frozen_string_literal: true.
+    #[test]
+    fn plain_string_not_flagged_with_frozen_string_literal() {
+        let cop = MutableConstant;
+        let source = b"# frozen_string_literal: true\n\nCONST = \"hello\"\n";
+        let diags =
+            crate::testutil::run_cop_full_internal(&cop, source, CopConfig::default(), "test.rb");
+        assert_eq!(
+            diags.len(),
+            0,
+            "plain string should not be flagged with frozen_string_literal: true, got {:?}",
+            diags
+        );
+    }
+
+    /// Emacs-style frozen_string_literal comment should also suppress plain strings.
+    #[test]
+    fn emacs_style_frozen_string_literal() {
+        let cop = MutableConstant;
+        let source = b"# -*- frozen_string_literal: true -*-\n\nCONST = \"hello\"\n";
+        let diags =
+            crate::testutil::run_cop_full_internal(&cop, source, CopConfig::default(), "test.rb");
+        assert_eq!(
+            diags.len(),
+            0,
+            "Emacs-style frozen_string_literal should suppress plain string offense, got {:?}",
+            diags
+        );
+    }
+
+    /// Emacs-style frozen_string_literal combined with encoding.
+    #[test]
+    fn emacs_style_combined_magic_comment() {
+        let cop = MutableConstant;
+        let source = b"# -*- coding: utf-8; frozen_string_literal: true -*-\n\nCONST = \"hello\"\n";
+        let diags =
+            crate::testutil::run_cop_full_internal(&cop, source, CopConfig::default(), "test.rb");
+        assert_eq!(
+            diags.len(),
+            0,
+            "Emacs-style combined magic comment should suppress plain string offense, got {:?}",
+            diags
+        );
+    }
 }

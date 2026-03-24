@@ -31,3 +31,6 @@ CONST14 = (1..99)
 CONST15 = Something.new
 CONST16 = "foo" + "bar"
 CONST17 = FOO + BAR
+
+# Backtick (xstring) with .freeze is not flagged
+CONST18 = `uname`.freeze

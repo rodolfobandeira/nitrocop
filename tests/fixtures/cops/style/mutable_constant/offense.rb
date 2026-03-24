@@ -41,3 +41,10 @@ RUBY
 # Module::CONST ||= value
 Mod::CONST12 ||= [1]
                  ^^^ Style/MutableConstant: Freeze mutable objects assigned to constants.
+
+# Backtick (xstring) literals are mutable
+CONST13 = `uname`
+          ^^^^^^^ Style/MutableConstant: Freeze mutable objects assigned to constants.
+
+CONST14 = `echo hello`
+          ^^^^^^^^^^^^ Style/MutableConstant: Freeze mutable objects assigned to constants.
