@@ -53,6 +53,14 @@ use crate::parse::source::SourceFile;
 /// ActionOrder cop only checks classes, not modules. Controller concern modules
 /// define actions mixed into multiple controllers — ordering within the concern
 /// is irrelevant. Fix: removed MODULE_NODE from interested_node_types.
+///
+/// Root cause of FN=1 (fourth, extended corpus): `collect_public_defs` didn't recurse
+/// into `DefNode` bodies. In globocom/GloboDNS `domains_controller.rb`, a missing `end`
+/// in `def create` causes Prism's error recovery to nest `def destroy` and
+/// `def update_domain_owner` inside `def create`. The cop only saw `create` and `update`
+/// at the class level (which are in order), missing `destroy` entirely. RuboCop's
+/// `def_node_search` is recursive and finds `def` nodes at any depth, including nested
+/// defs. Fix: after processing a `DefNode`, recurse into its body to find nested defs.
 pub struct ActionOrder;
 
 const STANDARD_ORDER: &[&[u8]] = &[
@@ -141,6 +149,17 @@ fn collect_public_defs(
                 def_node.name().as_slice().to_vec(),
                 def_node.def_keyword_loc().start_offset(),
             ));
+        }
+        // Recurse into def body to find nested defs. This handles syntax-error cases
+        // where Prism's error recovery nests def nodes inside other def nodes (e.g.,
+        // a missing `end` causes `def destroy` to be parsed inside `def create`).
+        // RuboCop's `def_node_search` is recursive and finds defs at any depth.
+        if let Some(body) = def_node.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for child in stmts.body().iter() {
+                    collect_public_defs(&child, is_public, out);
+                }
+            }
         }
         return;
     }

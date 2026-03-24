@@ -58,3 +58,26 @@ class Resource
   end
 end
 
+# Nested def due to syntax error (missing `end` in create causes destroy to
+# nest inside create during Prism error recovery). RuboCop's recursive
+# def_node_search still finds the nested destroy and update actions.
+class SyntaxErrorController < ApplicationController
+  def create
+    if valid
+      @domain.save
+      if condition
+        @domain.records.each do |record|
+          record.save
+        end
+    end
+
+    respond_with(@domain)
+  end
+
+  def destroy
+  end
+
+  def update
+  ^^^ Rails/ActionOrder: Action `update` should appear before `destroy` in the controller.
+  end
+end
