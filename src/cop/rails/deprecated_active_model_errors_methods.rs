@@ -56,6 +56,14 @@ use crate::parse::source::SourceFile;
 /// are NOT deprecated hash manipulation — `to_xml` with options is a legitimate
 /// serialization method. Fixed by adding `call.arguments().is_none()` check
 /// in Pattern 4.
+///
+/// ## Investigation findings (2026-03-24)
+///
+/// **FP root cause (1 FP):** `is_errors_bracket_access` did not verify that
+/// the `[]` call had arguments. `record.errors[]` (empty brackets, no key)
+/// was matched, but RuboCop's node pattern `(call (call ...) :[] _)` requires
+/// exactly one argument. Fixed by adding `call.arguments().is_some()` check
+/// in `is_errors_bracket_access`.
 pub struct DeprecatedActiveModelErrorsMethods;
 
 const MSG: &str = "Avoid manipulating ActiveModel errors as hash directly.";
@@ -243,9 +251,12 @@ fn is_errors_call(node: &ruby_prism::Node<'_>, model_file: bool) -> bool {
 }
 
 /// Check if a node is `errors[:field]`, `errors.messages[:field]`, or `errors.details[:field]`.
+///
+/// RuboCop's node pattern `(call (call ...) :[] _)` requires exactly one argument to `[]`.
+/// Empty bracket access `errors[]` (no arguments) should NOT match.
 fn is_errors_bracket_access(node: &ruby_prism::Node<'_>, model_file: bool) -> bool {
     if let Some(call) = node.as_call_node() {
-        if call.name().as_slice() == b"[]" {
+        if call.name().as_slice() == b"[]" && call.arguments().is_some() {
             if let Some(recv) = call.receiver() {
                 return is_errors_receiver(&recv, model_file);
             }

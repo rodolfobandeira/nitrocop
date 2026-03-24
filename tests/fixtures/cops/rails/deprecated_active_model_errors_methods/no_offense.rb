@@ -22,6 +22,11 @@ contract.call(attrs).errors(full: true).to_h.each_value { |v| v }
 # (RuboCop's errors_deprecated? pattern only matches argument-less calls)
 user.errors.to_xml(:skip_instruct => true)
 
+# Empty bracket access errors[] (no key argument) should NOT be flagged
+# RuboCop's node pattern requires an argument to []
+# nitrocop-filename: app/models/setting.rb
+record.errors[] << 'Invalid date'
+
 # Bare `errors` (no explicit receiver) should NOT be flagged outside model files
 errors.keys
 errors.values
