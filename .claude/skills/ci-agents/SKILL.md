@@ -1,10 +1,10 @@
 ---
-name: dispatch-cops
-description: Dispatch cop-fix tasks to Codex agents (via GHA) for parallel corpus conformance fixes
+name: ci-agents
+description: Manage CI agents — sync tracker issues, dispatch cop-fix tasks, review PRs, retry failures
 allowed-tools: Bash(*), Read, Grep, Glob, AskUserQuestion
 ---
 
-# Dispatch Cops — Remote Agent Orchestration
+# CI Agents — Remote Agent Orchestration
 
 Dispatch cop-fix tasks to AI agents (running in GitHub Actions) to fix
 corpus conformance gaps in parallel. The current system uses one GitHub issue
@@ -37,7 +37,7 @@ When invoked without explicit arguments, use `AskUserQuestion` to gather:
 2. **Max concurrency** — For dispatch phase, ask: "How many concurrent agent runs? (default: 5)"
 
 Pass the answers through as `--department` / `--max-active` to the CLI and workflows.
-If the user provides these as skill arguments (e.g., `/dispatch-cops sync Rails`), skip the prompts.
+If the user provides these as skill arguments (e.g., `/ci-agents sync Rails`), skip the prompts.
 
 ## Phases
 
@@ -46,7 +46,7 @@ If the user provides these as skill arguments (e.g., `/dispatch-cops sync Rails`
 Inspect the current dispatchable set and sync the tracker issues:
 
 ```bash
-python3 scripts/dispatch-cops.py rank
+python3 scripts/ci-agents.py rank
 gh workflow run cop-issue-sync.yml
 ```
 
@@ -63,13 +63,13 @@ cops with at least 1 real code bug.
 For the lighter Codex lane, prefer cops with 3-10 total FP+FN and mostly code bugs:
 
 ```bash
-python3 scripts/dispatch-cops.py rank --min-bugs 2 --max-total 10
+python3 scripts/ci-agents.py rank --min-bugs 2 --max-total 10
 ```
 
 For harder cops or overview by tier:
 
 ```bash
-python3 scripts/dispatch-cops.py tiers --tier 1   # simple FP+FN count view
+python3 scripts/ci-agents.py tiers --tier 1   # simple FP+FN count view
 python3 scripts/investigate-cop.py Department/CopName --context  # deep dive
 ```
 
@@ -169,19 +169,19 @@ gh workflow run corpus-oracle.yml
 Wait ~90 min, then check results:
 
 ```bash
-python3 scripts/dispatch-cops.py tiers
+python3 scripts/ci-agents.py tiers
 ```
 
 ## Arguments
 
-- `/dispatch-cops` — start from Phase 1 (prompts for department interactively)
-- `/dispatch-cops sync` — jump to Phase 1 (prompts for department)
-- `/dispatch-cops sync Rails` — jump to Phase 1, scoped to Rails department
-- `/dispatch-cops dispatch` — jump to Phase 2 (prompts for department and max concurrency)
-- `/dispatch-cops dispatch Rails 3` — jump to Phase 2, Rails only, max 3 concurrent
-- `/dispatch-cops retry` — jump to Phase 4 (retry failures)
-- `/dispatch-cops status` — show current PR status and merge candidates
-- `/dispatch-cops validate` — jump to Phase 5 (trigger corpus oracle)
+- `/ci-agents` — start from Phase 1 (prompts for department interactively)
+- `/ci-agents sync` — jump to Phase 1 (prompts for department)
+- `/ci-agents sync Rails` — jump to Phase 1, scoped to Rails department
+- `/ci-agents dispatch` — jump to Phase 2 (prompts for department and max concurrency)
+- `/ci-agents dispatch Rails 3` — jump to Phase 2, Rails only, max 3 concurrent
+- `/ci-agents retry` — jump to Phase 4 (retry failures)
+- `/ci-agents status` — show current PR status and merge candidates
+- `/ci-agents validate` — jump to Phase 5 (trigger corpus oracle)
 
 ## Important Notes
 

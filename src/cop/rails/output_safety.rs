@@ -27,8 +27,7 @@ use ruby_prism::Visit;
 /// **FP root cause**: `contains_i18n_call` used manual recursion that explicitly handled
 /// CallNode, ParenthesesNode, and InterpolatedStringNode — but MISSED KeywordHashNode,
 /// HashNode, BlockNode bodies, and other container types. When an i18n call appeared
-/// inside a hash argument (e.g., `raw(cell(..., context: { placeholder: t(...) }))`) or
-/// inside a block body (e.g., `"#{render(...) { I18n.t(...) }}".html_safe`), the manual
+/// inside a hash argument (e.g., `t(...)` in `context: {placeholder: t(...)}`), the manual
 /// recursion didn't descend into those nodes, so the i18n suppression was missed.
 ///
 /// Fix: Replaced manual recursion with a `Visit`-based subtree walker (`I18nSearcher`)
@@ -47,6 +46,19 @@ use ruby_prism::Visit;
 /// `is_i18n_call` matched `ConstantPathNode` where `cp.name() == b"I18n"` without checking
 /// `cp.parent().is_none()`. RuboCop's pattern `(const {nil? cbase} :I18n)` only matches bare
 /// `I18n` or `::I18n`, not `Formtastic::I18n`. Fix: added `cp.parent().is_none()` check.
+///
+/// ## Investigation (2026-03-24): FP=1
+///
+/// **FP root cause** (adjacent single-quoted string concatenation with `.html_safe`):
+/// In CRuby's Parser gem, adjacent single-quoted strings like `'a' 'b'` merge into a single
+/// `str` node at parse time, so `non_interpolated_string?` returns true and the offense is
+/// suppressed. In Prism, adjacent string literals produce an `InterpolatedStringNode` with
+/// multiple `StringNode` parts and no `opening_loc`. The previous check only exempted
+/// `InterpolatedStringNode` when `opening_loc().is_some()` (heredocs), missing this case.
+/// Fix: also exempt `InterpolatedStringNode` with no `opening_loc` where all parts are
+/// `StringNode` with single-quote delimiters (`'`), matching Parser gem's merge behavior.
+/// Double-quoted adjacent strings (`"a" "b"`) stay as `dstr` in Parser gem, so they are
+/// NOT exempted.
 pub struct OutputSafety;
 
 const I18N_METHODS: &[&[u8]] = &[b"t", b"translate", b"l", b"localize"];
@@ -54,24 +66,36 @@ const I18N_METHODS: &[&[u8]] = &[b"t", b"translate", b"l", b"localize"];
 /// Check if the receiver is a non-interpolated string literal.
 ///
 /// Matches plain `StringNode` and heredoc `InterpolatedStringNode` (all-literal parts
-/// with an `opening_loc`). Does NOT match adjacent string concatenation like `"""text"""`
-/// which Prism represents as `InterpolatedStringNode` with `StringNode` parts but no
-/// `opening_loc`. In the parser gem, multiline `"""text"""` produces a `dstr` with nested
-/// `dstr` children, so RuboCop's `non_interpolated_string?` returns false and the offense
-/// is reported. Checking `opening_loc().is_some()` distinguishes heredocs (exempt) from
-/// adjacent string concatenation (not exempt).
+/// with an `opening_loc`). Also matches adjacent single-quoted string concatenation
+/// (`'a' 'b'`) which Prism represents as `InterpolatedStringNode` with all `StringNode`
+/// parts and no `opening_loc` — but only when all parts use single-quote delimiters.
+/// In the Parser gem, adjacent single-quoted strings merge into a single `str` node,
+/// so `non_interpolated_string?` returns true. Double-quoted adjacent strings produce
+/// `dstr` in Parser gem, so they are NOT exempt.
 fn is_non_interpolated_string(receiver: &ruby_prism::Node<'_>) -> bool {
     if receiver.as_string_node().is_some() {
         return true;
     }
-    // Heredoc InterpolatedStringNode: has opening_loc (e.g., <<~TEXT) and all string parts.
-    // Adjacent string concatenation ("""..."""): no opening_loc — should NOT be exempt.
     if let Some(dstr) = receiver.as_interpolated_string_node() {
-        return dstr.opening_loc().is_some()
-            && dstr
-                .parts()
-                .iter()
-                .all(|part| part.as_string_node().is_some());
+        let all_string_parts = dstr
+            .parts()
+            .iter()
+            .all(|part| part.as_string_node().is_some());
+        if !all_string_parts {
+            return false;
+        }
+        // Heredoc: has opening_loc (e.g., <<~TEXT) — exempt
+        if dstr.opening_loc().is_some() {
+            return true;
+        }
+        // Adjacent string concatenation: no opening_loc.
+        // Only exempt if ALL parts use single-quote delimiters.
+        // In Parser gem, 'a' 'b' → str (exempt), "a" "b" → dstr (not exempt).
+        return dstr.parts().iter().all(|part| {
+            part.as_string_node()
+                .and_then(|s| s.opening_loc())
+                .is_some_and(|loc| loc.as_slice() == b"'")
+        });
     }
     false
 }

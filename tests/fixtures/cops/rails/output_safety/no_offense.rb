@@ -42,3 +42,9 @@ some_helper(options: { label: I18n.t("label") }).html_safe
 # RuboCop's Parser gem includes block-pass in arguments, making arguments.one? false → not flagged
 raw(*cmd, &block)
 raw(*command, &block)
+
+# Adjacent single-quoted string concatenation with html_safe
+# In Parser gem, 'a' 'b' merges into a single str node (non-interpolated)
+# In Prism, this is InterpolatedStringNode with StringNode parts and no opening_loc
+'text ' \
+'more text'.html_safe
