@@ -241,6 +241,140 @@ def write_candidate(lines: list[str], tmp_path: str) -> str:
     return text
 
 
+def find_ruby_spans(lines: list[str]) -> list[tuple[int, int, str]]:
+    """Find top-level structural spans in Ruby source using indent tracking.
+
+    Returns a list of (start_line_idx, end_line_idx_exclusive, kind) tuples.
+    Kinds: 'def', 'block' (do..end at class level), 'class_method'.
+
+    Uses leading whitespace to match `def`/`end` pairs at the same indent.
+    Only finds spans at the SECOND indent level (inside a class/module body),
+    not top-level or deeply nested ones.
+    """
+    spans = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].lstrip()
+        indent = len(lines[i]) - len(stripped)
+
+        # Match `def ` at any indent level
+        if stripped.startswith("def "):
+            end_idx = _find_matching_end(lines, i, indent)
+            if end_idx is not None:
+                spans.append((i, end_idx + 1, "def"))
+                i = end_idx + 1
+                continue
+
+        # Match class-level DSL blocks: `before_action do`, `validate do`, etc.
+        # These are method calls followed by `do` that have a matching `end`.
+        if stripped.endswith(" do") or stripped.endswith(" do |"):
+            # Check for `do |...| ` pattern too
+            if " do" in stripped and not stripped.startswith(("class ", "module ", "if ", "unless ",
+                                                              "while ", "until ", "for ", "begin",
+                                                              "case ")):
+                end_idx = _find_matching_end(lines, i, indent)
+                if end_idx is not None:
+                    spans.append((i, end_idx + 1, "block"))
+                    i = end_idx + 1
+                    continue
+
+        i += 1
+
+    return spans
+
+
+def _find_matching_end(lines: list[str], start: int, target_indent: int) -> int | None:
+    """Find the matching `end` for a block starting at `start` with `target_indent`.
+
+    Tracks nesting depth: increments on block-opening keywords (def, class,
+    module, if, unless, while, until, for, begin, case, do) and decrements on
+    every `end`. Returns the line index of the `end` that brings depth to 0.
+
+    Only considers keywords at the START of a line (after whitespace) to avoid
+    matching modifier forms like `return if x` or `x unless y`.
+    """
+    # Keywords that open a new block scope (need matching `end`)
+    OPENERS = ("def ", "class ", "module ", "if ", "unless ", "while ", "until ",
+               "for ", "begin", "case ")
+    depth = 1
+    i = start + 1
+    while i < len(lines):
+        stripped = lines[i].lstrip()
+
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        # Count openers — only when keyword starts the line (not modifier form)
+        for opener in OPENERS:
+            if stripped.startswith(opener):
+                depth += 1
+                break
+        else:
+            # `do` at end of line also opens a block
+            if stripped.endswith(" do") or " do |" in stripped:
+                depth += 1
+
+        # Every `end` decrements depth (at any indent level)
+        if stripped == "end":
+            depth -= 1
+            if depth == 0:
+                return i
+
+        i += 1
+
+    return None
+
+
+def reduce_structure(
+    lines: list[str],
+    cop: str,
+    tmp_path: str,
+    mismatch_type: str,
+    rubocop_runner: RubocopRunner,
+    skip_rubocop: bool,
+    verbose: bool,
+) -> list[str]:
+    """Phase 0: remove whole methods and blocks (structure-aware).
+
+    Tries removing each structural span (method, block) one at a time,
+    largest first. Much more effective than line-level ddmin for files
+    with many methods where only one is relevant to the mismatch.
+    """
+    changed = True
+    while changed:
+        changed = False
+        spans = find_ruby_spans(lines)
+        # Sort largest first for maximum reduction per step
+        spans.sort(key=lambda s: s[1] - s[0], reverse=True)
+
+        for start, end, kind in spans:
+            candidate = lines[:start] + lines[end:]
+            if not candidate:
+                continue
+
+            if verbose:
+                first_line = lines[start].strip()[:60]
+                print(f"  Phase 0: trying remove {kind} at lines {start+1}-{end} "
+                      f"({end - start} lines, \"{first_line}...\")",
+                      file=sys.stderr)
+
+            candidate_text = write_candidate(candidate, tmp_path)
+            if is_interesting(
+                cop, tmp_path, mismatch_type, rubocop_runner,
+                skip_rubocop, verbose, candidate_text,
+            ):
+                if verbose:
+                    print(f"  Phase 0: accepted! {len(lines)} → {len(candidate)} lines",
+                          file=sys.stderr)
+                lines = candidate
+                changed = True
+                break  # Re-scan since line numbers shifted
+
+    return lines
+
+
 def reduce_blocks(
     lines: list[str],
     cop: str,
@@ -444,6 +578,13 @@ def main():
     timed_out = False
 
     try:
+        # Phase 0: structure-aware reduction (remove whole methods/blocks)
+        print("Phase 0: structure-aware reduction...", file=sys.stderr)
+        lines = reduce_structure(
+            lines, args.cop, tmp_path, args.type, rubocop_runner, skip_rubocop, args.verbose,
+        )
+        print(f"Phase 0 done: {original_count} → {len(lines)} lines", file=sys.stderr)
+
         # Phase 1: block deletion
         print("Phase 1: block deletion...", file=sys.stderr)
         lines = reduce_blocks(
