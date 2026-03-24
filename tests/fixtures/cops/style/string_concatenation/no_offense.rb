@@ -38,3 +38,20 @@ name = 'First' +
 # Percent literal concatenation — in Prism these are StringNode but in Parser they're dstr
 config + %[some value]
 header + %{some value}
+
+# Multi-line string literal — in Parser these are dstr (not str_type?)
+# so RuboCop does not flag them. In Prism they are StringNode.
+html = '
+    <html>
+        <head>
+            <base href="' + base_url + '" />
+        </head>
+    </html>'
+
+x = 'line1
+line2' + y + 'line3
+line4'
+
+# Single-line string with escape sequence \n IS flagged (str_type? in Parser)
+# but multi-line source is NOT. This tests the boundary.
+# "hello\nworld" + name — would be flagged (single source line)
