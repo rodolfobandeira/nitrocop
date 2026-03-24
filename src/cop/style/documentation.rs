@@ -754,7 +754,7 @@ mod tests {
         let diags = run_cop_full(&Documentation, source);
         assert!(
             diags.is_empty(),
-            "Class with only class << self { prepend } should not need docs"
+            "Class with only class << self with prepend should not need docs"
         );
     }
 
@@ -766,7 +766,7 @@ mod tests {
         let diags = run_cop_full(&Documentation, source);
         assert!(
             diags.is_empty(),
-            "Module with only class << self { include } should not need docs"
+            "Module with only class << self with include should not need docs"
         );
     }
 
