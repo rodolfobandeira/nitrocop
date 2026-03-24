@@ -58,11 +58,8 @@ jobs:
       - name: Python script tests
         if: matrix.os == 'ubuntu-24.04'
         run: |
-          pip install -q tiktoken
-          find tests/python -name 'test_*.py' | sort | while read -r f; do
-            echo "=== $f ==="
-            python3 "$f"
-          done
+          pip install -q tiktoken pytest
+          python3 -m pytest tests/python/ -v
 
       - name: Clippy
         if: matrix.os == 'ubuntu-24.04'
