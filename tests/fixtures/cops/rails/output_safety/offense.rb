@@ -11,3 +11,8 @@ safe_join([i18n_text.safe_concat(i18n_text)])
 # Formtastic::I18n is NOT the standard I18n — should still flag
 raw(Formtastic::I18n.t('key'))
 ^^^ Rails/OutputSafety: Tagging a string as html safe may be a security risk.
+# Adjacent string concatenation ("""...""") with multiline content — not a simple string literal
+"""Importante:<br/>
+    - Line one.<br/>
+    - Line two.""".html_safe
+                   ^^^^^^^^^ Rails/OutputSafety: Tagging a string as html safe may be a security risk.

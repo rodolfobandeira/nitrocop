@@ -52,16 +52,26 @@ pub struct OutputSafety;
 const I18N_METHODS: &[&[u8]] = &[b"t", b"translate", b"l", b"localize"];
 
 /// Check if the receiver is a non-interpolated string literal.
+///
+/// Matches plain `StringNode` and heredoc `InterpolatedStringNode` (all-literal parts
+/// with an `opening_loc`). Does NOT match adjacent string concatenation like `"""text"""`
+/// which Prism represents as `InterpolatedStringNode` with `StringNode` parts but no
+/// `opening_loc`. In the parser gem, multiline `"""text"""` produces a `dstr` with nested
+/// `dstr` children, so RuboCop's `non_interpolated_string?` returns false and the offense
+/// is reported. Checking `opening_loc().is_some()` distinguishes heredocs (exempt) from
+/// adjacent string concatenation (not exempt).
 fn is_non_interpolated_string(receiver: &ruby_prism::Node<'_>) -> bool {
     if receiver.as_string_node().is_some() {
         return true;
     }
-    // Interpolated string where all parts are string literals (adjacent string concatenation)
+    // Heredoc InterpolatedStringNode: has opening_loc (e.g., <<~TEXT) and all string parts.
+    // Adjacent string concatenation ("""..."""): no opening_loc — should NOT be exempt.
     if let Some(dstr) = receiver.as_interpolated_string_node() {
-        return dstr
-            .parts()
-            .iter()
-            .all(|part| part.as_string_node().is_some());
+        return dstr.opening_loc().is_some()
+            && dstr
+                .parts()
+                .iter()
+                .all(|part| part.as_string_node().is_some());
     }
     false
 }
