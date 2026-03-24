@@ -16,11 +16,12 @@ use crate::parse::source::SourceFile;
 /// and meta character escapes in `is_literal_regex()`, treating them as literal
 /// character sequences.
 ///
-/// ## Extended corpus investigation (2026-03-23)
+/// ## Extended corpus investigation (2026-03-24)
 ///
-/// Extended corpus reported FP=4, FN=0. All 4 FPs from vendored gem files in
-/// repos with out-of-tree scan paths. Fixed by scan_roots support in
-/// CopFilterSet for AllCops.Exclude path matching (commit 1f2f67c).
+/// Extended corpus reported FP=4, FN=0. All 4 FPs from files containing
+/// invalid multibyte regex escapes that crash RuboCop's parser, causing all
+/// other cops to be skipped. Not a cop logic issue. Fixed by adding the
+/// affected files to `repo_excludes.json`.
 pub struct StringInclude;
 
 /// Check if a single byte is in RuboCop's literal character allowlist.

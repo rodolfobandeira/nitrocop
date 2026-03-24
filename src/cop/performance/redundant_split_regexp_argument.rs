@@ -13,11 +13,12 @@ use crate::parse::source::SourceFile;
 ///   `%r/pattern/` should be checked. Only `%r{pattern}` and other non-slash delimiters
 ///   are correctly skipped (braces, brackets, parens not in LITERAL_REGEX).
 ///
-/// ## Extended corpus investigation (2026-03-23)
+/// ## Extended corpus investigation (2026-03-24)
 ///
-/// Extended corpus reported FP=9, FN=0. All 9 FPs from vendored gem files
-/// with out-of-tree scan paths. Fixed by scan_roots support in CopFilterSet
-/// for AllCops.Exclude path matching (commit 1f2f67c).
+/// Extended corpus reported FP=9, FN=0. All 9 FPs from files containing
+/// invalid multibyte regex escapes that crash RuboCop's parser, causing all
+/// other cops to be skipped. Not a cop logic issue. Fixed by adding the
+/// affected files to `repo_excludes.json`.
 pub struct RedundantSplitRegexpArgument;
 
 /// Check if regex content is a simple literal that could be replaced by a string.

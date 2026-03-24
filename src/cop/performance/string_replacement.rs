@@ -44,8 +44,10 @@ use crate::parse::source::SourceFile;
 /// in `is_deterministic_single_char_regex`.
 ///
 /// FP=1: `gsub( / /, "_" )` in `databasically__lowdown` from vendored path
-/// (`vendor/rails/...`). Fixed by scan_roots support in CopFilterSet for
-/// AllCops.Exclude path matching (commit 1f2f67c).
+/// (`vendor/rails/actionmailer/lib/action_mailer/quoting.rb`). The file
+/// contains invalid multibyte regex escapes (`/[\177-\377]/`) that crash
+/// RuboCop's parser, causing all other cops to be skipped. Not a cop logic
+/// issue. Fixed by adding the file to `repo_excludes.json`.
 pub struct StringReplacement;
 
 impl Cop for StringReplacement {

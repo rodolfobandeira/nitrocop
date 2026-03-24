@@ -30,16 +30,18 @@ use ruby_prism::Visit;
 /// are included. Examples: `$` =~ MGR0` after `w =~ /eed$/`, and
 /// `Regexp.last_match[0] =~ /re/` after `str =~ /pattern/`.
 ///
-/// ## Extended corpus investigation (2026-03-23)
+/// ## Extended corpus investigation (2026-03-24)
 ///
-/// Extended corpus reported FP=38, FN=0. All 38 FPs from vendored gem files in
-/// repos cjstewart88__Tubalr (heroku/ruby/1.9.1/gems/rdoc-*),
-/// liaoziyang__stackneveroverflow (vendor/bundle/ruby/2.3.0/gems/rdoc-*),
-/// infochimps-labs__wukong, and pitluga__supply_drop. Root cause: AllCops.Exclude
-/// patterns like `vendor/**/*` failed to match when the scanned directory was
-/// outside the config's base_dir (corpus oracle scenario). Fixed by adding
-/// scan_roots support to CopFilterSet for out-of-tree path relativization.
-/// The TargetRubyVersion check (minimum 2.4) remains as an additional guard.
+/// Extended corpus reported FP=38, FN=0. All 38 FPs from files containing
+/// invalid multibyte regex escapes (`/[\x80-\xFF]/`, `/\xc3[\xa0-\xa5]/`)
+/// that crash RuboCop's parser (Lint/Syntax error), causing all other cops
+/// to be skipped for those files. Prism parses them successfully, so nitrocop
+/// reports offenses that RuboCop never evaluates. Not a cop logic issue.
+/// Fixed by adding the affected files to `repo_excludes.json` so the corpus
+/// oracle excludes them from both tools' comparison.
+/// Repos: cjstewart88__Tubalr (rdoc-3.8/3.9.4 ruby_lex.rb),
+/// liaoziyang__stackneveroverflow (rdoc-4.3.0 ruby_lex.rb),
+/// infochimps-labs__wukong (asciize.rb), pitluga__supply_drop (zaml.rb).
 pub struct RegexpMatch;
 
 impl Cop for RegexpMatch {

@@ -27,7 +27,7 @@ use crate::parse::source::SourceFile;
 /// extensionless Ruby script. Nitrocop detects extensionless Ruby files via
 /// shebang detection (`has_ruby_shebang`). The baseline config also excludes
 /// `bin/**/*` via AllCops.Exclude, which should drop this file from both tools'
-/// comparison after the scan_roots path-matching fix (commit 1f2f67c).
+/// comparison once the bin/**/* exclude pattern is properly applied.
 /// If the FN persists, the file may lack a Ruby shebang or RuboCop may
 /// discover it through a different mechanism (e.g., git ls-files).
 pub struct ChainArrayAllocation;
