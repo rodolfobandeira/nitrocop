@@ -43,6 +43,16 @@ use crate::parse::source::SourceFile;
 /// category-lookup path in `classify_statement`, so e.g. `singleton_class.prepend`
 /// is classified as `module_inclusion` (matching RuboCop). This prevents the
 /// ordering tracker from missing intermediate classifications.
+///
+/// ## Investigation findings (2026-03-24)
+///
+/// **Root cause of 27 FPs:** `find_inline_visibility` was matching multi-argument
+/// visibility calls like `public(:method1, :method2)`. RuboCop's
+/// `visibility_inline_on_method_name?` node pattern `(send nil? VISIBILITY_SCOPES
+/// (sym %method_name))` only matches single-argument calls. With multiple args,
+/// the methods keep their section visibility (e.g., `private`), so no ordering
+/// violation occurs. Fixed by requiring exactly one argument in
+/// `find_inline_visibility`.
 pub struct ClassStructure;
 
 /// Default expected order (matches vendor/rubocop/config/default.yml).
@@ -309,7 +319,14 @@ fn classify_statement(
 
 /// Check right siblings for an inline visibility declaration matching the given method name.
 /// e.g., `private :foo` or `protected :bar` after `def foo` / `def bar`.
-/// Returns the visibility string ("private" or "protected") if found, None otherwise.
+/// Returns the visibility string ("private", "protected", or "public") if found, None otherwise.
+///
+/// Only matches single-argument visibility calls: `private :foo`, NOT `private :foo, :bar`.
+/// This mirrors RuboCop's `visibility_inline_on_method_name?` node pattern:
+///   `(send nil? VISIBILITY_SCOPES (sym %method_name))`
+/// which requires exactly one symbol argument. Multi-argument calls like
+/// `public(:method1, :method2)` are NOT recognized as inline visibility overrides
+/// by RuboCop and should not be matched here.
 fn find_inline_visibility<'a>(
     def_name: &[u8],
     all_stmts: &[ruby_prism::Node<'a>],
@@ -326,12 +343,18 @@ fn find_inline_visibility<'a>(
                     b"public" => "public",
                     _ => continue,
                 };
-                // Check if any argument is a symbol matching the def name
+                // Only match single-argument calls (matching RuboCop's pattern)
                 if let Some(args) = call.arguments() {
-                    for arg in args.arguments().iter() {
-                        if let Some(sym) = arg.as_symbol_node() {
-                            if sym.unescaped() == def_name {
-                                return Some(vis);
+                    let mut args_iter = args.arguments().iter();
+                    let first = args_iter.next();
+                    let second = args_iter.next();
+                    // Must have exactly one argument that is a symbol matching the def name
+                    if second.is_none() {
+                        if let Some(arg) = first {
+                            if let Some(sym) = arg.as_symbol_node() {
+                                if sym.unescaped() == def_name {
+                                    return Some(vis);
+                                }
                             }
                         }
                     }

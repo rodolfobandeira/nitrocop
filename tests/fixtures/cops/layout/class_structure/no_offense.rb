@@ -171,3 +171,25 @@ class InlineProtectedOrder
   end
   protected :scm_entries
 end
+
+# Multi-argument `public(:method1, :method2)` at end of class after a `private`
+# section should not trigger ordering violations. RuboCop's
+# `visibility_inline_on_method_name?` pattern only matches single-argument calls
+# like `private :foo`, NOT multi-argument `public(:foo, :bar)`. With multiple
+# args, the methods keep their section visibility (private), so no ordering
+# violation occurs since they stay classified as `private_methods`.
+class PublicAtEndOfClass
+  def initialize
+  end
+
+  private
+
+  def internal_method
+  end
+
+  def messages
+    @messages
+  end
+
+  public(:initialize, :messages)
+end
