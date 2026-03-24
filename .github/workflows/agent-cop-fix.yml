@@ -19,6 +19,7 @@ on:
           - auto
           - codex
           - claude
+          - claude-oauth
           - minimax
         default: auto
       strength:
@@ -268,6 +269,7 @@ jobs:
           MINIMAX_API_KEY: ${{ steps.selected_backend.outputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ (steps.selected_backend.outputs.backend == 'claude-normal' || steps.selected_backend.outputs.backend == 'claude-hard') && secrets.ANTHROPIC_API_KEY || '' }}
           CODEX_AUTH_JSON: ${{ (steps.selected_backend.outputs.backend == 'codex-normal' || steps.selected_backend.outputs.backend == 'codex-hard') && secrets.CODEX_AUTH_JSON || '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ (steps.selected_backend.outputs.backend == 'claude-oauth-normal' || steps.selected_backend.outputs.backend == 'claude-oauth-hard') && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
         run: ${{ steps.backend.outputs.setup_cmd }}
 
       - name: Mask read-only GitHub token
@@ -280,7 +282,7 @@ jobs:
             emit-masks
 
       - name: Run agent
-        if: steps.task.outputs.code_bugs != '0'
+        if: steps.task.outputs.code_bugs != '0' && steps.backend.outputs.action != 'true'
         timeout-minutes: 45
         env:
           # Static env vars from resolve_backend (secrets injected separately)
@@ -306,6 +308,33 @@ jobs:
 
           kill $WATCHER_PID 2>/dev/null || true
 
+      - name: Run agent (action)
+        if: steps.task.outputs.code_bugs != '0' && steps.backend.outputs.action == 'true'
+        id: action_agent
+        timeout-minutes: 45
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: ${{ steps.prepare.outputs.prompt_content }}
+          claude_args: "--dangerously-skip-permissions"
+          github_token: ${{ steps.actions-read-token.outputs.token }}
+        env:
+          ANTHROPIC_MODEL: ${{ steps.backend.outputs.env_ANTHROPIC_MODEL }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          CARGO_INCREMENTAL: "1"
+          GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
+
+      - name: Adapt action output
+        if: steps.task.outputs.code_bugs != '0' && steps.backend.outputs.action == 'true'
+        run: |
+          EXEC_FILE="${{ steps.action_agent.outputs.execution_file }}"
+          if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+            python3 scripts/workflows/adapt_action_output.py \
+              "$EXEC_FILE" "$AGENT_RESULT_FILE"
+          else
+            echo '{"result":"no execution output"}' > "$AGENT_RESULT_FILE"
+          fi
+
       # --- Post-agent ---
 
       - name: Snapshot and summarize
@@ -329,6 +358,7 @@ jobs:
           MINIMAX_API_KEY: ${{ steps.selected_backend.outputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ (steps.selected_backend.outputs.backend == 'claude-normal' || steps.selected_backend.outputs.backend == 'claude-hard') && secrets.ANTHROPIC_API_KEY || '' }}
           CODEX_AUTH_JSON: ${{ (steps.selected_backend.outputs.backend == 'codex-normal' || steps.selected_backend.outputs.backend == 'codex-hard') && secrets.CODEX_AUTH_JSON || '' }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ (steps.selected_backend.outputs.backend == 'claude-oauth-normal' || steps.selected_backend.outputs.backend == 'claude-oauth-hard') && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
         run: |
           python3 scripts/workflows/guard_backend_secrets.py \
@@ -336,6 +366,7 @@ jobs:
             --from-env MINIMAX_API_KEY \
             --from-env ANTHROPIC_API_KEY \
             --from-env CODEX_AUTH_JSON \
+            --from-env CLAUDE_CODE_OAUTH_TOKEN \
             --from-env GH_TOKEN_FOR_ACTIONS_READ \
             scan-manifest \
             "$AGENT_ARTIFACT_MANIFEST_FILE"

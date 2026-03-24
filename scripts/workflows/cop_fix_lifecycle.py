@@ -592,8 +592,6 @@ def cmd_prepare_branch(args: list[str]) -> int:
     ])
 
     # Append helper scripts section
-    _run_ok([sys.executable, str(SCRIPTS_DIR / "render_helper_scripts_section.py")],
-            cwd=str(REPO_ROOT))
     helper_result = _run_ok(
         [sys.executable, str(SCRIPTS_DIR / "render_helper_scripts_section.py")],
         cwd=str(REPO_ROOT),
@@ -607,6 +605,10 @@ def cmd_prepare_branch(args: list[str]) -> int:
         sys.executable, str(SCRIPTS_DIR / "git_activity_snapshot.py"),
         "capture", "--repo-root", str(REPO_ROOT), "--output", str(git_before_file),
     ])
+
+    # Output prompt content for action-based backends (needs to be a step output
+    # since `uses:` steps can't read files directly)
+    _output_multiline("prompt_content", final_task_file.read_text())
 
     return 0
 
