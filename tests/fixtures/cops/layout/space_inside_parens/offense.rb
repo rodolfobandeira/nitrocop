@@ -65,3 +65,10 @@ case value
                 ^ Layout/SpaceInsideParens: Space inside parentheses detected.
     px
 end
+
+( x, y ) = [1, 2]
+ ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+      ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
+(receipt, ) = foo
+         ^ Layout/SpaceInsideParens: Space inside parentheses detected.

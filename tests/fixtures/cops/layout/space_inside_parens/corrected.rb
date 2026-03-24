@@ -39,3 +39,7 @@ case value
   in SuperPoint(x: 0.. => px)
     px
 end
+
+(x, y) = [1, 2]
+
+(receipt,) = foo

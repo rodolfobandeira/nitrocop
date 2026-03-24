@@ -1,7 +1,7 @@
 use crate::cop::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
-    HASH_PATTERN_NODE, MULTI_TARGET_NODE, PARENTHESES_NODE, PINNED_EXPRESSION_NODE, SUPER_NODE,
-    YIELD_NODE,
+    HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
+    PINNED_EXPRESSION_NODE, SUPER_NODE, YIELD_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -55,8 +55,9 @@ use crate::parse::source::SourceFile;
 /// `\` in `next_same_line_item` as no code on the same line.
 ///
 /// FN=5: Parenthesized multi-write targets like `( x, y ) = foo`. Prism uses
-/// `MultiWriteNode` (not `MultiTargetNode`) for the outer parens. The cop
-/// doesn't handle `MultiWriteNode` yet — needs adding as an interested node.
+/// `MultiWriteNode` (not `MultiTargetNode`) for the outer parens. Fixed by
+/// adding `MULTI_WRITE_NODE` to interested nodes and extracting lparen/rparen
+/// from `MultiWriteNode` in `paren_offsets()`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -80,6 +81,7 @@ impl Cop for SpaceInsideParens {
             DEFINED_NODE,
             HASH_PATTERN_NODE,
             MULTI_TARGET_NODE,
+            MULTI_WRITE_NODE,
             PARENTHESES_NODE,
             PINNED_EXPRESSION_NODE,
             SUPER_NODE,
@@ -238,6 +240,12 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
     if let Some(multi_target) = node.as_multi_target_node() {
         let open = multi_target.lparen_loc()?;
         let close = multi_target.rparen_loc()?;
+        return Some((open.start_offset(), open.end_offset(), close.start_offset()));
+    }
+
+    if let Some(multi_write) = node.as_multi_write_node() {
+        let open = multi_write.lparen_loc()?;
+        let close = multi_write.rparen_loc()?;
         return Some((open.start_offset(), open.end_offset(), close.start_offset()));
     }
 
