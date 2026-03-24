@@ -57,6 +57,8 @@ fn is_include_only(body: &Option<ruby_prism::Node<'_>>) -> bool {
 }
 
 /// Recursively check if a node (or group of statements) is entirely include/extend/prepend calls.
+/// RuboCop uses `body.respond_to?(:children) && body.children.all? { ... }` which recurses
+/// into any node with children, including `class << self` (singleton class) nodes.
 fn is_include_statement_only(node: &ruby_prism::Node<'_>) -> bool {
     if is_include_extend_prepend(node) {
         return true;
@@ -66,6 +68,15 @@ fn is_include_statement_only(node: &ruby_prism::Node<'_>) -> bool {
             .body()
             .iter()
             .all(|child| is_include_statement_only(&child));
+    }
+    // Recurse into singleton class nodes (`class << self; prepend Foo; end`)
+    // RuboCop's check walks into any node with children, so `class << self`
+    // containing only include/extend/prepend is treated as include-only.
+    if let Some(sclass) = node.as_singleton_class_node() {
+        if let Some(ref body) = sclass.body() {
+            return is_include_statement_only(&body);
+        }
+        return true; // empty singleton class
     }
     false
 }
@@ -90,11 +101,30 @@ fn is_constant_declaration(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Check if a node is an include/extend/prepend call.
+/// Check if a node is an include/extend/prepend call with a constant argument.
+/// RuboCop's pattern is `(send nil? {:include :extend :prepend} const)` — the argument
+/// must be a constant reference (e.g., `include Bar`), not a method call
+/// (e.g., `include Dry::Types()` or `include Foo.bar`).
 fn is_include_extend_prepend(node: &ruby_prism::Node<'_>) -> bool {
     if let Some(call) = node.as_call_node() {
         let name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
-        return matches!(name, "include" | "extend" | "prepend");
+        if !matches!(name, "include" | "extend" | "prepend") {
+            return false;
+        }
+        // Must have no explicit receiver (implicit self / nil receiver)
+        if call.receiver().is_some() {
+            return false;
+        }
+        // Must have exactly one argument that is a constant reference
+        if let Some(args) = call.arguments() {
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() == 1 {
+                let arg = &arg_list[0];
+                // Accept ConstantReadNode (e.g., `Bar`) or ConstantPathNode (e.g., `Foo::Bar`)
+                return arg.as_constant_read_node().is_some()
+                    || arg.as_constant_path_node().is_some();
+            }
+        }
     }
     false
 }
