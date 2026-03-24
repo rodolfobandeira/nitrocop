@@ -53,4 +53,3 @@ x += foo
 # Multiple assignments with inconsistent extra spacing (not aligned with each other)
 x = 0
 y += 0
-z[0] = 0

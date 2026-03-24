@@ -387,7 +387,7 @@ fn check_text_scanner_extra_space(
         }
     }
     // AllowForAlignment: skip if aligned with operator on adjacent line
-    if is_aligned_standalone(source, op_start, op_bytes, Some(code_map)) {
+    if is_aligned_standalone(source, op_start, op_bytes, Some(code_map), false) {
         return;
     }
     // Skip if trailing space extends to a comment on the same line
@@ -507,11 +507,17 @@ fn char_col_to_bytes(line: &[u8], char_col: usize) -> Option<usize> {
 ///
 /// When `code_map` is provided, alignment candidates on adjacent lines are
 /// verified to be actual code (not inside strings or comments).
+/// Check alignment of operator for extra-space detection.
+///
+/// `check_word_boundary`: when true, enables the word/space boundary check
+/// (RuboCop's `aligned_words`). This should be true only for trailing space
+/// checks, not leading space checks, to avoid false alignment.
 fn is_aligned_standalone(
     source: &SourceFile,
     start: usize,
     op_bytes: &[u8],
     code_map: Option<&CodeMap>,
+    check_word_boundary: bool,
 ) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
@@ -537,6 +543,7 @@ fn is_aligned_standalone(
         op_bytes,
         None,
         code_map,
+        check_word_boundary,
     ) {
         return true;
     }
@@ -554,6 +561,7 @@ fn is_aligned_standalone(
         op_bytes,
         Some(my_indent),
         code_map,
+        check_word_boundary,
     ) {
         return true;
     }
@@ -584,6 +592,7 @@ fn check_alignment_standalone(
     op_bytes: &[u8],
     indent_filter: Option<usize>,
     code_map: Option<&CodeMap>,
+    check_word_boundary: bool,
 ) -> bool {
     for up in [true, false] {
         let mut check_idx = if up {
@@ -635,7 +644,9 @@ fn check_alignment_standalone(
                             }
                         }
                         // Check 2: word/space boundary at same column (aligned_words)
-                        if byte_col > 0
+                        // Only used for trailing space alignment (RuboCop's aligned_with_something?)
+                        if check_word_boundary
+                            && byte_col > 0
                             && byte_col < line_bytes.len()
                             && (line_bytes[byte_col - 1] == b' '
                                 || line_bytes[byte_col - 1] == b'\t')
@@ -742,6 +753,8 @@ enum SubsequentStatus {
 }
 
 /// Search for an assignment at the same column in one direction.
+/// Uses RuboCop-like blank-line break: stops when a blank line is encountered
+/// while we're at the relevant indentation level.
 fn search_assignment_alignment(
     source: &SourceFile,
     lines: &[&[u8]],
@@ -760,6 +773,7 @@ fn search_assignment_alignment(
     } else {
         line_idx + 1
     };
+    let mut at_relevant_indent = true;
     loop {
         if check_idx >= lines.len() {
             break;
@@ -772,6 +786,11 @@ fn search_assignment_alignment(
 
         // Break on non-blank line with less indentation
         if !is_blank && !is_comment && indent < my_indent {
+            break;
+        }
+        // Break on blank line while at relevant indentation level
+        // (mirrors RuboCop's relevant_assignment_lines)
+        if at_relevant_indent && is_blank {
             break;
         }
 
@@ -800,6 +819,11 @@ fn search_assignment_alignment(
             ) {
                 return true;
             }
+        }
+
+        // Update at_relevant_indent for non-blank lines
+        if !is_blank {
+            at_relevant_indent = indent == my_indent;
         }
 
         if up {
@@ -1025,7 +1049,7 @@ impl OperatorChecker<'_> {
     /// Delegates to the standalone alignment checker which supports
     /// cross-operator alignment (e.g., `||=` aligned with `=`).
     fn is_aligned_with_adjacent(&self, start: usize, op_bytes: &[u8]) -> bool {
-        is_aligned_standalone(self.source, start, op_bytes, Some(self.code_map))
+        is_aligned_standalone(self.source, start, op_bytes, Some(self.code_map), false)
     }
 
     /// Check operator spacing for a "should have space" operator.

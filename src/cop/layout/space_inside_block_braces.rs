@@ -1,18 +1,3 @@
-/// Layout/SpaceInsideBlockBraces checks that block braces have or don't have
-/// surrounding space inside them based on configuration.
-///
-/// ## Investigation notes
-///
-/// FN root causes identified:
-/// 1. Multiline blocks were completely skipped, but RuboCop only skips multiline
-///    *empty* blocks. For multiline blocks with content, RuboCop still checks the
-///    left brace for `{|x|` (SpaceBeforeBlockParameters) violations.
-/// 2. Empty braces with multiple spaces (`{   }`) were not detected — only exactly
-///    one space was checked. RuboCop flags any whitespace-only content inside braces.
-/// 3. When SpaceBeforeBlockParameters=true (default) and `{|x|` is used, the cop
-///    should flag "Space between { and | missing." but was instead falling through
-///    to the generic "Space missing inside {." check, which has a different message
-///    and location.
 use crate::cop::node_type::{BLOCK_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;

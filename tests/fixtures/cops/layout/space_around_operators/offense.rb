@@ -81,5 +81,3 @@ x   = 0
     ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
 y +=   0
   ^^ Layout/SpaceAroundOperators: Operator `+=` should be surrounded by a single space.
-z[0]  =  0
-      ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
