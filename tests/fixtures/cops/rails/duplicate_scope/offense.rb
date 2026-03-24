@@ -26,3 +26,12 @@ class Item < ApplicationRecord
   scope :default_scope, lambda { all }
   ^^^^^ Rails/DuplicateScope: Multiple scopes share this same expression.
 end
+
+class ArticleService
+  scope :filter_all
+  ^^^^^ Rails/DuplicateScope: Multiple scopes share this same expression.
+  scope :filter_unpublished
+  ^^^^^ Rails/DuplicateScope: Multiple scopes share this same expression.
+  scope :filter_published
+  ^^^^^ Rails/DuplicateScope: Multiple scopes share this same expression.
+end

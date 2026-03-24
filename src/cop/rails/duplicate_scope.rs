@@ -26,6 +26,18 @@ use crate::parse::source::SourceFile;
 /// normalization, claiming RuboCop treats `-> {}` and `lambda {}` as different.
 /// This is wrong — Parser gem normalizes BOTH to `(lambda ...)` nodes, so
 /// RuboCop treats them as duplicates. Fix: restore the normalization.
+///
+/// ## Fix (2026-03-24): block extensions and bodyless scopes
+///
+/// **FP fix:** Scopes with block extensions (`scope :name, -> { all } do...end`)
+/// were grouped with plain lambda scopes sharing the same body. The block changes
+/// behavior, so these are skipped from duplicate grouping when `call.block().is_some()`.
+///
+/// **FN fix:** Bodyless scopes (`scope :name` with no lambda/proc body) were skipped
+/// because `arg_list.len() < 2` returned `None`. Now they use a sentinel key
+/// `__bodyless__` so all bodyless scopes in a class are grouped as duplicates,
+/// matching RuboCop behavior. The `call.block().is_some()` check in the caller
+/// ensures `scope :name do...end` (block-only scopes) are NOT treated as bodyless.
 pub struct DuplicateScope;
 
 impl Cop for DuplicateScope {
@@ -66,6 +78,13 @@ impl Cop for DuplicateScope {
                 continue;
             }
 
+            // Scopes with block extensions (`scope :name, -> { } do ... end`)
+            // behave differently even if the lambda body matches another scope.
+            // Skip them from duplicate grouping entirely.
+            if call.block().is_some() {
+                continue;
+            }
+
             let body_key = match extract_scope_body_source(call) {
                 Some(k) => k,
                 None => continue,
@@ -101,10 +120,21 @@ impl Cop for DuplicateScope {
 /// parameter source and combine them into a canonical form.  For everything
 /// else we fall back to the raw source of the arguments after the scope name.
 fn extract_scope_body_source<'a>(call: &ruby_prism::CallNode<'a>) -> Option<Vec<u8>> {
-    let args = call.arguments()?;
+    let args = match call.arguments() {
+        Some(a) => a,
+        None => {
+            // Bodyless scope with no arguments at all (e.g. `scope :name` via
+            // send without parens — but name is still in arguments for DSL calls).
+            // Treat as bodyless.
+            return Some(b"__bodyless__".to_vec());
+        }
+    };
     let arg_list: Vec<_> = args.arguments().iter().collect();
     if arg_list.len() < 2 {
-        return None;
+        // Only the scope name, no body expression. Since we already skipped
+        // block scopes (`scope :name do...end`) in the caller, this is a
+        // truly bodyless scope like `scope :filter_all`.
+        return Some(b"__bodyless__".to_vec());
     }
 
     // If there is exactly one body argument (the lambda/proc expression),
