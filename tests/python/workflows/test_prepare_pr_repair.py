@@ -73,10 +73,23 @@ def test_macos_only_failure_is_skipped():
     assert result["cop_check_failure"] is False
 
 
-def test_python_workflow_failure_uses_python_scope():
+def test_python_only_failure_skips_as_infra():
+    """Python-only failures are unrelated to cop changes and should skip repair."""
     run = {
         "jobs": [
             make_job("python", ["Python script tests"]),
+        ],
+    }
+    result = prepare_pr_repair.classify_run(run)
+    assert result["route"] == "skip"
+    assert "infra" in result["reason"].lower()
+
+
+def test_python_plus_rust_failure_uses_python_scope():
+    """When Python AND Rust steps fail, route as easy with python scope."""
+    run = {
+        "jobs": [
+            make_job("python-and-rust", ["Python script tests", "Test"]),
         ],
     }
     result = prepare_pr_repair.classify_run(run)
@@ -190,7 +203,8 @@ if __name__ == "__main__":
     test_hard_cop_check_routes_to_codex()
     test_mixed_failures_escalate_to_hard()
     test_macos_only_failure_is_skipped()
-    test_python_workflow_failure_uses_python_scope()
+    test_python_only_failure_skips_as_infra()
+    test_python_plus_rust_failure_uses_python_scope()
     test_prompt_includes_route_and_failed_packet()
     test_normalize_log_strips_actions_prefix_and_cleanup_noise()
     test_prefetch_corpus_context_uses_runtime_env_paths()

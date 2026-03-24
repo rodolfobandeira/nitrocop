@@ -46,6 +46,16 @@ PYTHON_WORKFLOW_STEPS = {
     "Python script tests",
 }
 
+# Steps that a cop-fix bot (which only changes src/cop/*.rs and test fixtures)
+# could never have caused to fail. If ALL failed steps are in this set or
+# match COP_FIX_UNRELATED_RE, the failure is an infra issue — skip repair.
+COP_FIX_UNRELATED_STEPS = {
+    "Validate corpus manifest",
+    "No vendor include macros",
+    "Gem builder tests",
+}
+COP_FIX_UNRELATED_RE = re.compile(r"^Python\b", re.IGNORECASE)
+
 EASY_STEP_COMMANDS = {
     "Format": "cargo fmt --check",
     "Validate corpus manifest": "python3 bench/corpus/validate_manifest.py",
@@ -228,6 +238,37 @@ def classify_run(run: dict) -> dict:
             easy_jobs.append(job)
         else:
             skip_jobs.append(job)
+
+    # Check if ALL failures are in steps unrelated to cop changes.
+    # If so, this is an infra issue the bot can't fix — skip repair.
+    all_failed_step_names = {
+        step_name
+        for job in jobs
+        for step_name in job.get("failed_step_names", [])
+    }
+    def _is_unrelated(step: str) -> bool:
+        return step in COP_FIX_UNRELATED_STEPS or step in SKIPPABLE_STEP_NAMES or bool(COP_FIX_UNRELATED_RE.match(step))
+
+    unrelated_failures = {s for s in all_failed_step_names if _is_unrelated(s)}
+    non_skippable_failures = all_failed_step_names - unrelated_failures
+    if all_failed_step_names and not non_skippable_failures:
+        route = "skip"
+        backend = ""
+        infra_names = sorted(all_failed_step_names - SKIPPABLE_STEP_NAMES)
+        reasons = [f"All failures are in infra steps unrelated to cop changes: "
+                    f"{', '.join(infra_names)}"]
+        return {
+            "route": route,
+            "backend": backend,
+            "guard_profile": "",
+            "cop_check_failure": False,
+            "jobs": jobs,
+            "hard_jobs": [],
+            "easy_jobs": [],
+            "skip_jobs": jobs,
+            "verification_commands": [],
+            "reason": "; ".join(reasons),
+        }
 
     if hard_jobs:
         route = "hard"
