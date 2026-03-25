@@ -978,6 +978,8 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 **Current state:** {corpus['matches']:,} matches, {corpus['fp']} false positives, {corpus['fn']} false negatives.
 **Focus on:** {focus} ({"nitrocop flags code RuboCop does not" if corpus["fp"] > corpus["fn"] else "RuboCop flags code nitrocop misses" if corpus["fn"] > corpus["fp"] else "both directions"}).
 
+**⚠ {corpus['matches']:,} existing matches must not regress.** Validate with `check_cop.py` before committing.
+
 ### Workflow
 1. Read the **Pre-diagnostic Results** and **Corpus FP/FN Examples** sections below first
 2. **Verify with RuboCop first** (for FP fixes): before writing any code, confirm RuboCop's
@@ -993,8 +995,13 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 4. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
 5. Fix `src/cop/{dept_snake}/{snake}.rs`
 6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
-7. Add a `///` doc comment on the cop struct documenting what you found and fixed
-8. Commit only your cop's files
+7. **Validate against corpus** (REQUIRED before committing):
+   ```bash
+   python3 scripts/check_cop.py {cop} --rerun --quick --clone
+   ```
+   If this reports FP or FN regression, your fix is too broad — narrow it down.
+8. Add a `///` doc comment on the cop struct documenting what you found and fixed
+9. Commit only your cop's files
 
 ### Fixture Format
 Mark offenses with `^` markers on the line AFTER the offending source line.
@@ -1061,6 +1068,7 @@ condition that matches the SPECIFIC differentiating context.
 ### Rules
 - Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
 - Run `cargo test --lib -- cop::{dept_snake}::{snake}` to verify your fix (do NOT run the full test suite)
+- Run `python3 scripts/check_cop.py {cop} --rerun --quick --clone` before committing to catch regressions
 - Do NOT touch unrelated files
 - Do NOT use `git stash`
 """)
