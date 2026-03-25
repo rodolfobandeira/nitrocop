@@ -212,7 +212,7 @@ def render_start_here(
 ) -> list[str]:
     lines = [
         "Start here:",
-        f"- Re-run after edits: `python3 scripts/check_cop.py {cop} --verbose --rerun --quick --clone`",
+        f"- Re-run after edits: `python3 scripts/check_cop.py {cop} --verbose --rerun --clone`",
     ]
     if standard_corpus is not None:
         lines.append(
@@ -221,7 +221,7 @@ def render_start_here(
     if batch_mode and top_repos:
         lines.extend(
             [
-                f"- Batch sanity check if counts look suspicious: `python3 scripts/check_cop.py {cop} --verbose --rerun --quick --clone --no-batch`",
+                f"- Batch sanity check if counts look suspicious: `python3 scripts/check_cop.py {cop} --verbose --rerun --clone --no-batch`",
                 "- This local packet used batch `--corpus-check`; compare 1-2 top repos in per-repo mode before inventing a full manual sweep.",
             ]
         )
@@ -348,7 +348,6 @@ def main() -> int:
                 cop,
                 "--verbose",
                 "--rerun",
-                "--quick",
                 "--clone",
             ]
             result = run_capture(cmd, repo_root)

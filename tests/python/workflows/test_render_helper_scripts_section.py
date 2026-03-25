@@ -29,7 +29,7 @@ def test_renders_only_present_helper_scripts():
         assert "`scripts/check_cop.py`" in section
         assert "`scripts/dispatch_cops.py`" in section
         assert "scripts/corpus_smoke_test.py" not in section
-        assert "python3 scripts/check_cop.py Department/CopName --verbose --rerun --quick --clone" in section
+        assert "python3 scripts/check_cop.py Department/CopName --verbose --rerun --clone" in section
         assert "python3 scripts/dispatch_cops.py changed --base origin/main --head HEAD" in section
 
 

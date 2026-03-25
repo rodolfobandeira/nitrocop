@@ -82,7 +82,7 @@ HARD_STEP_COMMANDS = {
         "  echo \"==============================\"\n"
         "  echo \"Checking: $cop (re-running against corpus)\"\n"
         "  echo \"==============================\"\n"
-        "  if ! python3 scripts/check_cop.py \"$cop\" --verbose --rerun --quick --clone; then\n"
+        "  if ! python3 scripts/check_cop.py \"$cop\" --verbose --rerun --clone; then\n"
         "    echo \"FAIL: $cop regression detected\"\n"
         "    failed=$((failed + 1))\n"
         "  fi\n"
@@ -460,7 +460,7 @@ def build_prompt(
                 f"python3 scripts/investigate_cop.py Department/CopName --input {corpus_path} --context"
             )
             lines.append(
-                f"python3 scripts/check_cop.py Department/CopName --input {corpus_path} --verbose --rerun --quick --clone"
+                f"python3 scripts/check_cop.py Department/CopName --input {corpus_path} --verbose --rerun --clone"
             )
         lines.extend([
             "```",

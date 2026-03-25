@@ -119,7 +119,7 @@ Use `check_cop.py` for aggregate regression checks after a fix:
 
 ```bash
 python3 scripts/check_cop.py Department/CopName
-python3 scripts/check_cop.py Department/CopName --verbose --rerun --quick
+python3 scripts/check_cop.py Department/CopName --verbose --rerun
 python3 scripts/verify_cop_locations.py Department/CopName
 ```
 

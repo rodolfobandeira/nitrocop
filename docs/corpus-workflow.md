@@ -22,7 +22,7 @@ Use `check_cop.py` for aggregate corpus validation after a fix:
 python3 scripts/check_cop.py Department/CopName
 python3 scripts/check_cop.py Department/CopName --verbose
 python3 scripts/check_cop.py Department/CopName --verbose --rerun
-python3 scripts/check_cop.py Department/CopName --verbose --rerun --quick
+python3 scripts/check_cop.py Department/CopName --verbose --rerun --all-repos  # full scan, local only
 python3 scripts/verify_cop_locations.py Department/CopName
 ```
 

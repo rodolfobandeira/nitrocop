@@ -18,8 +18,9 @@ changed cop needs re-execution. Use --rerun to force a fresh run.
 Usage:
     python3 scripts/check_cop.py Lint/Void              # quick aggregate count check
     python3 scripts/check_cop.py Lint/Void --verbose     # per-repo count breakdown
-    python3 scripts/check_cop.py Lint/Void --verbose --rerun --quick  # fast iteration
-    python3 scripts/check_cop.py Lint/Void --threshold 5 # allow up to 5 excess
+    python3 scripts/check_cop.py Lint/Void --verbose --rerun  # re-execute (auto-filters to relevant repos)
+    python3 scripts/check_cop.py Lint/Void --rerun --clone --sample 15  # CI gate: clone + sample
+    python3 scripts/check_cop.py Lint/Void --rerun --all-repos  # full scan (local only, slow)
 """
 
 import argparse
@@ -480,9 +481,9 @@ def main():
     parser.add_argument("--rerun", action="store_true",
                         help="Force re-execution of nitrocop (ignore local cache)")
     parser.add_argument("--quick", action="store_true",
-                        help="Only run repos with baseline activity (faster, may miss new FPs on zero-baseline repos)")
+                        help="Only run repos with baseline activity. Auto-enabled by --rerun.")
     parser.add_argument("--clone", action="store_true",
-                        help="Auto-clone needed corpus repos from manifest (for CI use with --rerun --quick)")
+                        help="Auto-clone needed corpus repos from manifest into a temp dir.")
     parser.add_argument("--sample", type=int, default=None,
                         help="Cap to N repos (prioritizes diverging + highest-offense repos). "
                              "Useful for fast pre-merge gates on high-match cops.")
@@ -498,6 +499,13 @@ def main():
     # --rerun implies --quick unless --all-repos is explicitly set.
     if args.rerun and not args.all_repos:
         args.quick = True
+
+    if args.all_repos and os.environ.get("CI"):
+        print("ERROR: --all-repos is disabled in CI (too slow). "
+              "Use --rerun which auto-filters to relevant repos, "
+              "or use --shard-index/--total-shards for parallel CI.",
+              file=sys.stderr)
+        sys.exit(1)
 
     # Load corpus results
     if args.input:

@@ -9,7 +9,7 @@ HELPERS = [
     (
         "scripts/check_cop.py",
         "aggregate corpus regression check for one cop",
-        "python3 scripts/check_cop.py Department/CopName --verbose --rerun --quick --clone",
+        "python3 scripts/check_cop.py Department/CopName --verbose --rerun --clone",
     ),
     (
         "scripts/dispatch_cops.py",
