@@ -7,3 +7,4 @@
 %W(#@dir/README #@dir/index.js)
 %W(#@@class_var/path)
 %W(#$global_var/path)
+%W(it's a can't won't)

@@ -9,6 +9,9 @@ use crate::parse::source::SourceFile;
 ///   Fixed by also detecting `#@` (ivar/cvar) and `#$` (global) interpolation.
 /// - FN=1: in rufo repo, `%W()` (empty array, 4 bytes) was skipped by the
 ///   `src_bytes.len() > 4` guard. Fixed by treating short arrays as no-interpolation.
+/// - FP=1: in ankusa repo, `%W(... ain't ...)` contains a single quote. RuboCop's
+///   `double_quotes_required?` treats strings containing `'` as requiring double
+///   quotes, so it skips the offense. Fixed by also checking for single quotes.
 pub struct RedundantCapitalW;
 
 impl Cop for RedundantCapitalW {
@@ -55,7 +58,11 @@ impl Cop for RedundantCapitalW {
                     .windows(2)
                     .any(|w| w[0] == b'#' && (w[1] == b'{' || w[1] == b'@' || w[1] == b'$'));
                 let has_escape = content.contains(&b'\\');
-                has_interpolation || has_escape
+                // RuboCop's `double_quotes_required?` also treats single quotes
+                // in element source as requiring %W (since the element would need
+                // double-quote wrapping if extracted). Match that behavior.
+                let has_single_quote = content.contains(&b'\'');
+                has_interpolation || has_escape || has_single_quote
             } else {
                 false
             };
