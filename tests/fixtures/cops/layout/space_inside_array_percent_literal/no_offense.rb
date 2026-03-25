@@ -11,3 +11,12 @@ d = %w(
 e = %i(
   alpha beta
 )
+# Tab-indented multiline %w should not flag leading whitespace as double spaces
+f = %w[packsswb pcmpgtb pcmpgtw pcmpgtd packuswb packssdw
+	   punpckhbw punpckhwd punpckhdq punpcklqdq punpckhqdq
+].freeze
+# Mixed tabs and spaces for indentation in multiline %w
+g = %w(
+	alpha beta gamma
+	delta epsilon
+)

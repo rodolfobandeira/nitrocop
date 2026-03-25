@@ -10,6 +10,13 @@ use crate::parse::source::SourceFile;
 /// line of the content individually for double spaces between elements, matching RuboCop's
 /// `MULTIPLE_SPACES_BETWEEN_ITEMS_REGEX` behavior. Leading/trailing spaces on each line are
 /// ignored (only mid-line double spaces between items are flagged).
+///
+/// Root cause of 61 FPs: tab-indented continuation lines inside `%w()` had their leading
+/// whitespace (tabs + spaces) incorrectly flagged as double spaces between items. The
+/// `space_start > 0` check was insufficient because it only verified a non-zero position,
+/// not that the preceding character was a non-whitespace item. Fix: also check that the
+/// character before the spaces is not a space or tab, matching RuboCop's `\S\s{2,}\S` regex
+/// which requires non-space characters on both sides.
 pub struct SpaceInsideArrayPercentLiteral;
 
 impl Cop for SpaceInsideArrayPercentLiteral {
@@ -83,9 +90,10 @@ impl Cop for SpaceInsideArrayPercentLiteral {
                     let space_len = i - space_start;
                     // Multiple spaces between items (not leading/trailing on the line)
                     if space_len >= 2 && space_start > 0 && i < line_bytes.len() {
-                        // Check that character before spaces is not escaped
+                        // Check that character before spaces is not escaped and is not
+                        // whitespace (leading indentation on continuation lines)
                         let prev_char = line_bytes[space_start - 1];
-                        if prev_char != b'\\' {
+                        if prev_char != b'\\' && prev_char != b' ' && prev_char != b'\t' {
                             // Compute offset within content: find where this line starts
                             let line_start_in_content =
                                 line_bytes.as_ptr() as usize - content.as_ptr() as usize;
