@@ -134,14 +134,6 @@ jobs:
           cargo build 2>&1
           CARGO_INCREMENTAL=1 cargo test --lib --no-run 2>&1
 
-      - name: Verify corpus gate prerequisites
-        run: |
-          # Fail fast before the 45-min agent run if the gate can't work
-          BIN="$(pwd)/target/debug/nitrocop"
-          test -x "$BIN" || { echo "ERROR: $BIN not found or not executable"; exit 1; }
-          "$BIN" --version
-          echo "Corpus gate binary OK: $BIN"
-
       # --- Task + backend ---
 
       - name: Generate task prompt
@@ -411,16 +403,6 @@ jobs:
           retention-days: 7
 
       # --- Validate + PR ---
-
-      - name: Corpus regression check (informational)
-        if: steps.task.outputs.code_bugs != '0'
-        continue-on-error: true
-        run: |
-          # Rebuild if agent changed source files
-          cargo build 2>&1
-          NITROCOP_BIN="$(pwd)/target/debug/nitrocop" \
-          python3 scripts/check_cop.py "${{ github.event.inputs.cop }}" \
-            --rerun --clone --sample 15 || echo "::warning::Corpus regression detected — repair workflow will handle it"
 
       - name: Finalize PR
         if: steps.task.outputs.code_bugs != '0'
