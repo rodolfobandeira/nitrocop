@@ -10,3 +10,6 @@ arr.reverse.find(&block)
 @messages.reverse.find(&block)
 ancestors.reverse.detect(&block)
 arr.reverse.find(&method(:even?))
+
+# find with regular arguments (proc default) — not flagged
+possibilities_by_level.reverse_each.find(proc { [-1, nil] }) { |_l, p| !p.empty? }

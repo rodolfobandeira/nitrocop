@@ -23,6 +23,12 @@ use crate::parse::source::SourceFile;
 /// NodePattern `(block_pass sym)?` only matches `&:symbol`, not `&variable`.
 /// Fix: when `call.block()` is a `BlockArgumentNode`, check that its expression
 /// is a `SymbolNode` before flagging.
+///
+/// ## Corpus investigation (2026-03-25)
+///
+/// FP=1: `reverse_each.find(proc { [-1, nil] }) { ... }` — find/detect has a
+/// regular argument (the proc default). RuboCop only matches find with no regular
+/// arguments. Fix: skip when `call.arguments().is_some()`.
 pub struct ReverseFind;
 
 impl Cop for ReverseFind {
@@ -90,6 +96,12 @@ impl Cop for ReverseFind {
 
         // `.reverse`/`.reverse_each` must have no arguments
         if recv_call.arguments().is_some() {
+            return;
+        }
+
+        // Must have no regular arguments to find/detect
+        // RuboCop's pattern only matches find with a block, not find(proc { ... })
+        if call.arguments().is_some() {
             return;
         }
 
