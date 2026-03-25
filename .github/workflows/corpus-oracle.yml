@@ -325,19 +325,9 @@ jobs:
               2>/dev/null || true
 
             # Save rubocop result to cache dir (will be persisted after the batch).
-            # Validate that all file paths in the result are within the repo directory
-            # to prevent cache poisoning if $DEST or $ABS_DEST were ever misconfigured.
+            # Validate file paths are within the repo to prevent cache poisoning.
             if [ "$RUBOCOP_CACHED" = false ] && [ -f "results/rubocop/${REPO_ID}.json" ]; then
-              if python3 -c "
-import json, sys
-with open('results/rubocop/${REPO_ID}.json') as f:
-    data = json.load(f)
-prefix = '${ABS_DEST}/'
-for fobj in data.get('files', []):
-    if not fobj.get('path', '').startswith(prefix):
-        print(f'POISONED: {fobj.get(\"path\",\"?\")} not under {prefix}', file=sys.stderr)
-        sys.exit(1)
-"; then
+              if python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
                 cp "results/rubocop/${REPO_ID}.json" "rubocop-cache/${REPO_ID}_${REPO_SHA}.json"
               else
                 echo "::warning::Rubocop result for ${REPO_ID} contains out-of-repo paths — not caching"
