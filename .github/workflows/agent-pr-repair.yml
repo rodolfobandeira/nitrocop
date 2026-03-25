@@ -52,10 +52,13 @@ on:
         default: false
 
 concurrency:
-  # Separate group for label-triggered retries so they don't get cancelled
-  # by concurrent Checks→repair runs on the same PR.
-  group: agent-pr-repair-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number || (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].number) || (github.event_name == 'pull_request' && github.event.pull_request.number) || github.event.workflow_run.head_branch || github.run_id }}${{ github.event_name == 'pull_request' && github.event.action == 'labeled' && '-retry' || '' }}
-  cancel-in-progress: true
+  # One group per PR. cancel-in-progress is false so a label-triggered retry
+  # isn't cancelled by an auto-repair from Checks failure (or vice versa).
+  # The second run queues and skips via prior_attempted_current_head.
+  # PR close events still cancel in-flight repairs via the concurrency group
+  # (they enter the same group and the queued run sees PR is closed).
+  group: agent-pr-repair-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number || (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].number) || (github.event_name == 'pull_request' && github.event.pull_request.number) || github.event.workflow_run.head_branch || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   repair:
