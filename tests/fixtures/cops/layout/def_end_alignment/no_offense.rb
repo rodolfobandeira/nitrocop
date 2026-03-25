@@ -35,3 +35,17 @@ class H < Hash; def lookup(m)
 false && def guarded_method
            42
          end
+
+# Line continuation before def: end aligns with statement start (helper_method)
+  helper_method \
+    def ordergroups_for_adding
+    Ordergroup.undeleted.order(:name)
+  end
+
+# Nested line continuation before def with indentation
+class Foo
+  helper_method \
+    def bar
+    42
+  end
+end
