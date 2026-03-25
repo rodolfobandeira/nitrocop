@@ -29,6 +29,18 @@ use crate::parse::source::SourceFile;
 /// on a separate continuation line). When `do`/`{` has args before it on the
 /// same line, use the `do` line directly — matching RuboCop's
 /// `send_node.last_line` behavior.
+///
+/// ## Corpus investigation (2026-03-25)
+///
+/// FP=2: lambda blocks with multiline parameters (`-> (a:,\n b:) do\n\n body`)
+/// were incorrectly flagging the blank line after `do` as "extra empty line at
+/// block body beginning." Root cause: nitrocop used `opening_loc` (`do`/`{`) as
+/// the reference line for all blocks, but RuboCop uses `send_node.last_line`
+/// which for lambda blocks is the `->` operator line (not the `do` line). When
+/// params span multiple lines, the `->` is on an earlier line, so the line after
+/// `->` is a param continuation (not blank), and RuboCop does not flag it.
+/// Fix: for `LambdaNode`, when `->` is on a different line than `do`/`{`, use
+/// the `->` operator offset as the effective opening reference.
 pub struct EmptyLinesAroundBlockBody;
 
 /// Compute the effective opening offset for empty-line checks.
@@ -114,25 +126,49 @@ impl Cop for EmptyLinesAroundBlockBody {
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
-        let (opening_offset, closing_offset) = if let Some(b) = node.as_block_node() {
-            (
-                b.opening_loc().start_offset(),
-                b.closing_loc().start_offset(),
-            )
-        } else if let Some(l) = node.as_lambda_node() {
-            (
-                l.opening_loc().start_offset(),
-                l.closing_loc().start_offset(),
-            )
-        } else {
-            return;
-        };
+        let (opening_offset, closing_offset, lambda_operator_offset) =
+            if let Some(b) = node.as_block_node() {
+                (
+                    b.opening_loc().start_offset(),
+                    b.closing_loc().start_offset(),
+                    None,
+                )
+            } else if let Some(l) = node.as_lambda_node() {
+                (
+                    l.opening_loc().start_offset(),
+                    l.closing_loc().start_offset(),
+                    Some(l.operator_loc().start_offset()),
+                )
+            } else {
+                return;
+            };
 
-        // For the "beginning" check, walk backward through backslash
-        // continuations so that `method(arg) \\\n  do |x|` uses the
-        // method-call line as the reference (matching RuboCop's
-        // send_node.last_line behavior).
-        let effective_opening = adjusted_keyword_offset(source, opening_offset);
+        // For the "beginning" check, determine the effective opening line.
+        //
+        // RuboCop uses `send_node.last_line` as the reference:
+        // - For regular blocks, `send_node` includes the method call args,
+        //   so `last_line` is the line with `do`/`{` (or the last arg line).
+        // - For lambda blocks, `send_node` is just `send(nil, :lambda)`
+        //   (the `->` operator), so `last_line` is the `->` line — NOT the
+        //   `do`/`{` line when params span multiple lines.
+        //
+        // When a lambda has multiline params (`-> (a,\n b) do`), the `->` is
+        // on an earlier line than `do`/`{`. Using `->` as the reference means
+        // the line after `->` is a param continuation, not blank, so no FP.
+        let effective_opening = if let Some(op_offset) = lambda_operator_offset {
+            let (op_line, _) = source.offset_to_line_col(op_offset);
+            let (opening_line, _) = source.offset_to_line_col(opening_offset);
+            if op_line != opening_line {
+                // Multiline lambda params: use the -> line as reference
+                op_offset
+            } else {
+                // Single-line: -> and do/{ on same line, use normal logic
+                adjusted_keyword_offset(source, opening_offset)
+            }
+        } else {
+            // Regular block: walk backward through backslash continuations
+            adjusted_keyword_offset(source, opening_offset)
+        };
 
         match style {
             "empty_lines" => {
@@ -233,6 +269,30 @@ mod tests {
         assert!(
             diags.is_empty(),
             "empty_lines style should accept blank lines"
+        );
+    }
+
+    #[test]
+    fn lambda_multiline_params_blank_after_do_no_offense() {
+        // RuboCop uses send_node.last_line (the -> line) as the reference,
+        // so the blank line after `do` is not adjacent to the opening.
+        let src = b"f = -> (a:,\n        b:) do\n\n  something\nend\n";
+        let diags = run_cop_full(&EmptyLinesAroundBlockBody, src);
+        assert!(
+            diags.is_empty(),
+            "Lambda with multiline params should not flag blank line after do"
+        );
+    }
+
+    #[test]
+    fn lambda_single_line_params_blank_after_do_offense() {
+        // When -> and do are on the same line, blank line after do IS flagged.
+        let src = b"f = -> (a) do\n\n  something\nend\n";
+        let diags = run_cop_full(&EmptyLinesAroundBlockBody, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Lambda with single-line params should flag blank line after do"
         );
     }
 }

@@ -24,3 +24,22 @@ action = -> (a) {
 handler = -> (opts = {}) do
   opts.each { |k, v| puts v }
 end
+
+# Lambda with multiline params and do — blank line after do is not flagged
+# because RuboCop uses send_node.last_line (the -> line) as the reference
+scope :_candlestick, -> (timeframe: '1h',
+                   segment_by: 'symbol',
+                   time: 'created_at',
+                   volume: 'volume',
+                   value: 'close') do
+
+  select("something")
+end
+
+# Lambda with multiline params and brace — blank line after { is not flagged
+transformer = -> (first:,
+                  second:,
+                  third: nil) {
+
+  [first, second, third].compact
+}
