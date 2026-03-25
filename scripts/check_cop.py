@@ -214,7 +214,9 @@ def load_manifest() -> dict[str, dict]:
     return _load_manifest_from_file(MANIFEST_PATH)
 
 
-def relevant_repos_for_cop(cop_name: str, data: dict) -> set[str]:
+def relevant_repos_for_cop(
+    cop_name: str, data: dict, *, sample: int | None = None,
+) -> set[str]:
     """Return the repos worth rerunning for a cop in quick mode.
 
     This is the union of:
@@ -223,17 +225,51 @@ def relevant_repos_for_cop(cop_name: str, data: dict) -> set[str]:
 
     Older corpus artifacts may not have `cop_activity_repos`; in that case we
     fall back to divergence-only behavior.
+
+    When sample is set, cap to N repos — always including diverging repos,
+    then filling with highest-offense repos for coverage.
     """
     relevant = set(data.get("cop_activity_repos", {}).get(cop_name, []))
     for repo_id, cops in data.get("by_repo_cop", {}).items():
         if cop_name in cops:
             relevant.add(repo_id)
+
+    if sample is not None and len(relevant) > sample:
+        # Always include repos with known divergence (FP or FN)
+        by_repo_cop = data.get("by_repo_cop", {})
+        diverging = set()
+        offense_counts: dict[str, int] = {}
+        for repo_id in relevant:
+            entry = by_repo_cop.get(repo_id, {}).get(cop_name, {})
+            fp = entry.get("fp", 0)
+            fn = entry.get("fn", 0)
+            if fp > 0 or fn > 0:
+                diverging.add(repo_id)
+            offense_counts[repo_id] = entry.get("matches", 0) + fp + fn
+
+        # Start with all diverging repos, then fill by offense count
+        sampled = set(diverging)
+        remaining = sorted(
+            relevant - sampled,
+            key=lambda r: offense_counts.get(r, 0),
+            reverse=True,
+        )
+        for repo_id in remaining:
+            if len(sampled) >= sample:
+                break
+            sampled.add(repo_id)
+        print(f"  --sample: {len(sampled)}/{len(relevant)} repos "
+              f"({len(diverging)} diverging + {len(sampled) - len(diverging)} by offense count)",
+              file=sys.stderr)
+        return sampled
+
     return relevant
 
 
 def clone_repos_for_cop(
     cop_name: str, data: dict,
     shard_index: int | None = None, total_shards: int | None = None,
+    sample: int | None = None,
 ) -> Path:
     """Clone repos needed for a cop into a temp dir matching the oracle's structure.
 
@@ -247,7 +283,7 @@ def clone_repos_for_cop(
         print("ERROR: manifest.jsonl not found", file=sys.stderr)
         sys.exit(1)
 
-    needed = relevant_repos_for_cop(cop_name, data)
+    needed = relevant_repos_for_cop(cop_name, data, sample=sample)
     if not needed:
         print(f"  No baseline activity or divergence for {cop_name}", file=sys.stderr)
 
@@ -401,6 +437,7 @@ def rerun_local_per_repo(
     has_activity_index: bool,
     shard_index: int | None = None,
     total_shards: int | None = None,
+    sample: int | None = None,
 ) -> dict[str, int]:
     """Re-run nitrocop locally using per-repo subprocess mode.
 
@@ -413,7 +450,7 @@ def rerun_local_per_repo(
 
     relevant_repos = None
     if quick:
-        relevant_repos = relevant_repos_for_cop(cop_name, data)
+        relevant_repos = relevant_repos_for_cop(cop_name, data, sample=sample)
         if not has_activity_index:
             print(
                 "WARNING: corpus artifact lacks cop_activity_repos; "
@@ -446,6 +483,9 @@ def main():
                         help="Only run repos with baseline activity (faster, may miss new FPs on zero-baseline repos)")
     parser.add_argument("--clone", action="store_true",
                         help="Auto-clone needed corpus repos from manifest (for CI use with --rerun --quick)")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="Cap to N repos (prioritizes diverging + highest-offense repos). "
+                             "Useful for fast pre-merge gates on high-match cops.")
     parser.add_argument("--shard-index", type=int, default=None,
                         help="Shard index for parallel CI (0-based)")
     parser.add_argument("--total-shards", type=int, default=None,
@@ -486,6 +526,7 @@ def main():
             tmpdir = clone_repos_for_cop(
                 args.cop, data,
                 shard_index=args.shard_index, total_shards=args.total_shards,
+                sample=args.sample,
             )
             _CLONE_DIR = tmpdir / "repos"
         else:
@@ -560,6 +601,7 @@ def main():
                 has_activity_index=has_activity_index,
                 shard_index=args.shard_index,
                 total_shards=args.total_shards,
+                sample=args.sample,
             )
             save_cached_results(args.cop, per_repo)
 
