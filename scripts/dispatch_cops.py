@@ -924,11 +924,7 @@ def generate_task(
         sys.exit(1)
 
     ruby_path = find_vendor_ruby_source(dept, snake)
-    ruby_source = read_file_safe(ruby_path) if ruby_path else None
-
     spec_path = find_vendor_spec(dept, snake)
-    spec_source = read_file_safe(spec_path) if spec_path else None
-    spec_excerpts = extract_spec_excerpts(spec_source) if spec_source else None
 
     offense_fixture, no_offense_fixture = find_fixtures(dept, snake)
     corpus = get_corpus_data(cop, input_path)
@@ -1080,7 +1076,7 @@ condition that matches the SPECIFIC differentiating context.
             parts.append(f"- {note}")
         parts.append("")
 
-    # Fixtures — placed early so the agent sees real examples near the instructions
+    # Fixtures inline — they're small and provide essential context for the agent
     if offense_fixture:
         parts.append(f"## Current Fixture: offense.rb\n`tests/fixtures/cops/{dept_snake}/{snake}/offense.rb`\n")
         parts.append(f"```ruby\n{offense_fixture}```\n")
@@ -1088,6 +1084,16 @@ condition that matches the SPECIFIC differentiating context.
     if no_offense_fixture:
         parts.append(f"## Current Fixture: no_offense.rb\n`tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`\n")
         parts.append(f"```ruby\n{no_offense_fixture}```\n")
+
+    # Large source files — just reference paths, the agent can read them
+    parts.append("## Key Source Files\n")
+    parts.append(f"- Rust implementation: `{rust_path.relative_to(PROJECT_ROOT)}`")
+    if ruby_path:
+        parts.append(f"- RuboCop Ruby source (ground truth): `{ruby_path.relative_to(PROJECT_ROOT)}`")
+    if spec_path:
+        parts.append(f"- RuboCop test excerpts: `{spec_path.relative_to(PROJECT_ROOT)}`")
+    parts.append("")
+    parts.append("Read these files before making changes.\n")
 
     start_here = build_start_here_section(cop, corpus)
     if start_here:
@@ -1101,23 +1107,6 @@ condition that matches the SPECIFIC differentiating context.
     else:
         # No diagnostics — put corpus examples in the usual place (at the end)
         pass
-
-    # Rust source
-    rust_rel = rust_path.relative_to(PROJECT_ROOT)
-    parts.append(f"## Current Rust Implementation\n`{rust_rel}`\n")
-    parts.append(f"```rust\n{rust_source}```\n")
-
-    # RuboCop Ruby source
-    if ruby_source and ruby_path:
-        ruby_rel = ruby_path.relative_to(PROJECT_ROOT)
-        parts.append(f"## RuboCop Ruby Implementation (ground truth)\n`{ruby_rel}`\n")
-        parts.append(f"```ruby\n{ruby_source}```\n")
-
-    # Spec excerpts
-    if spec_excerpts and spec_path:
-        spec_rel = spec_path.relative_to(PROJECT_ROOT)
-        parts.append(f"## RuboCop Test Excerpts\n`{spec_rel}`\n")
-        parts.append(f"```ruby\n{spec_excerpts}\n```\n")
 
     # Corpus data (without diagnostics, for fallback)
     if not diagnostics:
