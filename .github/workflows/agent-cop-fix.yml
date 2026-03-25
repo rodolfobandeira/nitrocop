@@ -123,12 +123,6 @@ jobs:
           permission-metadata: read
           permission-pull-requests: read
 
-      # --- Wait for main to be healthy before expensive build/agent work ---
-      - name: Wait for healthy main
-        env:
-          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
-        run: python3 scripts/workflows/wait_healthy_main.py --repo "${{ github.repository }}"
-
       # --- Build (before task generation for pre-diagnostic) ---
 
       # mold linker: cuts relink time from 30-60s to 2-5s for incremental builds
@@ -254,6 +248,13 @@ jobs:
           V_RSPEC=$(cd vendor/rubocop-rspec && git describe --tags --abbrev=0 | sed 's/^v//')
           gem install "rubocop:$V_RC" "rubocop-performance:$V_PERF" \
             "rubocop-rails:$V_RAILS" "rubocop-rspec:$V_RSPEC" prism --no-document
+
+      # --- Wait for main to be healthy right before agent starts ---
+      - name: Wait for healthy main
+        if: steps.task.outputs.code_bugs != '0'
+        env:
+          GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
+        run: python3 scripts/workflows/wait_healthy_main.py --repo "${{ github.repository }}"
 
       # --- Prepare agent ---
 
