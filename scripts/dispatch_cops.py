@@ -997,12 +997,9 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 8. Commit only your cop's files
 
 ### Fixture Format
-Mark offenses with `^` markers on the line AFTER the offending source line:
-```
-x = 1
-     ^^ {cop}: Trailing whitespace detected.
-```
-The `^` characters must align with the offending columns. The message format is `{cop}: <message text>`.""")
+Mark offenses with `^` markers on the line AFTER the offending source line.
+The `^` characters must align with the offending columns. The message format is `{cop}: <message text>`.
+See the **Current Fixture** sections below for real examples from this cop.""")
 
     # Add diagnostic-aware guidance
     if diagnostics and has_config_issues and not has_code_bugs:
@@ -1075,6 +1072,15 @@ condition that matches the SPECIFIC differentiating context.
             parts.append(f"- {note}")
         parts.append("")
 
+    # Fixtures — placed early so the agent sees real examples near the instructions
+    if offense_fixture:
+        parts.append(f"## Current Fixture: offense.rb\n`tests/fixtures/cops/{dept_snake}/{snake}/offense.rb`\n")
+        parts.append(f"```ruby\n{offense_fixture}```\n")
+
+    if no_offense_fixture:
+        parts.append(f"## Current Fixture: no_offense.rb\n`tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`\n")
+        parts.append(f"```ruby\n{no_offense_fixture}```\n")
+
     start_here = build_start_here_section(cop, corpus)
     if start_here:
         parts.append(start_here)
@@ -1104,15 +1110,6 @@ condition that matches the SPECIFIC differentiating context.
         spec_rel = spec_path.relative_to(PROJECT_ROOT)
         parts.append(f"## RuboCop Test Excerpts\n`{spec_rel}`\n")
         parts.append(f"```ruby\n{spec_excerpts}\n```\n")
-
-    # Fixtures
-    if offense_fixture:
-        parts.append(f"## Current Fixture: offense.rb\n`tests/fixtures/cops/{dept_snake}/{snake}/offense.rb`\n")
-        parts.append(f"```ruby\n{offense_fixture}```\n")
-
-    if no_offense_fixture:
-        parts.append(f"## Current Fixture: no_offense.rb\n`tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`\n")
-        parts.append(f"```ruby\n{no_offense_fixture}```\n")
 
     # Corpus data (without diagnostics, for fallback)
     if not diagnostics:
