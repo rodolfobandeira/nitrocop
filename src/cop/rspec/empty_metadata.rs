@@ -4,6 +4,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-25)
+///
+/// Corpus oracle reported FP=4, FN=0.
+///
+/// FP=4: Fixed by only flagging empty hash when it's the last argument
+/// and a description/subject argument precedes it. Cases like `describe({})`
+/// where `{}` is the subject (first arg) or `example(name, {}, caller)` where
+/// `{}` is a middle argument are not metadata and should not be flagged.
 pub struct EmptyMetadata;
 
 impl Cop for EmptyMetadata {
@@ -62,8 +70,14 @@ impl Cop for EmptyMetadata {
 
         // Note: keyword_hash_node (keyword args) intentionally not handled —
         // empty metadata is specifically the `{}` hash literal form, not keyword args.
-        for arg in args.arguments().iter() {
-            if let Some(hash) = arg.as_hash_node() {
+        //
+        // Only flag empty hash when it's the LAST argument and there's at least
+        // one preceding argument (the description/subject). This avoids FPs like
+        // `describe({})` where `{}` is the subject, or `example(name, {}, caller)`
+        // where `{}` is a middle positional argument.
+        let arg_list: Vec<_> = args.arguments().iter().collect();
+        if arg_list.len() >= 2 {
+            if let Some(hash) = arg_list.last().and_then(|a| a.as_hash_node()) {
                 if hash.elements().iter().count() == 0 {
                     let loc = hash.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
