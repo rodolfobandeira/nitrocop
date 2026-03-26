@@ -1,13 +1,14 @@
 # Investigation: target_dir relativization for cop Include patterns
 
-**Status:** Reverted (commit 93d80fad reverts a81e1179)
-**Date:** 2026-03-26
+**Status:** Understood, not fixable in oracle without upstream RuboCop changes
+**Date:** 2026-03-26 (Sessions 1-3)
 
 ## Problem
 
 When nitrocop runs via the corpus runner with an overlay config from a temp
-directory, cop-level Include patterns fail to match files. This causes systemic
-FN across cops that use Include patterns (most Rails/*, some RSpec/*).
+directory, cop-level Include patterns fail to match files. This affects 20 Rails
+cops whose Include patterns don't start with `**/` (e.g., `db/**/*.rb`).
+Cops with `**/`-prefixed patterns (54 of 74 total) are unaffected.
 
 The corpus runner invokes:
 ```
@@ -25,7 +26,10 @@ against `config_dir` and `base_dir` via `strip_prefix`. Both fail because the
 file isn't under either directory. Include patterns like `**/*.rb` compiled with
 `literal_separator(true)` don't match the raw absolute path either.
 
-Result: every cop with Include patterns is silently skipped for all files.
+Result: cops whose Include patterns don't start with `**/` are silently skipped.
+Patterns starting with `**/` (e.g., `**/app/models/**/*.rb`) still match because
+`**` consumes the absolute path prefix. This affects 20 cops, all in rubocop-rails
+— not the originally estimated 47. See Session 3 for the `**/` prefix analysis.
 
 Multiple agent investigations independently discovered this as the root cause
 of their FN: Rails/Delegate (#202), Rails/EnvironmentVariableAccess (#216),
@@ -84,7 +88,7 @@ adding thousands of FP shows as "0 new FP" because the baseline has no per-repo
 data to compare against. The check declared victory; a full oracle run was needed
 to catch the regression.
 
-## Underlying Issues (not yet resolved)
+## Underlying Issues (resolved — see Sessions 2-3)
 
 The `target_dir` relativization made Include patterns match correctly, which
 exposed a deeper problem: nitrocop runs cops that RuboCop wouldn't, because
@@ -96,40 +100,39 @@ other gating mechanisms differ between them:
    or gem-level config that the overlay doesn't replicate.
 
 2. **Migration cops gating**: Cops like `Rails/ReversibleMigration` are meant to
-   only run on migration files. RuboCop may skip them via `MigratedSchemaVersion`
-   or other project-specific config that the corpus baseline doesn't set per-repo.
+   only run on migration files. **Resolved**: The gating is via Include patterns
+   (`db/**/*.rb`), not `MigratedSchemaVersion`. Both tools fail to resolve these
+   patterns in the oracle → both skip them → symmetric. The "FP" in the target_dir
+   run were actually correct offenses that RuboCop couldn't see.
 
 3. **Corpus runner CWD**: `run_nitrocop.py` uses `cwd=/tmp` to "avoid .gitignore
-   interference." This is what makes `base_dir` resolve to `/tmp` instead of the
-   repo root. Changing CWD to the repo dir might fix the relativization without
-   needing `target_dir`, but the .gitignore concern hasn't been investigated.
+   interference." **Resolved**: CWD only affects `base_dir` for config resolution,
+   not file discovery (`WalkBuilder` walks from the target dir). Changing CWD to
+   repo_dir fixes nitrocop's `base_dir` but NOT RuboCop's in the oracle (which has
+   its own CWD). The in-repo config approach was tried (Session 2) and reverted
+   because RuboCop ignores cop Exclude patterns regardless of `base_dir`.
 
-## Possible Directions
+## Possible Directions (status as of Session 3)
 
-These are starting points, not prescriptions — the right fix may be something
-different entirely.
+- **Fix the corpus runner CWD** — TRIED, insufficient. Fixes nitrocop's
+  `base_dir` but not RuboCop's. Creates asymmetry.
 
-- **Fix the corpus runner instead of nitrocop**: Change `run_nitrocop.py` to
-  set `cwd` to the repo directory instead of `/tmp`. This would make `base_dir`
-  resolve to the repo root naturally, without adding `target_dir` to the core.
-  The `/tmp` CWD was chosen to "avoid .gitignore interference" but that concern
-  may no longer apply.
+- **Narrow the target_dir fix** — NOT TRIED. Could work in theory but the
+  asymmetry problem (Session 2) means even correctly-scoped cops would diverge
+  because RuboCop ignores cop Exclude patterns when `base_dir` is wrong.
 
-- **Narrow the target_dir fix**: Instead of enabling it for all cops, only use
-  `target_dir` relativization when the cop already has non-zero baseline matches
-  in the oracle. This prevents silent cops from suddenly firing while fixing FN
-  for cops that should have been matching.
+- **Investigate why those cops produce FP** — RESOLVED. They weren't FP.
+  The "FP" were real offenses that RuboCop also can't see (symmetric failure).
+  See Session 2.
 
-- **Investigate why those cops produce FP**: The migration-only cops
-  (ThreeStateBooleanColumn, ReversibleMigration, etc.) produced thousands of FP.
-  Understanding why RuboCop doesn't fire them (MigratedSchemaVersion? project
-  config? gem version gating?) would clarify whether the fix needs a guard or
-  whether those cops have a separate implementation gap.
+- **In-repo `.rubocop_corpus.yml` config** — TRIED, reverted. Fixed Include
+  for both tools but exposed Exclude asymmetry (nitrocop correctly applies
+  Exclude, RuboCop doesn't). Dropped conformance to 94.1%. See Session 2.
 
-- **Different config approach for corpus**: Rather than a temp overlay config,
-  the corpus runner could write a `.rubocop.yml` inside the repo directory
-  itself (cleaning up after). This would make `config_dir` resolve to the repo
-  root, sidestepping the relativization issue entirely.
+- **Match RuboCop's lenient behavior in nitrocop** — RESOLVED, no action
+  needed. Nitrocop already matches RuboCop's behavior when `base_dir` can't
+  resolve: Include patterns fail → cop skipped, Exclude patterns fail → cop
+  runs. See Session 3.
 
 ## Investigation Session 2 (2026-03-26)
 
@@ -219,7 +222,9 @@ fixed. But Rails FP jumped +7,569 (expected — migration cops now fire).
 The massive FN increase affects ALL departments, including cops WITHOUT Include
 patterns (Layout, Style, Lint, Metrics, Naming). This means the `base_dir`
 change affects more than just cop-level Include patterns — it changes how
-AllCops.Exclude and cop-level Exclude patterns resolve too. Under investigation.
+AllCops.Exclude and cop-level Exclude patterns resolve too. Resolved in
+Session 3: RuboCop ignores cop Exclude patterns when `base_dir` is wrong,
+creating asymmetry with nitrocop which correctly applies them.
 
 ### Key finding: RuboCop ignores cop Exclude patterns regardless of base_dir
 
@@ -249,14 +254,164 @@ an asymmetry that dropped conformance from 98.5% to 94.1%. The 98.5% was
 correct from the "does nitrocop match RuboCop" perspective — both tools ran
 all cops on all files, and results mostly agreed.
 
-The 47 Include-gated cops with no corpus data remain unfixed. A correct fix
-would need to either:
-- Make nitrocop match RuboCop's (lenient) cop Include/Exclude behavior
-- Fix both tools simultaneously (requires changes to RuboCop itself)
-- Accept per-cop FN for correctly-scoped cops and fix implementations
+The 20 Include-gated cops (originally estimated at 47 — see Session 3 for the
+`**/` prefix analysis) have no corpus data. Nitrocop already matches RuboCop's
+lenient behavior (Session 3), so no Rust changes are needed. The gap is purely
+in corpus measurement, not in correctness for real-world usage.
 
 Commits reverted: 3cc8bd0e, 9c7d3102, c19e6e8e.
 Commits kept: acdb591e (oracle rm -rf bug fix), d11399d4 (cleanup removal).
+
+## Investigation Session 3 (2026-03-26): RuboCop `relevant_file?` analysis
+
+### Root cause: RuboCop's cop Exclude patterns silently fail
+
+In `vendor/rubocop/lib/rubocop/cop/base.rb:286-297`, `relevant_file?`:
+```ruby
+def relevant_file?(file)
+  return false unless target_satisfies_all_gem_version_requirements?
+  return true unless @config.clusivity_config_for_badge?(self.class.badge)
+  file == RuboCop::AST::ProcessedSource::STRING_SOURCE_NAME ||
+    (file_name_matches_any?(file, 'Include', true) &&
+      !file_name_matches_any?(file, 'Exclude', false))
+end
+```
+
+When `base_dir` doesn't contain the file (the corpus oracle's situation):
+1. `path_relative_to_config(file)` in `path_util.rb:25-26` catches `ArgumentError`
+   and returns the unchanged absolute path
+2. Relative Include patterns (e.g., `db/migrate/**/*.rb`) don't match absolute paths
+   → `file_name_matches_any?` returns `true` (the default_result for Include) only
+   when no patterns exist; when patterns exist but don't match → returns `false` → cop skipped
+3. Relative Exclude patterns (e.g., `spec/**/*`) don't match absolute paths
+   → `file_name_matches_any?` returns `false` (default) → `!false = true` → cop runs
+
+**Nitrocop already matches this behavior.** In `src/config/mod.rs:294-343`, when
+`strip_prefix` fails for all bases, only the raw absolute path is tried against
+patterns. Relative patterns don't match it → same outcome as RuboCop. No Rust
+code changes needed.
+
+### Not all Include patterns are broken: `**/` prefix matters
+
+Of 74 cops with Include patterns, only 20 have zero corpus activity. The
+differentiator is the `**/` prefix:
+
+- `**/app/models/**/*.rb` → `**` matches any path prefix including
+  `/path/to/repo/` → WORKS even without relativization → 54 cops have data
+- `db/**/*.rb` → requires path to start with `db/` → FAILS against absolute
+  paths → 20 cops have zero data
+
+All 20 zero-activity cops are in rubocop-rails (migration cops, test cops,
+controller cops with non-`**/` Include patterns).
+
+### Per-cop validation with `cwd=repo_dir`
+
+Added `--repo-cwd` flag to `check_cop.py` (auto-enabled for Include-gated cops
+with zero baseline). This passes `cwd=repo_dir` to `run_nitrocop.py`, making
+`base_dir = repo_dir` so `strip_prefix` succeeds and Include patterns resolve.
+
+Also modified `relevant_repos_for_cop()` to sample from the full manifest when a
+cop has zero baseline data (since there are no "relevant" repos to filter to).
+
+Validated with sample runs:
+- `Rails/ReversibleMigration`: 1 offense in 15 repos (migration files)
+- `Rails/ThreeStateBooleanColumn`: 3 offenses in 20 repos (migration files)
+- `Rails/CreateTableWithTimestamps`: 2 offenses in 20 repos (migration files)
+- `Rails/HttpPositionalArguments`: 0 offenses in 20 repos (expected — deprecated pattern)
+
+This does NOT change the oracle workflow or conformance numbers. It provides a
+separate validation path for the 20 Include-gated cops.
+
+### Tooling added
+
+- `scripts/list_include_gated_cops.py` — Lists all cops with Include patterns,
+  cross-referenced against corpus data to show which have zero activity
+- `scripts/check_cop.py --repo-cwd` — Runs nitrocop with `cwd=repo_dir` for
+  correct Include pattern resolution
+
+### Why this doesn't matter much in practice
+
+These 20 cops work correctly in normal usage. When a user runs `nitrocop .`
+from their project root with a `.rubocop.yml`, `base_dir` resolves to the
+project root and all Include patterns match. The gap is **only** in corpus
+measurement — and it's unfixable in the oracle without upstream RuboCop changes,
+because RuboCop's `relevant_file?` ignores cop Exclude patterns when `base_dir`
+can't resolve (creating asymmetry with any fix we apply to nitrocop).
+
+The 98.5% conformance number is genuine from the "does nitrocop match RuboCop"
+perspective. Both tools are symmetrically broken on these 20 cops — neither
+runs them, so they contribute zero to both FP and FN.
+
+### Recommended next step: specialized 1:1 comparison workflow
+
+A **separate comparison workflow** for these 20 cops IS feasible, unlike the main
+oracle fix. The reason all previous oracle fixes failed was the **Exclude
+asymmetry** — fixing `base_dir` activated cop Exclude patterns in nitrocop but
+not RuboCop, affecting 400+ cops across all departments.
+
+These 20 cops are different: **19 of 20 have NO Exclude patterns.** Only
+`Rails/CreateTableWithTimestamps` has one (narrow ActiveStorage exclusion). This
+means fixing Include resolution for these cops won't trigger Exclude asymmetry.
+
+**Concrete approach:**
+
+For each repo in a sample (~30-50 repos):
+
+1. Write `.rubocop_include_check.yml` inside the repo dir:
+   ```yaml
+   inherit_from: /path/to/baseline_rubocop.yml
+   # No other overrides needed — the .rubocop* filename ensures
+   # base_dir = repo_dir for both tools
+   ```
+
+2. Run RuboCop with `--only CopName` from the repo dir:
+   ```
+   cd /path/to/repo
+   bundle exec rubocop --config .rubocop_include_check.yml \
+     --only Rails/ReversibleMigration --format json .
+   ```
+
+3. Run nitrocop the same way (cwd=repo_dir):
+   ```
+   nitrocop --config .rubocop_include_check.yml \
+     --only Rails/ReversibleMigration --format json .
+   ```
+
+4. Compare offenses — both tools have `base_dir = repo_dir`, both resolve
+   `db/**/*.rb` correctly, no Exclude asymmetry.
+
+**Why this works when the main oracle fix didn't:**
+- `--only` restricts to cops with no Exclude patterns → no asymmetry
+- In-repo `.rubocop*` config → `base_dir = repo_dir` for both tools
+- CWD = repo_dir → matches normal user workflow
+- Per-cop comparison → isolated from other cops' Exclude behavior
+
+**Why this can't be folded into the main oracle:**
+The main oracle compares ALL cops at once. Changing `base_dir` in the main
+oracle activates Exclude patterns for ALL cops, creating asymmetry in the
+400+ cops that have Exclude patterns. Restricting `--only` in the main oracle
+would defeat its purpose (full-corpus comparison).
+
+**Implementation:** This could be a new script (e.g., `scripts/check_include_gated_cops.py`)
+or a mode in `check_cop.py`. It needs the corpus bundle installed to run RuboCop.
+The `check_cop.py --repo-cwd` infrastructure (added in Session 3) handles the
+nitrocop side; the missing piece is running RuboCop per-repo with the in-repo
+config and comparing offenses.
+
+### Quick plausibility check (nitrocop-only)
+
+For a faster but less rigorous check, batch-run all 20 cops through
+`check_cop.py --rerun --clone --sample 30` (nitrocop only, no RuboCop
+comparison). This identifies broken implementations without the overhead of
+running RuboCop:
+
+```
+scripts/list_include_gated_cops.py --json | \
+  python3 -c "import json,sys; [print(c['cop']) for c in json.load(sys.stdin)]" | \
+  while read cop; do
+    python3 scripts/check_cop.py "$cop" --rerun --clone --sample 30
+  done
+```
 
 ## Key Code Locations
 
@@ -268,3 +423,5 @@ Commits kept: acdb591e (oracle rm -rf bug fix), d11399d4 (cleanup removal).
 - `bench/corpus/gen_repo_config.py` — overlay config generation
 - `.github/workflows/corpus-oracle.yml:284-298` — oracle RuboCop invocation (same bug)
 - `src/fs.rs:44-50` — file discovery (CWD-independent, uses walk root)
+- `vendor/rubocop/lib/rubocop/cop/base.rb:286-297` — `relevant_file?` (cop Include/Exclude)
+- `vendor/rubocop/lib/rubocop/path_util.rb:13-29` — `relative_path` (ArgumentError catch)

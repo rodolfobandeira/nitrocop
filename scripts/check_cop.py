@@ -40,10 +40,61 @@ from clone_repos import repo_head_sha  # noqa: E402, I001
 CORPUS_DIR = PROJECT_ROOT / "vendor" / "corpus"
 # Overridden to temp dir when --clone is used (see main())
 _CLONE_DIR: Path | None = None
+# When True, _run_one_repo passes cwd=repo_dir so that base_dir resolves to
+# the repo root. Needed for Include-gated cops whose Include patterns don't
+# start with **/ and thus can't match absolute paths.
+_USE_REPO_CWD: bool = False
 MANIFEST_PATH = PROJECT_ROOT / "bench" / "corpus" / "manifest.jsonl"
 NITROCOP_BIN = Path(os.environ["NITROCOP_BIN"]).resolve() if "NITROCOP_BIN" in os.environ else PROJECT_ROOT / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / "nitrocop"
 BASELINE_CONFIG = PROJECT_ROOT / "bench" / "corpus" / "baseline_rubocop.yml"
 LOCAL_CACHE_DIR = PROJECT_ROOT / ".check-cop-cache"
+
+
+def is_include_gated_cop(cop_name: str) -> bool:
+    """Check if a cop has Include patterns that require base_dir resolution.
+
+    Returns True if the cop has at least one Include pattern that doesn't start
+    with **/ (i.e., it needs relativization to match files). These cops have
+    zero corpus data because both RuboCop and nitrocop fail to resolve them
+    when running with a non-.rubocop* config from outside the repo.
+    """
+    try:
+        import yaml
+
+        class _Loader(yaml.SafeLoader):
+            pass
+        _Loader.add_constructor("!ruby/regexp", lambda loader, n: loader.construct_scalar(n))
+    except ImportError:
+        return False
+
+    vendor_configs = [
+        PROJECT_ROOT / "vendor" / "rubocop" / "config" / "default.yml",
+        PROJECT_ROOT / "vendor" / "rubocop-rails" / "config" / "default.yml",
+        PROJECT_ROOT / "vendor" / "rubocop-rspec" / "config" / "default.yml",
+        PROJECT_ROOT / "vendor" / "rubocop-performance" / "config" / "default.yml",
+        PROJECT_ROOT / "vendor" / "rubocop-factory_bot" / "config" / "default.yml",
+        PROJECT_ROOT / "vendor" / "rubocop-rspec_rails" / "config" / "default.yml",
+        PROJECT_ROOT / "vendor" / "rubocop-discourse" / "config" / "default.yml",
+    ]
+    for config_path in vendor_configs:
+        if not config_path.exists():
+            continue
+        with open(config_path) as f:
+            data = yaml.load(f, Loader=_Loader)
+        if not data or cop_name not in data:
+            continue
+        cop_config = data[cop_name]
+        if not isinstance(cop_config, dict):
+            continue
+        includes = cop_config.get("Include", [])
+        if not includes:
+            continue
+        # A cop is "include-gated" if any Include pattern doesn't start with **/
+        # Those patterns need relativization to match, and fail when base_dir is wrong.
+        for pattern in includes:
+            if isinstance(pattern, str) and not pattern.startswith("**/"):
+                return True
+    return False
 
 
 def download_corpus_results() -> Path:
@@ -208,8 +259,10 @@ def _run_one_repo(args: tuple[str, str]) -> tuple[str, int]:
     """Run nitrocop on a single repo via the shared corpus runner."""
     cop_name, repo_dir = args
     repo_id = Path(repo_dir).name
+    cwd = repo_dir if _USE_REPO_CWD else None
     result = _run_corpus_nitrocop(
         repo_dir, cop=cop_name, binary=str(NITROCOP_BIN), timeout=120,
+        cwd=cwd,
     )
     return (repo_id, result["count"])
 
@@ -222,6 +275,7 @@ def load_manifest() -> dict[str, dict]:
 
 def relevant_repos_for_cop(
     cop_name: str, data: dict, *, sample: int | None = None,
+    include_gated: bool = False,
 ) -> set[str]:
     """Return the repos worth rerunning for a cop in quick mode.
 
@@ -232,6 +286,10 @@ def relevant_repos_for_cop(
     Older corpus artifacts may not have `cop_activity_repos`; in that case we
     fall back to divergence-only behavior.
 
+    When include_gated is True and the cop has zero baseline data, falls back
+    to sampling from the full manifest (these cops are silently disabled in
+    the oracle due to Include pattern resolution failure).
+
     When sample is set, cap to N repos — always including diverging repos,
     then filling with highest-offense repos for coverage.
     """
@@ -239,6 +297,23 @@ def relevant_repos_for_cop(
     for repo_id, cops in data.get("by_repo_cop", {}).items():
         if cop_name in cops:
             relevant.add(repo_id)
+
+    # For Include-gated cops with zero baseline, sample from the full manifest.
+    # These cops have no oracle data because both tools fail to resolve their
+    # Include patterns. We sample broadly to get coverage.
+    if not relevant and include_gated:
+        by_repo = data.get("by_repo", [])
+        ok_repos = {r["repo"] for r in by_repo if r.get("status") == "ok"}
+        if ok_repos:
+            relevant = ok_repos
+            print(f"  Include-gated cop with zero baseline — sampling from "
+                  f"{len(relevant)} OK repos", file=sys.stderr)
+        else:
+            # Fallback: use all repos from manifest
+            manifest = load_manifest()
+            relevant = set(manifest.keys())
+            print(f"  Include-gated cop with zero baseline — sampling from "
+                  f"{len(relevant)} manifest repos", file=sys.stderr)
 
     if sample is not None and len(relevant) > sample:
         # Always include repos with known divergence (FP or FN)
@@ -276,6 +351,7 @@ def clone_repos_for_cop(
     cop_name: str, data: dict,
     shard_index: int | None = None, total_shards: int | None = None,
     sample: int | None = None,
+    include_gated: bool = False,
 ) -> Path:
     """Clone repos needed for a cop into a temp dir matching the oracle's structure.
 
@@ -289,7 +365,8 @@ def clone_repos_for_cop(
         print("ERROR: manifest.jsonl not found", file=sys.stderr)
         sys.exit(1)
 
-    needed = relevant_repos_for_cop(cop_name, data, sample=sample)
+    needed = relevant_repos_for_cop(cop_name, data, sample=sample,
+                                    include_gated=include_gated)
     if not needed:
         print(f"  No baseline activity or divergence for {cop_name}", file=sys.stderr)
 
@@ -444,6 +521,7 @@ def rerun_local_per_repo(
     shard_index: int | None = None,
     total_shards: int | None = None,
     sample: int | None = None,
+    include_gated: bool = False,
 ) -> dict[str, int]:
     """Re-run nitrocop locally using per-repo subprocess mode.
 
@@ -456,7 +534,8 @@ def rerun_local_per_repo(
 
     relevant_repos = None
     if quick:
-        relevant_repos = relevant_repos_for_cop(cop_name, data, sample=sample)
+        relevant_repos = relevant_repos_for_cop(cop_name, data, sample=sample,
+                                                include_gated=include_gated)
         if not has_activity_index:
             print(
                 "WARNING: corpus artifact lacks cop_activity_repos; "
@@ -499,6 +578,9 @@ def main():
                         help="Shard index for parallel CI (0-based)")
     parser.add_argument("--total-shards", type=int, default=None,
                         help="Total number of shards for parallel CI")
+    parser.add_argument("--repo-cwd", action="store_true",
+                        help="Run nitrocop with cwd=repo_dir so Include patterns resolve. "
+                             "Auto-enabled for Include-gated cops with zero baseline data.")
     args = parser.parse_args()
 
     # --rerun implies --quick unless --all-repos is explicitly set.
@@ -548,6 +630,18 @@ def main():
     baseline_fn = cop_entry["fn"]
     baseline_matches = cop_entry["matches"]
 
+    # Detect Include-gated cops and auto-enable --repo-cwd
+    include_gated = is_include_gated_cop(args.cop)
+    zero_baseline = expected_rubocop == 0 and baseline_fp == 0
+    if include_gated and zero_baseline:
+        if not args.repo_cwd:
+            print(f"NOTE: {args.cop} is Include-gated with zero baseline — "
+                  f"auto-enabling --repo-cwd", file=sys.stderr)
+            args.repo_cwd = True
+    if args.repo_cwd:
+        global _USE_REPO_CWD
+        _USE_REPO_CWD = True
+
     ensure_binary()
 
     # Validate local corpus matches manifest (warns about stale/missing repos)
@@ -559,6 +653,7 @@ def main():
                 args.cop, data,
                 shard_index=args.shard_index, total_shards=args.total_shards,
                 sample=args.sample,
+                include_gated=include_gated and zero_baseline,
             )
             _CLONE_DIR = tmpdir / "repos"
         else:
@@ -566,8 +661,13 @@ def main():
         check_corpus_bundle()
 
     print(f"Checking {args.cop} against corpus")
-    print("Gate: count-only cop-level regression check")
-    print("Not a location-level conformance proof or a department completion gate")
+    if include_gated and zero_baseline:
+        print("Mode: Include-gated cop with zero baseline (plausibility check)")
+        print("  This cop is silently disabled in the oracle due to Include pattern")
+        print("  resolution failure. Running with cwd=repo_dir to enable patterns.")
+    else:
+        print("Gate: count-only cop-level regression check")
+        print("Not a location-level conformance proof or a department completion gate")
     print(f"Baseline (from CI): {baseline_matches:,} matches, "
           f"{baseline_fp:,} FP, {baseline_fn:,} FN")
     print(f"Expected RuboCop offenses: {expected_rubocop:,}")
@@ -634,6 +734,7 @@ def main():
                 shard_index=args.shard_index,
                 total_shards=args.total_shards,
                 sample=args.sample,
+                include_gated=include_gated and zero_baseline,
             )
             save_cached_results(args.cop, per_repo)
 
@@ -833,6 +934,24 @@ def main():
             for repo_id, local, bl_nc, bl_rc, diff in sorted(fn_repos, key=lambda x: -x[4])[:10]:
                 print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
+
+        # For Include-gated cops with zero baseline, show plausibility report
+        # instead of regression gate (which has no oracle data to compare against).
+        if include_gated and zero_baseline and not failed:
+            repos_with_offenses = {k: v for k, v in per_repo.items()
+                                   if v > 0 and k != "__ci_baseline_matching_repos__"}
+            repos_run = len([k for k in per_repo if k != "__ci_baseline_matching_repos__"])
+            total_offenses = sum(v for v in per_repo.values() if v > 0)
+            print("  Include-gated plausibility report:")
+            print(f"    Repos scanned: {repos_run}")
+            print(f"    Repos with offenses: {len(repos_with_offenses)}")
+            print(f"    Total offenses: {total_offenses:,}")
+            if repos_with_offenses:
+                print("    Top repos:")
+                for repo_id, count in sorted(repos_with_offenses.items(),
+                                             key=lambda x: x[1], reverse=True)[:10]:
+                    print(f"      {count:>6,}  {repo_id}")
+            print()
 
         # Machine-readable summary for CI aggregation
         result_str = "fail" if failed else "pass"
