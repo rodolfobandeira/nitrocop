@@ -21,7 +21,6 @@ on:
           - auto
           - codex
           - claude
-          - claude-oauth
           - minimax
         default: auto
       department:

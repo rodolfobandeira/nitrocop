@@ -19,7 +19,6 @@ on:
           - auto
           - codex
           - claude
-          - claude-oauth
           - minimax
         default: auto
       mode:
@@ -154,6 +153,8 @@ jobs:
         id: selected_backend
         env:
           GH_TOKEN: ${{ steps.actions-read-token.outputs.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python3 scripts/workflows/cop_fix_lifecycle.py select-backend \
             --cop "${{ github.event.inputs.cop }}" \

@@ -10,6 +10,7 @@ Usage:
 Outputs KEY=VALUE lines suitable for sourcing in shell or appending to
 $GITHUB_OUTPUT. All values are shell-safe (no quoting needed).
 """
+import os
 import sys
 
 
@@ -200,13 +201,20 @@ def choose_backend(family: str, strength: str, default_strength: str = "hard") -
         backend = "codex-hard" if resolved_strength == "hard" else "codex-normal"
         return backend, resolved_strength, f"workflow override ({family}/{resolved_strength})"
 
-    if family == "claude":
-        backend = "claude-hard" if resolved_strength == "hard" else "claude-normal"
-        return backend, resolved_strength, f"workflow override ({family}/{resolved_strength})"
-
-    if family == "claude-oauth":
-        backend = "claude-oauth-hard" if resolved_strength == "hard" else "claude-oauth-normal"
-        return backend, resolved_strength, f"workflow override ({family}/{resolved_strength})"
+    if family in ("claude", "claude-oauth"):
+        # Autodetect: prefer OAuth token, fall back to API key
+        has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+        has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        if has_oauth or family == "claude-oauth":
+            backend = "claude-oauth-hard" if resolved_strength == "hard" else "claude-oauth-normal"
+            method = "oauth"
+        elif has_api_key:
+            backend = "claude-hard" if resolved_strength == "hard" else "claude-normal"
+            method = "api-key"
+        else:
+            backend = "claude-oauth-hard" if resolved_strength == "hard" else "claude-oauth-normal"
+            method = "oauth (default, no secret detected at resolve time)"
+        return backend, resolved_strength, f"claude/{resolved_strength} via {method}"
 
     raise ValueError(f"unknown backend family: {family}")
 
