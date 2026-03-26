@@ -235,8 +235,15 @@ def run_rubocop(repo_dir: str) -> dict:
     env = os.environ.copy()
     env["BUNDLE_GEMFILE"] = os.path.join(ROOT, "bench", "corpus", "Gemfile")
     env["BUNDLE_PATH"] = os.path.join(ROOT, "bench", "corpus", "vendor", "bundle")
+    # Use the same overlay config as nitrocop so both tools resolve base_dir
+    # to the repo directory. Without this, RuboCop's base_dir = CWD and
+    # cop-level Include patterns like `db/**/*.rb` fail to match.
+    repo_id = os.path.basename(repo_dir)
+    sys.path.insert(0, os.path.join(ROOT, "bench", "corpus"))
+    from gen_repo_config import gen_repo_config
+    overlay = gen_repo_config(repo_id, BASELINE_CONFIG, repo_dir)
     result = subprocess.run(
-        ["bundle", "exec", "rubocop", "--config", BASELINE_CONFIG,
+        ["bundle", "exec", "rubocop", "--config", overlay,
          "--format", "json", "--force-exclusion", "--cache", "false", repo_dir],
         capture_output=True, text=True, env=env, timeout=300,
     )
