@@ -54,11 +54,13 @@ def run_git(repo_root: Path, *args: str) -> str:
 
 
 def changed_files(repo_root: Path, base_ref: str) -> list[str]:
+    # Only check committed/staged changes against the base ref.
+    # Untracked files (agent scratch files in tmp/, etc.) are not part of
+    # the PR and should not trigger scope violations.
     tracked = run_git(repo_root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base_ref)
-    untracked = run_git(repo_root, "ls-files", "--others", "--exclude-standard")
     names = {
         line.strip()
-        for line in [*tracked.splitlines(), *untracked.splitlines()]
+        for line in tracked.splitlines()
         if line.strip()
     }
     return sorted(names)
