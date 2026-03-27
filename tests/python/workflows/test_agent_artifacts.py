@@ -34,7 +34,6 @@ def render_manifest(workflow: str) -> list[str]:
 
 def test_agent_cop_fix_manifest_contains_common_and_summary_paths():
     lines = render_manifest("agent-cop-fix")
-    assert any(line.endswith("/agent-cop-fix/agent/agent.log") for line in lines)
     assert any(line.endswith("/agent-cop-fix/recovery/git-activity/**/*") for line in lines)
     assert any(line.endswith("/agent-cop-fix/recovery/scope.md") for line in lines)
     assert any(line.endswith("/agent-cop-fix/context/task.md") for line in lines)
@@ -46,7 +45,6 @@ def test_agent_cop_fix_manifest_contains_common_and_summary_paths():
 
 def test_agent_pr_repair_manifest_contains_repair_specific_paths():
     lines = render_manifest("agent-pr-repair")
-    assert any(line.endswith("/agent-pr-repair/agent/agent.log") for line in lines)
     assert any(line.endswith("/agent-pr-repair/context/pr.diff") for line in lines)
     assert any(line.endswith("/agent-pr-repair/recovery/scope.md") for line in lines)
     assert any(line.endswith("/agent-pr-repair/repair/cop-check-packet.md") for line in lines)

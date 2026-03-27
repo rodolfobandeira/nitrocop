@@ -7,7 +7,6 @@ import argparse
 from pathlib import Path
 
 COMMON_RELATIVE = [
-    "agent/agent.log",
     "agent/agent-events.jsonl",
     "agent/agent-last-message.txt",
     "agent/agent-result.json",
@@ -44,11 +43,6 @@ WORKFLOW_RELATIVE = {
     ],
 }
 
-SESSION_GLOBS = [
-    "~/.claude/projects/**/*.jsonl",
-    "~/.codex/sessions/**/*.jsonl",
-]
-
 
 def _runtime_join(runtime_root: Path, relative: str) -> str:
     return str(runtime_root / relative)
@@ -60,7 +54,7 @@ def manifest_for(workflow: str, runtime_root: Path) -> list[str]:
     except KeyError as exc:
         raise SystemExit(f"unknown workflow manifest: {workflow}") from exc
     runtime_paths = [_runtime_join(runtime_root, rel) for rel in [*COMMON_RELATIVE, *extra]]
-    return [*runtime_paths, *SESSION_GLOBS]
+    return runtime_paths
 
 
 def write_manifest(workflow: str, runtime_root: Path, output: Path) -> None:
