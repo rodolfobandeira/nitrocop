@@ -2146,6 +2146,12 @@ def main():
         default="auto",
     )
     dispatch_issues.add_argument(
+        "--strength-override",
+        choices=["normal", "hard"],
+        default="hard",
+        help="Strength override (currently always hard)",
+    )
+    dispatch_issues.add_argument(
         "--repo",
         default=os.environ.get("GITHUB_REPOSITORY", ""),
         help="GitHub repo (owner/name)",
