@@ -411,7 +411,7 @@ jobs:
         if: steps.run-batch.conclusion == 'success'
         with:
           path: rubocop-cache/
-          key: rubocop-${{ steps.rubocop-cache-key.outputs.hash }}-${{ matrix.batch_hash }}
+          key: rubocop-${{ steps.rubocop-cache-key.outputs.hash }}-${{ matrix.batch_hash }}-${{ github.run_id }}
 
       - name: Upload results
         uses: actions/upload-artifact@v6
