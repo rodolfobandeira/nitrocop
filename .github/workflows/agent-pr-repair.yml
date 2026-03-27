@@ -381,13 +381,6 @@ jobs:
           } > "$REPAIR_COMMENT_FILE"
           gh pr comment "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --body-file "$REPAIR_COMMENT_FILE"
 
-      - name: Snapshot git state before agent
-        if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
-        run: |
-          python3 scripts/workflows/git_activity_snapshot.py capture \
-            --repo-root "$PWD" \
-            --output "$GIT_ACTIVITY_BEFORE_FILE"
-
       - name: Reconfirm PR is still repairable before agent
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
         id: pre_agent_live_pr
@@ -419,25 +412,8 @@ jobs:
           anthropic_auth_token: ${{ secrets.MINIMAX_API_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           codex_auth_json: ${{ secrets.CODEX_AUTH_JSON }}
-
-      - name: Snapshot agent outputs
-        if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip' && steps.pre_agent_live_pr.outputs.should_continue == 'true'
-        run: |
-          git status --short > "$AGENT_STATUS_FILE" || true
-          git log --oneline "${{ steps.prep.outputs.base_sha }}"..HEAD > "$AGENT_COMMITS_FILE" || true
-          git diff --stat "${{ steps.prep.outputs.base_sha }}" > "$AGENT_RECOVERY_STAT_FILE" || true
-          git diff "${{ steps.prep.outputs.base_sha }}" > "$AGENT_RECOVERY_DIFF_FILE" || true
-          git diff --binary "${{ steps.prep.outputs.base_sha }}" > "$AGENT_RECOVERY_PATCH_FILE" || true
-          python3 scripts/workflows/agent_logs.py find \
-            --newer-than "$FINAL_TASK_FILE" \
-            --backend "${{ steps.backend.outputs.log_format }}" > "$AGENT_LOGFILE_POINTER_FILE" 2>/dev/null || true
-          python3 scripts/workflows/git_activity_snapshot.py capture \
-            --repo-root "$PWD" \
-            --output "$GIT_ACTIVITY_AFTER_FILE" || true
-          python3 scripts/workflows/git_activity_snapshot.py report \
-            --before "$GIT_ACTIVITY_BEFORE_FILE" \
-            --after "$GIT_ACTIVITY_AFTER_FILE" \
-            --out-dir "$AGENT_GIT_ACTIVITY_DIR" || true
+          base_sha: ${{ steps.prep.outputs.base_sha }}
+          workflow: agent-pr-repair
 
       - name: Validate repair change scope
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip' && steps.pre_agent_live_pr.outputs.should_continue == 'true'
@@ -767,43 +743,12 @@ jobs:
 
           cat "$REPAIR_SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build artifact manifest
-        if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
-        id: artifact_manifest
-        run: |
-          python3 scripts/workflows/agent_artifacts.py agent-pr-repair \
-            --runtime-root "$AGENT_RUNTIME_ROOT" \
-            --output "$AGENT_ARTIFACT_MANIFEST_FILE"
-          {
-            echo "paths<<EOF"
-            cat "$AGENT_ARTIFACT_MANIFEST_FILE"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Scan generated files for backend secret leakage
-        if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
-        id: leak_scan
-        env:
-          ANTHROPIC_AUTH_TOKEN: ${{ steps.repair.outputs.backend == 'minimax' && secrets.MINIMAX_API_KEY || '' }}
-          ANTHROPIC_API_KEY: ${{ (steps.repair.outputs.backend == 'claude-normal' || steps.repair.outputs.backend == 'claude-hard') && secrets.ANTHROPIC_API_KEY || '' }}
-          CODEX_AUTH_JSON: ${{ (steps.repair.outputs.backend == 'codex-normal' || steps.repair.outputs.backend == 'codex-hard') && secrets.CODEX_AUTH_JSON || '' }}
-          GH_TOKEN_FOR_ACTIONS_READ: ${{ steps.actions-read-token.outputs.token }}
-        run: |
-          python3 scripts/workflows/guard_backend_secrets.py \
-            --ignore-missing \
-            --from-env ANTHROPIC_AUTH_TOKEN \
-            --from-env ANTHROPIC_API_KEY \
-            --from-env CODEX_AUTH_JSON \
-            --from-env GH_TOKEN_FOR_ACTIONS_READ \
-            scan-manifest \
-            "$AGENT_ARTIFACT_MANIFEST_FILE"
-
       - name: Upload repair logs
-        if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip' && steps.leak_scan.outcome == 'success'
+        if: always() && steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip' && steps.agent.outputs.leak_scan_ok == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: agent-pr-repair-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.artifact_manifest.outputs.paths }}
+          path: ${{ steps.agent.outputs.artifact_paths }}
           retention-days: 7
 
   # Reset linked tracker issue when a bot PR is closed without merging.

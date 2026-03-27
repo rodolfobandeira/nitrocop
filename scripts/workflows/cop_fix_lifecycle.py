@@ -530,7 +530,7 @@ def cmd_claim_pr(args: list[str]) -> int:
 # ── prepare-branch ──────────────────────────────────────────────────────
 
 def cmd_prepare_branch(args: list[str]) -> int:
-    """Switch to claimed PR branch, prepopulate fixtures, append helpers, snapshot git."""
+    """Switch to claimed PR branch, prepopulate fixtures, append helpers."""
     import argparse
 
     p = argparse.ArgumentParser(prog="cop_fix_lifecycle.py prepare-branch")
@@ -541,7 +541,6 @@ def cmd_prepare_branch(args: list[str]) -> int:
 
     task_file = _env_path("TASK_FILE")
     final_task_file = _env_path("FINAL_TASK_FILE")
-    git_before_file = _env_path("GIT_ACTIVITY_BEFORE_FILE")
 
     # Configure git identity
     _run([sys.executable, str(SCRIPTS_DIR / "workflow_git.py"), "configure"])
@@ -573,16 +572,6 @@ def cmd_prepare_branch(args: list[str]) -> int:
     if helper_result.returncode == 0 and helper_result.stdout.strip():
         with open(final_task_file, "a") as f:
             f.write(helper_result.stdout)
-
-    # Snapshot git state before agent
-    _run([
-        sys.executable, str(SCRIPTS_DIR / "git_activity_snapshot.py"),
-        "capture", "--repo-root", str(REPO_ROOT), "--output", str(git_before_file),
-    ])
-
-    # Output prompt content for action-based backends (needs to be a step output
-    # since `uses:` steps can't read files directly)
-    _output_multiline("prompt_content", final_task_file.read_text())
 
     return 0
 
@@ -723,12 +712,17 @@ def _generate_summary(
 
 
 def cmd_snapshot(args: list[str]) -> int:
-    """Capture agent outputs, generate summary, build artifact manifest."""
+    """Generate cop-specific summary from agent outputs.
+
+    Git snapshot, log finding, git activity capture, artifact manifest,
+    and leak scanning are handled by the run-agent composite action
+    (for both CLI and action backend paths).  This command only generates
+    the cop-specific summary markdown and prints the agent result.
+    """
     import argparse
 
     p = argparse.ArgumentParser(prog="cop_fix_lifecycle.py snapshot")
     p.add_argument("--base-sha", required=True)
-    p.add_argument("--log-format", required=True)
     p.add_argument("--cop", required=True)
     p.add_argument("--backend", required=True)
     p.add_argument("--mode", required=True)
@@ -736,73 +730,14 @@ def cmd_snapshot(args: list[str]) -> int:
     p.add_argument("--run-number", required=True)
     opts = p.parse_args(args)
 
-    status_file = _env_path("AGENT_STATUS_FILE")
-    commits_file = _env_path("AGENT_COMMITS_FILE")
-    stat_file = _env_path("AGENT_RECOVERY_STAT_FILE")
-    diff_file = _env_path("AGENT_RECOVERY_DIFF_FILE")
-    patch_file = _env_path("AGENT_RECOVERY_PATCH_FILE")
-    logfile_pointer = _env_path("AGENT_LOGFILE_POINTER_FILE")
-    final_task_file = _env_path("FINAL_TASK_FILE")
-    git_after_file = _env_path("GIT_ACTIVITY_AFTER_FILE")
-    git_activity_dir = _env_path("AGENT_GIT_ACTIVITY_DIR")
     summary_file = _env_path("SUMMARY_FILE")
-    manifest_file = _env_path("AGENT_ARTIFACT_MANIFEST_FILE")
-    runtime_root = _env("AGENT_RUNTIME_ROOT")
 
-    # Snapshot git state
-    r = _git("status", "--short", check=False)
-    write_and_read(status_file, r.stdout)
-
-    r = _git("log", "--oneline", f"{opts.base_sha}..HEAD", check=False)
-    write_and_read(commits_file, r.stdout)
-
-    for target, git_args in [
-        (stat_file, ["diff", "--stat", opts.base_sha, "--", "src/cop/", "tests/fixtures/cops/", "bench/corpus/"]),
-        (diff_file, ["diff", opts.base_sha, "--", "src/cop/", "tests/fixtures/cops/", "bench/corpus/"]),
-        (patch_file, ["diff", "--binary", opts.base_sha, "--", "src/cop/", "tests/fixtures/cops/", "bench/corpus/"]),
-    ]:
-        r = _git(*git_args, check=False)
-        write_and_read(target, r.stdout)
-
-    # Find agent logfile
-    r = _run_ok([
-        sys.executable, str(SCRIPTS_DIR / "agent_logs.py"),
-        "find", "--newer-than", str(final_task_file),
-        "--backend", opts.log_format,
-    ])
-    write_and_read(logfile_pointer, r.stdout.strip() if r.returncode == 0 else "")
-
-    # Git activity after
-    _run_ok([
-        sys.executable, str(SCRIPTS_DIR / "git_activity_snapshot.py"),
-        "capture", "--repo-root", str(REPO_ROOT),
-        "--output", str(git_after_file),
-    ])
-    git_before_file = _env_path("GIT_ACTIVITY_BEFORE_FILE")
-    _run_ok([
-        sys.executable, str(SCRIPTS_DIR / "git_activity_snapshot.py"),
-        "report",
-        "--before", str(git_before_file),
-        "--after", str(git_after_file),
-        "--out-dir", str(git_activity_dir),
-    ])
-
-    # Generate summary
+    # Generate summary (reads from files already populated by run-agent action)
     summary = _generate_summary(
         opts.cop, opts.backend, opts.mode,
         opts.run_url, opts.run_number, opts.base_sha,
     )
     write_and_read(summary_file, summary)
-
-    # Build artifact manifest
-    _run([
-        sys.executable, str(SCRIPTS_DIR / "agent_artifacts.py"),
-        "agent-cop-fix",
-        "--runtime-root", runtime_root,
-        "--output", str(manifest_file),
-    ])
-    manifest_content = manifest_file.read_text()
-    _output_multiline("artifact_paths", manifest_content)
 
     # Print agent summary
     agent_result_file = _env_path("AGENT_RESULT_FILE")
