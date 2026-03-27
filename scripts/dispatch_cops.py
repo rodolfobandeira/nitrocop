@@ -1996,7 +1996,7 @@ def cmd_dispatch_issues(args: argparse.Namespace) -> int:
 
     if not args.dry_run:
         import time as _time
-        max_wait, interval = 600, 30
+        max_wait, interval = 900, 30
         for elapsed in range(0, max_wait + 1, interval):
             healthy, health_reason = _main_checks_healthy(repo)
             if healthy:
