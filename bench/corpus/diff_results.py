@@ -617,6 +617,37 @@ def main():
     ok_repos = [r for r in repo_results if r["status"] == "ok"]
     err_repos = [r for r in repo_results if r["status"] != "ok"]
 
+    # ── Top divergence contributor repos (by number of diverging cops) ──
+    if multi_repo and by_repo_cop:
+        repo_diverging_cops: dict[str, int] = {}
+        repo_fp_cops: dict[str, int] = {}
+        repo_fn_cops: dict[str, int] = {}
+        for repo_id_key, cops in by_repo_cop.items():
+            fp_cops = sum(1 for c in cops.values() if c["fp"] > 0)
+            fn_cops = sum(1 for c in cops.values() if c["fn"] > 0)
+            diverging = sum(1 for c in cops.values() if c["fp"] + c["fn"] > 0)
+            if diverging > 0:
+                repo_diverging_cops[repo_id_key] = diverging
+                repo_fp_cops[repo_id_key] = fp_cops
+                repo_fn_cops[repo_id_key] = fn_cops
+
+        if repo_diverging_cops:
+            top = sorted(repo_diverging_cops.items(), key=lambda x: x[1], reverse=True)[:20]
+            md.append("## Top Divergence Contributors (repos with most diverging cops)")
+            md.append("")
+            md.append("| Repo | Diverging Cops | FP Cops | FN Cops | Total FP | Total FN |")
+            md.append("|------|---------------:|--------:|--------:|---------:|---------:|")
+            for repo_id_key, div_count in top:
+                r = next((x for x in ok_repos if x["repo"] == repo_id_key), None)
+                total_fp_count = r["fp"] if r else 0
+                total_fn_count = r["fn"] if r else 0
+                md.append(
+                    f"| {repo_id_key} | {div_count} | "
+                    f"{repo_fp_cops.get(repo_id_key, 0)} | {repo_fn_cops.get(repo_id_key, 0)} | "
+                    f"{total_fp_count:,} | {total_fn_count:,} |"
+                )
+            md.append("")
+
     # ── RuboCop warnings (parser crashes, errors) ──
     warn_and_err = warning_repos + err_repos
     if warn_and_err:
