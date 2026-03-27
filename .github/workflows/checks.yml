@@ -7,7 +7,13 @@ concurrency:
 on:
   push:
     branches: [main]
+  # Skip checks on empty PRs (agent-cop-fix creates a placeholder commit with
+  # zero changed files before the agent starts).  We use a paths filter instead
+  # of [skip ci] because the commit message survives squash-merge and would
+  # suppress the post-merge CI run on main.
   pull_request:
+    paths:
+      - "**/*"
 
 jobs:
   # Shared Linux release build — cop-check shards and corpus-smoke-test download
