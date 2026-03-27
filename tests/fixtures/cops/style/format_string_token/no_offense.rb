@@ -38,6 +38,12 @@ r = <<-TEXT % [name, target, score, result, elapsed, verify]
   time: %f
   verify: %f
 TEXT
+# Single-quoted multiline heredoc with % operator: unannotated tokens still not flagged
+# because Parser treats multiline heredocs as dstr in this context.
+r2 = <<-'TEXT' % [name, target]
+  block %s
+  target: %s
+TEXT
 # Multi-line %[] string literal with % operator: unannotated tokens not flagged
 # (RuboCop's Parser gem produces dstr for multi-line strings, so parts lose format context)
 s = %[service %s
@@ -45,3 +51,9 @@ s = %[service %s
 # String with interpolation in format specifier: %#{var}s is not a token
 t = format("%#{padding}s: %s", prefix, message)
 u = sprintf("| %-#{width}s | %-#{offset}s |", key, value)
+# Named tokens on continuation lines of plain multiline strings: Parser splits
+# these into dstr parts that lose ancestor context, so RuboCop doesn't flag them.
+v = _("Status update
+  %{url}") % { url: target_url }
+w = _("Status update
+  details: \n\n%{explanation}") % { explanation: reason }
