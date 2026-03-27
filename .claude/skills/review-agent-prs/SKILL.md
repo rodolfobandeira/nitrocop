@@ -79,3 +79,4 @@ Show a table of actions taken:
 - Do not merge PRs — only approve, fix+approve, or close
 - When fixing, commit with a clear message explaining what was changed
 - When closing, always leave a comment with the specific reason so the dispatch system can learn
+- If the diff contains changes to Python files (`.py`), treat this as suspicious — agent cop-fix should only touch Rust code and test fixtures. Flag it to the user before approving.
