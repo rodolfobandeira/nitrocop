@@ -53,15 +53,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Tools (Rust, Ruby, mold, uv, Node) are pre-installed in the container
-      # image built by build-agent-image.yml. Validate they're present.
-      - name: Validate container environment
-        run: |
-          for cmd in rustc cargo ruby mold python3 uv node git gh rg fdfind; do
-            command -v "$cmd" >/dev/null 2>&1 || { echo "::error::Missing $cmd in container image — rebuild with: gh workflow run build-agent-image.yml"; exit 1; }
-          done
-          rustc --version; ruby --version; mold --version
-
+      # Tools (Rust, Ruby, mold, gems, uv, gh, rg) are pre-installed in
+      # the container image. Only workspace-dependent steps run here.
       - name: Install Python deps
         run: uv sync --frozen
 

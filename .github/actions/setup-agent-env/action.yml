@@ -27,6 +27,8 @@ runs:
         ruby-version: '4.0'
         bundler-cache: false
 
+    - uses: astral-sh/setup-uv@v6
+
     - name: Install vendor RuboCop gems
       if: inputs.install_vendor_gems == 'true'
       shell: bash
