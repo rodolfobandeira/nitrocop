@@ -53,6 +53,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Container user differs from repo owner — mark safe for git/gh
+      - name: Mark repo safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       # Tools (Rust, Ruby, mold, gems, uv, gh, rg) are pre-installed in
       # the container image. Only workspace-dependent steps run here.
       - name: Install Python deps
