@@ -45,6 +45,7 @@ def test_agent_pr_repair_reads_linked_issue_and_can_update_it():
     content = AGENT_PR_REPAIR.read_text()
     assert '--json state --jq \'.state\'' in content
     assert "--json number,title,url,body,state" in content
+    assert "--require-trusted-bot" in content
     assert "types: [closed]" in content
     assert "github.event.pull_request.number" in content
     assert "linked_issue_number" in content
@@ -76,6 +77,11 @@ def test_agent_pr_repair_checks_out_repo_before_running_local_scripts():
     checkout_index = content.index("uses: actions/checkout@v6")
     pr_state_index = content.index("python3 scripts/workflows/repair_retry_policy.py pr-state")
     assert checkout_index < pr_state_index
+
+
+def test_agent_pr_repair_live_gate_reads_branch_name():
+    content = AGENT_PR_REPAIR.read_text()
+    assert "--json state,baseRefName,isCrossRepository,headRepository,author,labels,headRefName,headRefOid" in content
 
 
 def test_agent_pr_repair_distinguishes_agent_failure_from_verify_failure():

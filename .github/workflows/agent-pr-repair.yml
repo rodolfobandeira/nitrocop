@@ -162,6 +162,7 @@ jobs:
             --comments-json "$COMMENTS_JSON" \
             --repo "${{ github.repository }}" \
             --checks-head-sha "${{ steps.target.outputs.head_sha }}" \
+            ${{ github.event_name != 'workflow_dispatch' && '--require-trusted-bot' || '' }} \
             >> "$GITHUB_OUTPUT"
 
       - name: Skip closed PRs
@@ -389,11 +390,12 @@ jobs:
         run: |
           PR_JSON=$(gh pr view "${{ steps.pr.outputs.number }}" \
             --repo "${{ github.repository }}" \
-            --json state,baseRefName,isCrossRepository,headRepository,author,labels,headRefOid)
+            --json state,baseRefName,isCrossRepository,headRepository,author,labels,headRefName,headRefOid)
           python3 scripts/workflows/repair_retry_policy.py live-gate \
             --pr-json "$PR_JSON" \
             --repo "${{ github.repository }}" \
             --checks-head-sha "${{ steps.pr.outputs.head_sha }}" \
+            ${{ github.event_name != 'workflow_dispatch' && '--require-trusted-bot' || '' }} \
             >> "$GITHUB_OUTPUT"
 
       - name: Skip closed or moved PR before agent
