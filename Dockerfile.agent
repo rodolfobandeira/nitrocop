@@ -5,6 +5,11 @@
 # Rebuild: gh workflow run build-agent-image.yml
 # Used by: .github/workflows/agent-cop-fix.yml via `container:`
 
+# --- Stage 1: grab pre-built Ruby from official image ---
+ARG RUBY_VERSION=4.0
+FROM ruby:${RUBY_VERSION}-slim AS ruby-source
+
+# --- Stage 2: main image ---
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -55,20 +60,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --component rustfmt \
     && rustc --version && cargo --version
 
-# --- Ruby (via ruby-install) ---
-# Install ruby-install's build deps upfront so it doesn't need apt at runtime
-RUN apt-get update -qq && apt-get install -y --no-install-recommends \
-      autoconf bison libgdbm-dev libgmp-dev rustc \
-    && rm -rf /var/lib/apt/lists/*
-
-ARG RUBY_VERSION=4.0.2
-RUN curl -fsSL https://github.com/postmodern/ruby-install/releases/download/v0.9.3/ruby-install-0.9.3.tar.gz \
-      | tar xz -C /tmp \
-    && cd /tmp/ruby-install-0.9.3 \
-    && make install \
-    && ruby-install --system --no-install-deps ruby ${RUBY_VERSION} -- --disable-install-doc \
-    && rm -rf /tmp/ruby-install-0.9.3 \
-    && ruby --version
+# --- Ruby (pre-built from official Docker image) ---
+COPY --from=ruby-source /usr/local/bin/ruby /usr/local/bin/erb /usr/local/bin/irb /usr/local/bin/gem /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/rake /usr/local/bin/
+COPY --from=ruby-source /usr/local/lib/ruby/ /usr/local/lib/ruby/
+COPY --from=ruby-source /usr/local/lib/libruby* /usr/local/lib/
+RUN ldconfig && ruby --version
 
 # --- RuboCop gems (extracted from corpus Gemfile — auto-tracks vendor submodule versions) ---
 COPY bench/corpus/Gemfile /tmp/
@@ -85,5 +81,6 @@ RUN rustc --version && cargo --version \
     && ruby --version && gem --version \
     && mold --version \
     && node --version \
+    && gh --version \
     && uv --version \
     && echo "All tools verified"
