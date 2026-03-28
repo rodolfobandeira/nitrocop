@@ -27,6 +27,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
       locales \
       mold \
       ripgrep \
+      unzip \
       xz-utils \
       libffi-dev \
       libreadline-dev \
