@@ -42,9 +42,9 @@ ssh runner@$(terraform output -raw server_ip) tail -f /var/log/runner-setup.log
 
 The runner should appear at https://github.com/6/nitrocop/settings/actions/runners as "nitrocop-runner" with status "Idle".
 
-### 4. Route agent workflow to self-hosted
+### 4. Route Checks workflow to self-hosted
 
-In `agent-cop-fix.yml`, change:
+In `checks.yml`, change the build/test jobs:
 ```yaml
 runs-on: ubuntu-24.04
 ```
@@ -53,7 +53,14 @@ to:
 runs-on: [self-hosted, linux, x64, nitrocop]
 ```
 
-Other workflows (`checks.yml`, `corpus-oracle.yml`) stay on GitHub-hosted runners — they benefit more from matrix parallelism than from local cache.
+**Why Checks and not agent-cop-fix?** The agent workflow needs Codex/Claude
+CLIs and secrets that are difficult to set up on self-hosted. The agent
+itself is an API call that doesn't benefit from runner hardware. Meanwhile,
+Checks runs on every push to every PR — when 20+ agent PRs land around the
+same time, Checks is the bottleneck. A warm cargo cache on self-hosted makes
+incremental builds near-instant.
+
+`agent-cop-fix`, `agent-pr-repair`, and `corpus-oracle.yml` stay on GitHub-hosted runners.
 
 ## Runner Management
 
