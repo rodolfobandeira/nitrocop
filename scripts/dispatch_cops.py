@@ -1852,11 +1852,35 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
     if dept_filter:
         diverging_cops = {cop for cop in diverging_cops if cop.startswith(dept_filter + "/")}
 
-    created = updated = reopened = closed = 0
+    created = updated = reopened = closed = skipped_no_bugs = 0
 
     for cop in sorted(diverging_cops):
         entry = entries[cop]
         prior_prs = prs_by_cop.get(cop, [])
+
+        # Pre-diagnose: skip cops with 0 code bugs (all config/context)
+        if binary:
+            fn_bugs, fn_cfg = diagnose_examples(
+                binary, cop, entry.get("fn_examples", []), "fn",
+            )
+            fp_bugs, fp_cfg = diagnose_examples(
+                binary, cop, entry.get("fp_examples", []), "fp",
+            )
+            code_bugs = fn_bugs + fp_bugs
+            if code_bugs == 0:
+                existing_issue = issues_by_cop.get(cop)
+                if existing_issue and existing_issue.get("state") == "OPEN":
+                    open_pr = open_prs_by_cop.get(cop)
+                    if open_pr is None:
+                        close_tracker_issue(
+                            repo,
+                            existing_issue["number"],
+                            "Pre-diagnostic found 0 code bugs — all FP/FN are config/context issues.",
+                        )
+                        closed += 1
+                skipped_no_bugs += 1
+                continue
+
         recommendation = select_backend_for_entry(
             cop,
             entry,
@@ -1928,6 +1952,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
                 "updated": updated,
                 "reopened": reopened,
                 "closed": closed,
+                "skipped_no_bugs": skipped_no_bugs,
                 "diverging_cops": len(diverging_cops),
             },
             indent=2,
