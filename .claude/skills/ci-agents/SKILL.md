@@ -22,8 +22,7 @@ Before dispatching, verify the pipeline is set up:
 # Verify the workflows exist
 ls .github/workflows/agent-cop-fix.yml \
    .github/workflows/agent-pr-repair.yml \
-   .github/workflows/cop-issue-sync.yml \
-   .github/workflows/cop-issue-dispatch.yml
+   .github/workflows/cop-issue-sync.yml
 ```
 
 The user needs `CODEX_AUTH_JSON` configured in GitHub repo secrets.
@@ -34,9 +33,7 @@ See `docs/agent-dispatch.md` for setup instructions.
 When invoked without explicit arguments, use `AskUserQuestion` to gather:
 
 1. **Department** — Ask: "Which department do you want to target? (e.g., Rails, Style, Performance, or leave blank for all)"
-2. **Max concurrency** — For dispatch phase, ask: "How many concurrent agent runs? (default: 5)"
 
-Pass the answers through as `--department` / `--max-active` to the CLI and workflows.
 If the user provides these as skill arguments (e.g., `/ci-agents sync Rails`), skip the prompts.
 
 ## Phases
@@ -83,30 +80,18 @@ backend is chosen later by `agent-cop-fix` when the issue is dispatched.
 
 ### Phase 2: Dispatch
 
-Fill the bounded active queue from backlog issues:
+Dispatch cops directly via `agent-cop-fix`:
 
 ```bash
-gh workflow run cop-issue-dispatch.yml -f max_active=5
+gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars"
+gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars" -f backend=codex
+gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars" -f backend=claude
 ```
 
-Scope to a department with concurrency limit:
+To dispatch multiple cops, run one command per cop. To link to a tracker issue:
 
 ```bash
-gh workflow run cop-issue-dispatch.yml -f max_active=3 -f department=Rails
-```
-
-Dry run first if you want to inspect the selected queue:
-
-```bash
-gh workflow run cop-issue-dispatch.yml -f max_active=5 -f dry_run=true
-gh workflow run cop-issue-dispatch.yml -f max_active=3 -f department=Rails -f dry_run=true
-```
-
-If you need to force one backend across the dispatched issues:
-
-```bash
-gh workflow run cop-issue-dispatch.yml -f max_active=5 -f backend_override=codex -f strength_override=normal
-gh workflow run cop-issue-dispatch.yml -f max_active=5 -f backend_override=codex -f strength_override=hard
+gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars" -f issue_number=123
 ```
 
 ### Phase 3: Review + Merge
@@ -177,8 +162,8 @@ python3 scripts/ci-agents.py tiers
 - `/ci-agents` — start from Phase 1 (prompts for department interactively)
 - `/ci-agents sync` — jump to Phase 1 (prompts for department)
 - `/ci-agents sync Rails` — jump to Phase 1, scoped to Rails department
-- `/ci-agents dispatch` — jump to Phase 2 (prompts for department and max concurrency)
-- `/ci-agents dispatch Rails 3` — jump to Phase 2, Rails only, max 3 concurrent
+- `/ci-agents dispatch` — jump to Phase 2 (prompts for department)
+- `/ci-agents dispatch Rails` — jump to Phase 2, scoped to Rails department
 - `/ci-agents retry` — jump to Phase 4 (retry failures)
 - `/ci-agents status` — show current PR status and merge candidates
 - `/ci-agents validate` — jump to Phase 5 (trigger corpus oracle)
