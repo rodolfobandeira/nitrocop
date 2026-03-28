@@ -307,12 +307,7 @@ pub fn run(args: Args) -> Result<i32> {
     // Load config — use lockfile if available
     let config_start = std::time::Instant::now();
     let config = if args.force_default_config {
-        let mut cfg = config::ResolvedConfig::empty();
-        // --only Rails/Foo + --force-default-config should still run the cop.
-        // Without this, plugin departments are disabled because
-        // require_departments is empty in the default config.
-        cfg.enable_departments_for_cops(&args.only);
-        cfg
+        config::ResolvedConfig::empty()
     } else if use_cache {
         // Try to find config dir for lockfile lookup
         let lock_dir = target_dir.unwrap_or(std::path::Path::new("."));
