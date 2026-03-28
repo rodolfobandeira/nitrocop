@@ -522,7 +522,16 @@ fn extract_ruby_regexp(s: &str) -> Option<&str> {
     if s.starts_with('/') && s.len() > 1 {
         // Find the closing `/`, which may be followed by flags like `i`, `x`, `m`
         if let Some(end) = s[1..].rfind('/') {
-            return Some(&s[1..end + 1]);
+            // After the closing `/`, only valid Ruby regex flags may follow.
+            // If anything else is present (e.g., `*` from a glob), this is an
+            // absolute filesystem path, not a regexp.
+            let after_close = &s[end + 2..];
+            if after_close
+                .bytes()
+                .all(|b| matches!(b, b'i' | b'x' | b'm' | b'u' | b's' | b'n' | b'o' | b'e'))
+            {
+                return Some(&s[1..end + 1]);
+            }
         }
     }
     None
@@ -3361,11 +3370,19 @@ mod tests {
             extract_ruby_regexp("/(vendor|bundle|bin)($|\\/.*)/"),
             Some("(vendor|bundle|bin)($|\\/.*)")
         );
+        // Regex with flags
+        assert_eq!(extract_ruby_regexp("/pattern/i"), Some("pattern"));
+        assert_eq!(extract_ruby_regexp("/pattern/ixm"), Some("pattern"));
         // Not a regexp — just a regular string
         assert_eq!(extract_ruby_regexp("vendor/**"), None);
         assert_eq!(extract_ruby_regexp(""), None);
         // Single slash only — not a valid regexp
         assert_eq!(extract_ruby_regexp("/"), None);
+        // Absolute filesystem paths must NOT be treated as regexps
+        assert_eq!(extract_ruby_regexp("/fake/repo/cookbooks/**/*"), None);
+        assert_eq!(extract_ruby_regexp("/tmp/foo.rb"), None);
+        assert_eq!(extract_ruby_regexp("/home/user/vendor/**/*"), None);
+        assert_eq!(extract_ruby_regexp("/absolute/path/to/file.rb"), None);
     }
 
     #[test]
@@ -4636,6 +4653,112 @@ mod tests {
             migrated_schema_version: None,
         };
         assert!(!filter_set.is_cop_match(0, Path::new("anything.rb")));
+    }
+
+    #[test]
+    fn corpus_overlay_global_exclude_does_not_overmatch_sibling_dirs() {
+        // Reproduces the corpus overlay scenario where gen_repo_config.py
+        // generates absolute Exclude patterns. The overlay config lives at
+        // /tmp/nitrocop_corpus_configs/ (config_dir) while base_dir is the
+        // repo directory. Tests that /repo/cookbooks/**/* does NOT exclude
+        // /repo/cookbooks-override/... (sibling directory).
+        let pats: Vec<&str> = vec![
+            // Relative patterns from baseline config
+            "bin/**/*",
+            "tmp/**/*",
+            "node_modules/**/*",
+            // Absolute patterns from overlay (gen_repo_config.py)
+            "/fake/repo/vendor/**/*",
+            "/fake/repo/vendor*/**/*",
+            "/fake/repo/_vendor/**/*",
+            "/fake/repo/cookbooks/**/*",
+        ];
+        let global_exclude = build_glob_set(&pats).unwrap_or_else(GlobSet::empty);
+        let filter_set = CopFilterSet {
+            global_exclude,
+            global_exclude_patterns: pats.iter().map(|p| p.to_string()).collect(),
+            global_exclude_re: None,
+            filters: Vec::new(),
+            config_dir: Some(PathBuf::from("/tmp/nitrocop_corpus_configs")),
+            base_dir: Some(PathBuf::from("/fake/repo")),
+            sub_config_dirs: Vec::new(),
+            universal_cop_indices: Vec::new(),
+            pattern_cop_indices: Vec::new(),
+            migrated_schema_version: None,
+        };
+
+        // Positive: files under cookbooks/ should be excluded
+        assert!(
+            filter_set.is_globally_excluded(Path::new("/fake/repo/cookbooks/foo.rb")),
+            "cookbooks/**/* should exclude files under cookbooks/"
+        );
+        assert!(
+            filter_set.is_globally_excluded(Path::new("/fake/repo/cookbooks/ariadne/helpers.rb")),
+            "cookbooks/**/* should exclude nested files under cookbooks/"
+        );
+
+        // Bug claim: cookbooks-override/ should NOT be excluded
+        assert!(
+            !filter_set.is_globally_excluded(Path::new(
+                "/fake/repo/cookbooks-override/ariadne/libraries/helpers.rb"
+            )),
+            "cookbooks/**/* must NOT exclude cookbooks-override/ (sibling directory)"
+        );
+
+        // Positive: vendor patterns should work
+        assert!(
+            filter_set.is_globally_excluded(Path::new("/fake/repo/vendor/gems/foo.rb")),
+            "vendor/**/* should exclude files under vendor/"
+        );
+        // vendor*/**/* should match vendored_gems/ etc.
+        assert!(
+            filter_set.is_globally_excluded(Path::new("/fake/repo/vendored_gems/foo.rb")),
+            "vendor*/**/* should exclude vendored_gems/"
+        );
+    }
+
+    #[test]
+    fn corpus_overlay_cop_include_works_with_absolute_excludes() {
+        // Reproduces the EnvironmentVariableAccess scenario: cop has Include
+        // pattern **/lib/**/*.rb and AllCops.Exclude contains absolute paths
+        // from the corpus overlay. The cop should still match files under lib/.
+        let pats: Vec<&str> = vec![
+            "bin/**/*",
+            "tmp/**/*",
+            // Absolute parse-error exclusions from overlay
+            "/fake/repo/bad_syntax.rb",
+            "/fake/repo/vendor/**/*",
+        ];
+        let global_exclude = build_glob_set(&pats).unwrap_or_else(GlobSet::empty);
+        let filter = make_filter(true, &["**/lib/**/*.rb"], &[]);
+        let filter_set = CopFilterSet {
+            global_exclude,
+            global_exclude_patterns: pats.iter().map(|p| p.to_string()).collect(),
+            global_exclude_re: None,
+            filters: vec![filter],
+            config_dir: Some(PathBuf::from("/tmp/nitrocop_corpus_configs")),
+            base_dir: Some(PathBuf::from("/fake/repo")),
+            sub_config_dirs: Vec::new(),
+            universal_cop_indices: Vec::new(),
+            pattern_cop_indices: vec![0],
+            migrated_schema_version: None,
+        };
+
+        // Cop should match files under lib/ even with absolute excludes present
+        assert!(
+            filter_set.is_cop_match(0, Path::new("/fake/repo/lib/helpers.rb")),
+            "Include **/lib/**/*.rb should match /fake/repo/lib/helpers.rb"
+        );
+        assert!(
+            filter_set.is_cop_match(0, Path::new("/fake/repo/app/lib/concerns/helper.rb")),
+            "Include **/lib/**/*.rb should match nested lib/ path"
+        );
+
+        // Files not matching Include should still be excluded
+        assert!(
+            !filter_set.is_cop_match(0, Path::new("/fake/repo/app/models/user.rb")),
+            "Include **/lib/**/*.rb should NOT match app/models/"
+        );
     }
 
     #[test]
