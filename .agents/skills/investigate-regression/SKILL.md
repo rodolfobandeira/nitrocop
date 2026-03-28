@@ -17,12 +17,6 @@ python3 scripts/investigate_regression.py --repo 6/nitrocop --corpus standard --
 python3 scripts/investigate_regression.py --repo 6/nitrocop --corpus standard --action dispatch-simple
 ```
 
-For GitHub-hosted execution:
-
-```bash
-gh workflow run investigate-regression.yml -f corpus=standard -f action=report
-```
-
 Decision rule:
 - one merged bot PR candidate => strong revert candidate
 - otherwise, simple issue => dispatch repair

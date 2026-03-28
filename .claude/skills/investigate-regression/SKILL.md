@@ -37,14 +37,6 @@ Reopen issues and dispatch simple regressions back into `agent-cop-fix`:
 python3 scripts/investigate_regression.py --repo 6/nitrocop --action dispatch-simple
 ```
 
-## Workflow entrypoint
-
-For GitHub-hosted execution, use:
-
-```bash
-gh workflow run investigate-regression.yml -f corpus=standard -f action=report
-```
-
 ## Decision rule
 
 - If there is exactly one merged bot PR candidate for the regressed cop in the run window, treat that as a strong revert candidate.
