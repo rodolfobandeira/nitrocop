@@ -10,8 +10,6 @@ AGENT_COP_FIX = ROOT / ".github" / "workflows" / "agent-cop-fix.yml"
 COP_FIX_LIFECYCLE = ROOT / "scripts" / "workflows" / "cop_fix_lifecycle.py"
 AGENT_PR_REPAIR = ROOT / ".github" / "workflows" / "agent-pr-repair.yml"
 COP_ISSUE_SYNC = ROOT / ".github" / "workflows" / "cop-issue-sync.yml"
-COP_ISSUE_DISPATCH = ROOT / ".github" / "workflows" / "cop-issue-dispatch.yml"
-INVESTIGATE_REGRESSION = ROOT / ".github" / "workflows" / "investigate-regression.yml"
 CORPUS_ORACLE = ROOT / ".github" / "workflows" / "corpus-oracle.yml"
 
 
@@ -99,19 +97,6 @@ def test_issue_sync_workflow_uses_app_token_and_dispatch_script():
     assert "python3 scripts/dispatch_cops.py issues-sync" in content
     assert "--binary target/debug/nitrocop" in content
 
-
-def test_issue_dispatch_workflow_uses_github_token_and_dispatch_script():
-    content = COP_ISSUE_DISPATCH.read_text()
-    assert "github.token" in content
-    assert "python3 scripts/dispatch_cops.py dispatch-issues" in content
-    assert "--max-active" in content
-
-
-def test_investigate_regression_workflow_uses_script():
-    content = INVESTIGATE_REGRESSION.read_text()
-    assert "actions/create-github-app-token@v3" in content
-    assert "python3 scripts/investigate_regression.py" in content
-    assert "dispatch-simple" in content
 
 
 def test_corpus_oracle_workflow_uses_dynamic_pr_renderer():
