@@ -106,6 +106,7 @@ DIFFICULTY_LABELS = {
     "simple": "difficulty:simple",
     "medium": "difficulty:medium",
     "complex": "difficulty:complex",
+    "config-only": "difficulty:config-only",
 }
 LABEL_COLORS = {
     TRACKER_LABEL: "1d76db",
@@ -115,6 +116,7 @@ LABEL_COLORS = {
     "difficulty:simple": "0e8a16",
     "difficulty:medium": "fbca04",
     "difficulty:complex": "d73a4a",
+    "difficulty:config-only": "c5def5",
 }
 TITLE_RE = re.compile(r"^\[bot\] Fix (?P<cop>.+?)(?: \(retry\))?$")
 TRACKER_RE = re.compile(r"<!--\s*" + re.escape(COP_TRACKER_MARKER) + r":\s*(.*?)\s*-->")
@@ -1852,34 +1854,22 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
     if dept_filter:
         diverging_cops = {cop for cop in diverging_cops if cop.startswith(dept_filter + "/")}
 
-    created = updated = reopened = closed = skipped_no_bugs = 0
+    created = updated = reopened = closed = config_only = 0
 
     for cop in sorted(diverging_cops):
         entry = entries[cop]
         prior_prs = prs_by_cop.get(cop, [])
 
-        # Pre-diagnose: skip cops with 0 code bugs (all config/context)
+        # Pre-diagnose: label cops with 0 code bugs as config-only
+        is_config_only = False
         if binary:
-            fn_bugs, fn_cfg = diagnose_examples(
+            fn_bugs, _ = diagnose_examples(
                 binary, cop, entry.get("fn_examples", []), "fn",
             )
-            fp_bugs, fp_cfg = diagnose_examples(
+            fp_bugs, _ = diagnose_examples(
                 binary, cop, entry.get("fp_examples", []), "fp",
             )
-            code_bugs = fn_bugs + fp_bugs
-            if code_bugs == 0:
-                existing_issue = issues_by_cop.get(cop)
-                if existing_issue and existing_issue.get("state") == "OPEN":
-                    open_pr = open_prs_by_cop.get(cop)
-                    if open_pr is None:
-                        close_tracker_issue(
-                            repo,
-                            existing_issue["number"],
-                            "Pre-diagnostic found 0 code bugs — all FP/FN are config/context issues.",
-                        )
-                        closed += 1
-                skipped_no_bugs += 1
-                continue
+            is_config_only = (fn_bugs + fp_bugs) == 0
 
         recommendation = select_backend_for_entry(
             cop,
@@ -1888,7 +1878,9 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
             binary=binary,
             prior_prs=prior_prs,
         )
-        difficulty = classify_issue_difficulty(entry, recommendation)
+        difficulty = "config-only" if is_config_only else classify_issue_difficulty(entry, recommendation)
+        if is_config_only:
+            config_only += 1
         open_pr = open_prs_by_cop.get(cop)
         existing_issue = issues_by_cop.get(cop)
         state_label = choose_issue_state(existing_issue, open_pr is not None, entry)
@@ -1952,7 +1944,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
                 "updated": updated,
                 "reopened": reopened,
                 "closed": closed,
-                "skipped_no_bugs": skipped_no_bugs,
+                "config_only": config_only,
                 "diverging_cops": len(diverging_cops),
             },
             indent=2,
