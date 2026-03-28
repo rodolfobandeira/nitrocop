@@ -80,6 +80,14 @@ backend is chosen later by `agent-cop-fix` when the issue is dispatched.
 
 ### Phase 2: Dispatch
 
+Find dispatchable cops (skip `difficulty:config-only` — those need config resolution work, not cop logic fixes):
+
+```bash
+gh issue list --state open --label "type:cop-issue" --label "state:backlog" --limit 50 \
+  --json number,title,labels \
+  -q '.[] | select(.labels | map(.name) | all(. != "difficulty:config-only")) | "#\(.number) \(.title)"'
+```
+
 Dispatch cops directly via `agent-cop-fix`:
 
 ```bash
