@@ -2,6 +2,7 @@
 name: ci-agents
 description: Manage CI agents — sync tracker issues, dispatch cop-fix tasks, review PRs, retry failures
 allowed-tools: Bash(*), Read, Grep, Glob, AskUserQuestion
+disable-model-invocation: true
 ---
 
 # CI Agents — Remote Agent Orchestration

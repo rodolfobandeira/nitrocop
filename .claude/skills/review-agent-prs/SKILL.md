@@ -1,3 +1,8 @@
+---
+name: review-agent-prs
+disable-model-invocation: true
+---
+
 # review-agent-prs
 
 Review PRs created by the agent cop fix workflow. Approve good ones so workflow auto-merge can land them, fix minor issues, or close bad ones.
