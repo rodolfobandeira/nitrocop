@@ -60,7 +60,13 @@ Checks runs on every push to every PR — when 20+ agent PRs land around the
 same time, Checks is the bottleneck. A warm cargo cache on self-hosted makes
 incremental builds near-instant.
 
-`agent-cop-fix`, `agent-pr-repair`, and `corpus-oracle.yml` stay on GitHub-hosted runners.
+`agent-cop-fix` and `agent-pr-repair` stay on GitHub-hosted runners (they
+need Codex/Claude CLIs and secrets).
+
+`corpus-oracle.yml` is also a good candidate for self-hosted — it's the
+slowest workflow (25-60 min) and typically runs during quiet periods when
+nothing else needs the runner. A warm cargo cache would cut build time
+significantly.
 
 ## Runner Management
 
