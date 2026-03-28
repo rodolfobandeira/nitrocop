@@ -40,6 +40,7 @@ def main():
     # file's parent (bench/corpus/), not the repo dir. The overlay converts
     # them to absolute paths so they actually match.
     global_patterns = [
+        ".*/**/*",
         "vendor/**/*",
         "vendor*/**/*",
         "_vendor/**/*",
