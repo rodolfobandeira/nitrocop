@@ -158,7 +158,10 @@ def _compute_gate(by_repo_cop, cop, per_repo):
     """Replicate the gate logic from check_cop.py for testing.
 
     Returns (new_fp, new_fn, resolved_fp, resolved_fn, net_fp, net_fn).
-    The gate FAILs when net_fp > 0 or net_fn > 0.
+
+    Gate behavior depends on mode:
+    - Strict (default, used by agents): FAIL when new_fp > 0 or new_fn > 0
+    - --allow-net-improvement (CI): FAIL when net_fp > 0 or net_fn > 0
     """
     oracle_nitrocop_counts = {}
     oracle_rubocop_counts = {}
@@ -348,3 +351,23 @@ def test_gate_fp_net_improvement_passes():
     assert resolved_fp == 3
     assert net_fp < 0
     assert net_fn <= 0
+
+
+def test_gate_strict_fails_on_any_regression():
+    """Without --allow-net-improvement, any per-repo regression fails."""
+    by_repo_cop = {
+        "repo-a": {"Style/Foo": {"matches": 5, "fp": 0, "fn": 5}},
+        "repo-b": {"Style/Foo": {"matches": 0, "fp": 0, "fn": 20}},
+    }
+    per_repo = {
+        "repo-a": 3,   # worse: +2 new FN
+        "repo-b": 15,  # better: resolved 15 FN
+    }
+    _new_fp, new_fn, _r_fp, resolved_fn, _net_fp, net_fn = _compute_gate(
+        by_repo_cop, "Style/Foo", per_repo
+    )
+    # Net is an improvement
+    assert net_fn < 0
+    # But strict mode (default) uses new_fn, not net_fn
+    assert new_fn == 2  # would FAIL in strict mode (agents)
+    # --allow-net-improvement uses net_fn which is negative → PASS in CI

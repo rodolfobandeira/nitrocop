@@ -581,6 +581,10 @@ def main():
     parser.add_argument("--repo-cwd", action="store_true",
                         help="Run nitrocop with cwd=repo_dir so Include patterns resolve. "
                              "Auto-enabled for Include-gated cops with zero baseline data.")
+    parser.add_argument("--allow-net-improvement", action="store_true",
+                        help="Pass the gate when per-repo regressions are offset by "
+                             "improvements elsewhere (net FP/FN did not increase). "
+                             "Without this flag, ANY per-repo regression fails.")
     args = parser.parse_args()
 
     # --rerun implies --quick unless --all-repos is explicitly set.
@@ -937,18 +941,24 @@ def main():
         print()
 
         failed = False
-        # Net regression: fail only if new regressions exceed resolved
-        # improvements. Per-repo shifts that are offset by improvements
-        # elsewhere are acceptable (net improvement or flat).
-        net_fp = new_fp - resolved_fp
-        net_fn = new_fn - resolved_fn
-        if net_fp > args.threshold:
-            print(f"FAIL: FP regression detected (net +{net_fp:,}, new={new_fp:,}, resolved={resolved_fp:,})")
+        # With --allow-net-improvement, per-repo regressions that are offset
+        # by improvements elsewhere pass (net FP/FN did not increase).
+        # Without it (default, used by agents), ANY per-repo regression fails.
+        if args.allow_net_improvement:
+            fp_gate = max(0, new_fp - resolved_fp)
+            fn_gate = max(0, new_fn - resolved_fn)
+        else:
+            fp_gate = new_fp
+            fn_gate = new_fn
+        if fp_gate > args.threshold:
+            label = f"net +{new_fp - resolved_fp:,}" if args.allow_net_improvement else f"+{new_fp:,}"
+            print(f"FAIL: FP regression detected ({label})")
             for repo_id, local, bl_nc, bl_rc, diff in sorted(fp_repos, key=lambda x: -x[4])[:10]:
                 print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
-        if net_fn > args.threshold:
-            print(f"FAIL: FN regression detected (net +{net_fn:,}, new={new_fn:,}, resolved={resolved_fn:,})")
+        if fn_gate > args.threshold:
+            label = f"net +{new_fn - resolved_fn:,}" if args.allow_net_improvement else f"+{new_fn:,}"
+            print(f"FAIL: FN regression detected ({label})")
             for repo_id, local, bl_nc, bl_rc, diff in sorted(fn_repos, key=lambda x: -x[4])[:10]:
                 print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
