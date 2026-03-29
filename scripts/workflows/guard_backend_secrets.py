@@ -105,10 +105,9 @@ def _load_all_secrets(
             file=sys.stderr,
         )
     if not values and var_names:
-        print(
-            "::warning::Leak scan: ALL secret env vars are missing. "
-            "Artifacts will not be scanned. Check secret passthrough.",
-            file=sys.stderr,
+        raise ValueError(
+            "All secret env vars are missing — cannot scan artifacts. "
+            "Check secret passthrough in the workflow."
         )
     return values
 
