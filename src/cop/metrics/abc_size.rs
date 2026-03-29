@@ -248,14 +248,13 @@ use crate::parse::source::SourceFile;
 /// patterns not loaded identically), gisiahq (1, config), noosfero (3, vendored
 /// plugin files). All infrastructure, not cop logic.
 ///
-/// FN=6 remaining: Coursemology (6). Root cause: file has
-/// `# rubocop:disable Metrics/abcSize` (lowercase 'a') at line 2. RuboCop's
-/// Badge hash is case-sensitive, so `Metrics/abcSize` ≠ `Metrics/AbcSize` and
-/// the directive is ignored (offenses fire). nitrocop uses case-insensitive
-/// directive matching (eq_ignore_ascii_case), so it suppresses offenses. This
-/// is a directive-resolution edge case, not a cop algorithm bug. See WARNING
-/// comment in `parse/directives.rs:447` — tightening case sensitivity caused
-/// +292 FP in a previous attempt.
+/// FN=6 remaining at that time: Coursemology (6). Root cause was
+/// `# rubocop:disable Metrics/abcSize` (lowercase `a`) at line 2. RuboCop
+/// still reports `Metrics/AbcSize` there, but nitrocop's directive matcher
+/// then resolved cop names too broadly and suppressed the offenses. This was a
+/// directive-resolution edge case, not an ABC counter bug, and was later fixed
+/// centrally in commit `8eba06ba` by matching RuboCop-style directive
+/// qualification semantics.
 ///
 /// ## Corpus investigation (2026-03-28)
 ///
@@ -280,14 +279,12 @@ use crate::parse::source::SourceFile;
 /// Both offending files begin with `# rubocop:disable Metrics/abcSize`
 /// (lowercase `a`). RuboCop still reports the `Metrics/AbcSize` offenses on
 /// those files, proving the directive spelling does NOT suppress the cop there.
-/// nitrocop currently matches directive names case-insensitively, so it
-/// suppresses those offenses and appears to miss them. Removing only that
-/// directive line makes nitrocop report the same offenses immediately, which
-/// confirms the ABC counter itself is already correct for these methods.
+/// Removing only that directive line made nitrocop report the same offenses
+/// immediately, confirming the ABC counter itself was already correct for
+/// those methods.
 ///
-/// No counting logic change is taken in this cop. The remaining mismatch lives
-/// in directive resolution, outside this cop's allowed edit scope, and a prior
-/// attempt to tighten directive matching broadly caused large regressions.
+/// No counting logic change was needed in this cop. The mismatch was in
+/// directive resolution and was later fixed centrally in commit `8eba06ba`.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
