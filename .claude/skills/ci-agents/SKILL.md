@@ -44,7 +44,7 @@ If the user provides these as skill arguments (e.g., `/ci-agents sync Rails`), s
 Inspect the current dispatchable set and sync the tracker issues:
 
 ```bash
-python3 scripts/ci-agents.py rank
+python3 scripts/dispatch_cops.py rank
 gh workflow run cop-issue-sync.yml
 ```
 
@@ -61,13 +61,13 @@ cops with at least 1 real code bug.
 For the lighter Codex lane, prefer cops with 3-10 total FP+FN and mostly code bugs:
 
 ```bash
-python3 scripts/ci-agents.py rank --min-bugs 2 --max-total 10
+python3 scripts/dispatch_cops.py rank --min-bugs 2 --max-total 10
 ```
 
 For harder cops or overview by tier:
 
 ```bash
-python3 scripts/ci-agents.py tiers --tier 1   # simple FP+FN count view
+python3 scripts/dispatch_cops.py tiers --tier 1   # simple FP+FN count view
 python3 scripts/investigate_cop.py Department/CopName --context  # deep dive
 ```
 
@@ -173,7 +173,7 @@ gh workflow run corpus-oracle.yml
 Wait ~90 min, then check results:
 
 ```bash
-python3 scripts/ci-agents.py tiers
+python3 scripts/dispatch_cops.py tiers
 ```
 
 ## Arguments
