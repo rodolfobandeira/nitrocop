@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Tests for dispatch_cops.py helper functions."""
 import importlib.util
-import io
-import json
-from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -285,15 +282,6 @@ def test_choose_issue_state_unblocks_when_numbers_change():
     assert gct.choose_issue_state(issue, has_open_pr=False, entry={"fp": 1, "fn": 4}) == "state:backlog"
 
 
-def test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop():
-    issues = [
-        {"number": 3, "title": "[cop] Style/Zed", "body": "<!-- nitrocop-cop-tracker: cop=Style/Zed total=4 difficulty=simple -->", "labels": []},
-        {"number": 1, "title": "[cop] Layout/Foo", "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo total=3 difficulty=simple -->", "labels": []},
-        {"number": 2, "title": "[cop] Metrics/Bar", "body": "<!-- nitrocop-cop-tracker: cop=Metrics/Bar total=2 difficulty=medium -->", "labels": []},
-    ]
-    ordered = gct.sorted_dispatch_candidates(issues)
-    assert [issue["number"] for issue in ordered] == [1, 3, 2]
-
 
 def test_sync_issue_labels_removes_then_readds_labels():
     calls = []
@@ -400,57 +388,6 @@ def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
     assert any(call[0] == "close" and call[1] == 12 for call in calls)
 
 
-def test_cmd_dispatch_issues_respects_capacity_and_uses_auto_backend():
-    original_list_tracker_issues = gct.list_tracker_issues
-    original_active_agent_fix_count = gct.active_agent_fix_count
-    original_run = gct.subprocess.run
-    gct.list_tracker_issues = lambda repo: [
-        {
-            "number": 21,
-            "title": "[cop] Layout/Foo",
-            "state": "OPEN",
-            "body": "<!-- nitrocop-cop-tracker: cop=Layout/Foo fp=1 fn=2 total=3 matches=60 difficulty=simple -->",
-            "labels": [{"name": "type:cop-issue"}, {"name": "state:backlog"}, {"name": "difficulty:simple"}],
-        },
-        {
-            "number": 22,
-            "title": "[cop] Style/Bar",
-            "state": "OPEN",
-            "body": "<!-- nitrocop-cop-tracker: cop=Style/Bar fp=2 fn=2 total=4 matches=80 difficulty=medium -->",
-            "labels": [{"name": "type:cop-issue"}, {"name": "state:backlog"}, {"name": "difficulty:medium"}],
-        },
-    ]
-    gct.active_agent_fix_count = lambda repo: (1, 1, 1)
-    gct.subprocess.run = lambda *args, **kwargs: SimpleNamespace(stdout="[]", stderr="", returncode=0)
-    stdout = io.StringIO()
-    try:
-        with redirect_stdout(stdout):
-            gct.cmd_dispatch_issues(
-                SimpleNamespace(
-                    repo="6/nitrocop",
-                    max_active=2,
-                    dry_run=True,
-                    backend_family_override="auto",
-                    department=None,
-                )
-            )
-    finally:
-        gct.list_tracker_issues = original_list_tracker_issues
-        gct.active_agent_fix_count = original_active_agent_fix_count
-        gct.subprocess.run = original_run
-    payload = json.loads(stdout.getvalue())
-    assert payload["capacity"] == 1
-    assert payload["selected"] == [
-        {
-            "issue": 21,
-            "cop": "Layout/Foo",
-            "difficulty": "simple",
-            "backend_family": "auto",
-            "mode": "fix",
-        }
-    ]
-
-
 if __name__ == "__main__":
     test_pascal_to_snake()
     test_parse_cop_name()
@@ -474,8 +411,6 @@ if __name__ == "__main__":
     test_build_start_here_section_uses_repo_hotspots_and_examples()
     test_build_start_here_section_empty_when_no_corpus_examples()
     test_choose_issue_state_preserves_blocked_without_open_pr()
-    test_sorted_dispatch_candidates_orders_by_tier_then_total_then_cop()
     test_sync_issue_labels_removes_then_readds_labels()
     test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue()
-    test_cmd_dispatch_issues_respects_capacity_and_uses_auto_backend()
     print("All tests passed.")

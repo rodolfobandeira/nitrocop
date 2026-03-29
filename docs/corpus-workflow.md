@@ -49,7 +49,6 @@ Issue-backed cop dispatch:
 
 ```bash
 python3 scripts/dispatch_cops.py issues-sync --binary target/debug/nitrocop
-python3 scripts/dispatch_cops.py dispatch-issues --max-active 5
 python3 scripts/dispatch_cops.py backend --cop Department/CopName --binary target/debug/nitrocop
 ```
 

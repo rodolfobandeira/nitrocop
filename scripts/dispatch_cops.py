@@ -11,8 +11,6 @@ Public subcommands:
 - `prior-attempts` collects failed PR attempts for a cop
 - `backend` selects a recommended backend for a cop
 - `issues-sync` syncs one tracker issue per diverging cop
-- `dispatch-issues` fills the bounded active queue by dispatching tracker issues
-
 Usage:
     python3 scripts/dispatch_cops.py task Style/NegatedWhile
     python3 scripts/dispatch_cops.py changed --base origin/main --head HEAD
@@ -22,8 +20,6 @@ Usage:
     python3 scripts/dispatch_cops.py backend --cop Style/NegatedWhile --binary target/debug/nitrocop
     python3 scripts/dispatch_cops.py issues-sync --binary target/debug/nitrocop
     python3 scripts/dispatch_cops.py issues-sync --department Rails --binary target/debug/nitrocop
-    python3 scripts/dispatch_cops.py dispatch-issues --max-active 5
-    python3 scripts/dispatch_cops.py dispatch-issues --department Rails --max-active 3
 """
 
 import argparse
@@ -2044,160 +2040,6 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def active_agent_fix_count(repo: str) -> tuple[int, int, int]:
-    open_prs = list_agent_fix_prs(repo, state="open")
-    open_count = len(open_prs)
-    try:
-        runs_json = run_gh([
-            "api",
-            f"repos/{repo}/actions/workflows/agent-cop-fix.yml/runs?per_page=100",
-        ])
-    except subprocess.CalledProcessError:
-        return open_count, 0, open_count
-
-    runs = json.loads(runs_json or "{}").get("workflow_runs", [])
-    in_progress = sum(
-        1
-        for run in runs
-        if run.get("status") in {"queued", "in_progress"}
-    )
-    return open_count, in_progress, max(open_count, in_progress)
-
-
-def sorted_dispatch_candidates(issues: list[dict]) -> list[dict]:
-    def key(issue: dict) -> tuple[int, int, str]:
-        fields = parse_marker_fields(issue.get("body", ""), TRACKER_RE)
-        difficulty = fields.get("difficulty", "complex")
-        difficulty_rank = {"simple": 0, "medium": 1, "complex": 2}.get(difficulty, 2)
-        total = int(fields.get("total", "999999"))
-        cop = extract_cop_from_issue(issue) or issue.get("title", "")
-        return difficulty_rank, total, cop
-
-    return sorted(issues, key=key)
-
-
-def _main_checks_healthy(repo: str) -> tuple[bool, str]:
-    """Check if the latest Checks run on main succeeded."""
-    try:
-        result = subprocess.run(
-            ["gh", "run", "list", "--workflow=checks.yml", "--branch=main",
-             "--repo", repo, "--limit", "1", "--json", "conclusion,status",
-             "-q", ".[0] // empty"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if not result.stdout.strip():
-            return True, "no runs found"
-        import json as _json
-        run = _json.loads(result.stdout.strip())
-        status = run.get("status", "")
-        conclusion = run.get("conclusion", "")
-        if status != "completed":
-            return False, f"latest Checks on main is still {status}"
-        if conclusion == "success":
-            return True, "passing"
-        return False, f"latest Checks on main concluded: {conclusion}"
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return True, "could not check (proceeding anyway)"
-
-
-def cmd_dispatch_issues(args: argparse.Namespace) -> int:
-    repo = args.repo
-
-    if not args.dry_run:
-        import time as _time
-        max_wait, interval = 900, 30
-        for elapsed in range(0, max_wait + 1, interval):
-            healthy, health_reason = _main_checks_healthy(repo)
-            if healthy:
-                break
-            if "in_progress" not in health_reason and "queued" not in health_reason:
-                # Hard failure (not just pending) — don't wait
-                print(f"ERROR: {health_reason}. Fix main before dispatching.", file=sys.stderr)
-                return 1
-            print(f"Waiting for main Checks ({health_reason})... {elapsed}s/{max_wait}s", file=sys.stderr)
-            _time.sleep(interval)
-        else:
-            print(f"ERROR: main Checks did not pass within {max_wait}s. Last: {health_reason}", file=sys.stderr)
-            return 1
-
-    issues = list_tracker_issues(repo)
-    dept_filter = args.department
-    eligible = [
-        issue for issue in issues
-        if issue.get("state") == "OPEN" and STATE_BACKLOG in issue_label_names(issue)
-        and (not dept_filter or (extract_cop_from_issue(issue) or "").startswith(dept_filter + "/"))
-    ]
-    eligible = sorted_dispatch_candidates(eligible)
-    open_count, in_progress, active = active_agent_fix_count(repo)
-    capacity = max(args.max_active - active, 0)
-    selected = eligible[:capacity]
-
-    result = {
-        "open_agent_fix_prs": open_count,
-        "in_progress_agent_fix_runs": in_progress,
-        "active_count": active,
-        "max_active": args.max_active,
-        "capacity": capacity,
-        "selected": [],
-    }
-
-    for issue in selected:
-        cop = extract_cop_from_issue(issue)
-        if not cop:
-            continue
-        # Lint/RedundantCopDisableDirective is a meta-cop: its detection
-        # runs in linter.rs after all other cops and requires their results
-        # to determine which disable comments are redundant.  check_cop.py
-        # --rerun uses --only which filters out all other cops, so the
-        # meta-cop always returns 0 offenses.  Agents cannot validate
-        # their work, so refuse to dispatch.
-        if cop == "Lint/RedundantCopDisableDirective":
-            print(f"SKIP dispatch: {cop} is a meta-cop incompatible with "
-                  f"per-cop corpus validation (--only mode)", file=sys.stderr)
-            comment_on_issue(
-                repo, issue["number"],
-                f"Skipping automated dispatch: `{cop}` is a meta-cop whose "
-                f"detection requires all cops to run simultaneously. "
-                f"`check_cop.py --rerun` uses `--only` which is incompatible "
-                f"with this cop. Manual fix required.",
-            )
-            continue
-        fields = parse_marker_fields(issue.get("body", ""), TRACKER_RE)
-        difficulty = fields.get("difficulty", "complex")
-        backend_family = args.backend_family_override
-        # Use retry mode if there are prior failed PRs so the agent gets
-        # context about what was already tried and why it failed.
-        prior_prs = find_prior_prs(cop)
-        has_failed_prior = any(not pr.get("mergedAt") for pr in prior_prs)
-        mode = "retry" if has_failed_prior else "fix"
-        result["selected"].append(
-            {
-                "issue": issue["number"],
-                "cop": cop,
-                "difficulty": difficulty,
-                "backend_family": backend_family,
-                "mode": mode,
-            }
-        )
-        if args.dry_run:
-            continue
-        cmd = [
-            "gh", "workflow", "run", "agent-cop-fix.yml",
-            "--repo", repo,
-            "-f", f"cop={cop}",
-            "-f", f"backend={backend_family}",
-            "-f", f"mode={mode}",
-            "-f", f"issue_number={issue['number']}",
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"ERROR dispatching {cop}: {proc.stderr.strip()}", file=sys.stderr)
-            proc.check_returncode()
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
 def main():
     parser = argparse.ArgumentParser(description="Dispatch-related corpus tooling")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2253,30 +2095,6 @@ def main():
         help="Only sync cops in this department (e.g., Rails, Style, Performance)",
     )
     issues_sync.add_argument(
-        "--repo",
-        default=os.environ.get("GITHUB_REPOSITORY", ""),
-        help="GitHub repo (owner/name)",
-    )
-
-    dispatch_issues = subparsers.add_parser("dispatch-issues", help="Dispatch backlog issues into agent-cop-fix")
-    dispatch_issues.add_argument("--max-active", type=int, default=5)
-    dispatch_issues.add_argument("--dry-run", action="store_true")
-    dispatch_issues.add_argument(
-        "--department",
-        help="Only dispatch cops in this department (e.g., Rails, Style, Performance)",
-    )
-    dispatch_issues.add_argument(
-        "--backend-family-override",
-        choices=["auto", "codex", "claude", "claude-oauth", "minimax"],
-        default="auto",
-    )
-    dispatch_issues.add_argument(
-        "--strength-override",
-        choices=["normal", "hard"],
-        default="hard",
-        help="Strength override (currently always hard)",
-    )
-    dispatch_issues.add_argument(
         "--repo",
         default=os.environ.get("GITHUB_REPOSITORY", ""),
         help="GitHub repo (owner/name)",
@@ -2414,12 +2232,6 @@ def main():
             print("Error: --repo or GITHUB_REPOSITORY is required", file=sys.stderr)
             raise SystemExit(1)
         raise SystemExit(cmd_issues_sync(args))
-
-    if args.command == "dispatch-issues":
-        if not args.repo:
-            print("Error: --repo or GITHUB_REPOSITORY is required", file=sys.stderr)
-            raise SystemExit(1)
-        raise SystemExit(cmd_dispatch_issues(args))
 
 
 if __name__ == "__main__":
