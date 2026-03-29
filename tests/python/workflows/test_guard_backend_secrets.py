@@ -127,6 +127,46 @@ def test_ignore_missing_skips_absent_vars():
     assert "::add-mask::mm-secret-key" in result.stdout
 
 
+def test_ignore_missing_warns_on_partial_skip():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+        f.write("clean")
+        f.flush()
+        result = run(
+            [
+                "--ignore-missing",
+                "--from-env",
+                "MINIMAX_API_KEY",
+                "--from-env",
+                "CODEX_AUTH_JSON",
+                "scan-files",
+                f.name,
+            ],
+            {"MINIMAX_API_KEY": "mm-secret-key"},
+        )
+    assert result.returncode == 0
+    assert "::warning::" in result.stderr
+    assert "CODEX_AUTH_JSON" in result.stderr
+
+
+def test_ignore_missing_fails_when_all_missing():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+        f.write("clean")
+        f.flush()
+        result = run(
+            [
+                "--ignore-missing",
+                "--from-env",
+                "MINIMAX_API_KEY",
+                "--from-env",
+                "CODEX_AUTH_JSON",
+                "scan-files",
+                f.name,
+            ],
+        )
+    assert result.returncode != 0
+    assert "All secret env vars are missing" in result.stderr
+
+
 if __name__ == "__main__":
     test_emit_masks_outputs_commands_for_codex_auth()
     test_emit_masks_outputs_commands_for_api_key()
@@ -135,4 +175,6 @@ if __name__ == "__main__":
     test_scan_files_fails_on_api_key_leak()
     test_scan_manifest_reads_patterns_from_file()
     test_ignore_missing_skips_absent_vars()
+    test_ignore_missing_warns_on_partial_skip()
+    test_ignore_missing_fails_when_all_missing()
     print("All tests passed.")
