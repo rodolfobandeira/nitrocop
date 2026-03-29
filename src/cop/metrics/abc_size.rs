@@ -271,6 +271,23 @@ use crate::parse::source::SourceFile;
 /// extra A+1. In Prism these are separate node types (not CallNode), so
 /// `value_compound_extra` didn't catch them. Fix: added checks for
 /// `ForwardingSuperNode`, `SuperNode`, and `YieldNode` in `value_compound_extra`.
+///
+/// ## Corpus investigation (2026-03-29)
+///
+/// Re-verified the 6 remaining Coursemology FN against the real repository
+/// checkout at commit `70d42e79b7d074c25453b1d97a76495b92b60ddc`.
+///
+/// Both offending files begin with `# rubocop:disable Metrics/abcSize`
+/// (lowercase `a`). RuboCop still reports the `Metrics/AbcSize` offenses on
+/// those files, proving the directive spelling does NOT suppress the cop there.
+/// nitrocop currently matches directive names case-insensitively, so it
+/// suppresses those offenses and appears to miss them. Removing only that
+/// directive line makes nitrocop report the same offenses immediately, which
+/// confirms the ABC counter itself is already correct for these methods.
+///
+/// No counting logic change is taken in this cop. The remaining mismatch lives
+/// in directive resolution, outside this cop's allowed edit scope, and a prior
+/// attempt to tighten directive matching broadly caused large regressions.
 pub struct AbcSize;
 
 /// Known iterating method names that make blocks count toward conditions.
