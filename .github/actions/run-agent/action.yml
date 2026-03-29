@@ -35,13 +35,7 @@ inputs:
     description: Space-separated path filters for git diff (empty = all files)
     default: ''
 
-outputs:
-  artifact_paths:
-    description: Newline-separated artifact paths for upload-artifact
-    value: ${{ steps.post.outputs.artifact_paths }}
-  leak_scan_ok:
-    description: "'true' if leak scan passed"
-    value: ${{ steps.post.outputs.leak_scan_ok }}
+outputs: {}
 
 runs:
   using: composite
@@ -183,12 +177,6 @@ runs:
         DIFF_PATHS: ${{ inputs.diff_paths }}
         WORKFLOW: ${{ inputs.workflow }}
         BACKEND: ${{ inputs.backend }}
-        # Secrets needed for leak scanning
-        ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic_auth_token }}
-        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
-        CODEX_AUTH_JSON: ${{ inputs.codex_auth_json }}
-        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
-        GH_TOKEN_FOR_ACTIONS_READ: ${{ inputs.actions_read_token }}
       run: |
         # Resolve backend config (re-read; step env is isolated)
         python3 scripts/workflows/resolve_backend.py "$BACKEND" \
@@ -226,26 +214,13 @@ runs:
         fi
 
         # --- Artifact manifest + leak scan ---
-        LEAK_OK="true"
+        # Leak scanning and artifact upload are now owned by the outer
+        # workflow so they survive composite-action timeouts.  When the
+        # outer workflow sets WORKFLOW, the composite action still builds
+        # the manifest as a convenience (the outer workflow can skip its
+        # own generation when the file already exists).
         if [ -n "$WORKFLOW" ]; then
           python3 scripts/workflows/agent_artifacts.py "$WORKFLOW" \
             --runtime-root "$AGENT_RUNTIME_ROOT" \
-            --output "$AGENT_ARTIFACT_MANIFEST_FILE"
-
-          python3 scripts/workflows/guard_backend_secrets.py \
-            --ignore-missing \
-            --from-env ANTHROPIC_AUTH_TOKEN \
-            --from-env ANTHROPIC_API_KEY \
-            --from-env CODEX_AUTH_JSON \
-            --from-env CLAUDE_CODE_OAUTH_TOKEN \
-            --from-env GH_TOKEN_FOR_ACTIONS_READ \
-            scan-manifest "$AGENT_ARTIFACT_MANIFEST_FILE" || LEAK_OK="false"
+            --output "$AGENT_ARTIFACT_MANIFEST_FILE" || true
         fi
-
-        # --- Outputs ---
-        {
-          echo "artifact_paths<<EOF"
-          cat "$AGENT_ARTIFACT_MANIFEST_FILE" 2>/dev/null || true
-          echo "EOF"
-          echo "leak_scan_ok=$LEAK_OK"
-        } >> "$GITHUB_OUTPUT"

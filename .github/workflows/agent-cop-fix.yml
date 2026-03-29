@@ -270,17 +270,49 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --run-number "${{ github.run_number }}"
 
+      - name: Leak scan artifacts
+        if: always() && steps.task.outputs.code_bugs != '0'
+        id: leak-scan
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN_FOR_ACTIONS_READ: ${{ github.token }}
+        run: |
+          # Build manifest if the composite action didn't get to it
+          if [ ! -s "$AGENT_ARTIFACT_MANIFEST_FILE" ]; then
+            python3 scripts/workflows/agent_artifacts.py agent-cop-fix \
+              --runtime-root "$AGENT_RUNTIME_ROOT" \
+              --output "$AGENT_ARTIFACT_MANIFEST_FILE"
+          fi
+          LEAK_OK="true"
+          python3 scripts/workflows/guard_backend_secrets.py \
+            --ignore-missing \
+            --from-env ANTHROPIC_AUTH_TOKEN \
+            --from-env ANTHROPIC_API_KEY \
+            --from-env CODEX_AUTH_JSON \
+            --from-env CLAUDE_CODE_OAUTH_TOKEN \
+            --from-env GH_TOKEN_FOR_ACTIONS_READ \
+            scan-manifest "$AGENT_ARTIFACT_MANIFEST_FILE" || LEAK_OK="false"
+          echo "leak_scan_ok=$LEAK_OK" >> "$GITHUB_OUTPUT"
+          {
+            echo "artifact_paths<<EOF"
+            cat "$AGENT_ARTIFACT_MANIFEST_FILE" 2>/dev/null || true
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish summary
-        if: always() && steps.task.outputs.code_bugs != '0' && steps.agent.outputs.leak_scan_ok == 'true'
+        if: always() && steps.task.outputs.code_bugs != '0' && steps.leak-scan.outputs.leak_scan_ok == 'true'
         run: |
           cat "$SUMMARY_FILE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload agent log
-        if: always() && steps.task.outputs.code_bugs != '0' && steps.agent.outputs.leak_scan_ok == 'true'
+        if: always() && steps.task.outputs.code_bugs != '0' && steps.leak-scan.outputs.leak_scan_ok == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.agent.outputs.artifact_paths }}
+          path: ${{ steps.leak-scan.outputs.artifact_paths }}
           retention-days: 7
 
       # Refresh app token — the original may have expired during the 60-min
