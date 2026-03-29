@@ -11,7 +11,6 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 
 def _fail(msg: str) -> int:
@@ -55,22 +54,6 @@ def _load_env(var_name: str):
         raise ValueError(f"{var_name} is not valid JSON: {exc}") from exc
 
 
-def _load_file(path: str):
-    file_path = Path(path)
-    try:
-        raw = file_path.read_text()
-    except OSError as exc:
-        raise ValueError(f"{path} is unreadable: {exc.strerror}") from exc
-
-    if not raw.strip():
-        raise ValueError(f"{path} is missing or empty")
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
-
-
 def validate_auth(data: dict, max_age_days: int) -> str:
     if not isinstance(data, dict):
         raise ValueError("auth payload must be a JSON object")
@@ -111,30 +94,12 @@ def validate_auth(data: dict, max_age_days: int) -> str:
     return "chatgpt"
 
 
-def validate_newer_last_refresh(current: dict, previous: dict) -> None:
-    current_refreshed_at = _parse_timestamp(current.get("last_refresh"))
-    previous_refreshed_at = _parse_timestamp(previous.get("last_refresh"))
-    if current_refreshed_at <= previous_refreshed_at:
-        raise ValueError(
-            "last_refresh did not advance "
-            f"(before={previous.get('last_refresh')}, after={current.get('last_refresh')})"
-        )
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--from-env",
-        default=None,
+        default="CODEX_AUTH_JSON",
         help="Environment variable holding the auth JSON (default: CODEX_AUTH_JSON)",
-    )
-    parser.add_argument(
-        "--from-file",
-        help="Path to an auth JSON file to validate",
-    )
-    parser.add_argument(
-        "--newer-than-file",
-        help="Require last_refresh to be newer than the auth JSON in this file",
     )
     parser.add_argument(
         "--max-age-days",
@@ -144,20 +109,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.from_env is not None and args.from_file:
-        parser.error("--from-env and --from-file are mutually exclusive")
-
-    from_env = args.from_env or "CODEX_AUTH_JSON"
-
     try:
-        if args.from_file:
-            data = _load_file(args.from_file)
-        else:
-            data = _load_env(from_env)
+        data = _load_env(args.from_env)
         mode = validate_auth(data, args.max_age_days)
-        if args.newer_than_file:
-            previous = _load_file(args.newer_than_file)
-            validate_newer_last_refresh(data, previous)
     except ValueError as exc:
         return _fail(str(exc))
 
