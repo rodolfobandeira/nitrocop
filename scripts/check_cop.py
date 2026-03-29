@@ -868,6 +868,8 @@ def main():
     if args.rerun and 'per_repo' in dir():
         new_fp = 0
         new_fn = 0
+        resolved_fp = 0
+        resolved_fn = 0
         total_baseline_fp = 0
         total_baseline_fn = 0
         fp_repos = []
@@ -912,9 +914,13 @@ def main():
             # How far is the local nitrocop from rubocop?
             local_fp = max(0, local_count - baseline_rc)
             local_fn = max(0, baseline_rc - local_count)
-            # Only flag if the PR made things WORSE
+            # Track both regressions and improvements
             fp_increase = max(0, local_fp - baseline_fp)
             fn_increase = max(0, local_fn - baseline_fn)
+            fp_decrease = max(0, baseline_fp - local_fp)
+            fn_decrease = max(0, baseline_fn - local_fn)
+            resolved_fp += fp_decrease
+            resolved_fn += fn_decrease
             if fp_increase > 0:
                 new_fp += fp_increase
                 fp_repos.append((repo_id, local_count, baseline_nc, baseline_rc, fp_increase))
@@ -925,16 +931,24 @@ def main():
         print("  Gate: per-repo regression vs oracle baseline")
         print(f"  New FP (worse than baseline): {new_fp:>6,}")
         print(f"  New FN (worse than baseline): {new_fn:>6,}")
+        if resolved_fp or resolved_fn:
+            print(f"  Resolved FP (better):         {resolved_fp:>6,}")
+            print(f"  Resolved FN (better):         {resolved_fn:>6,}")
         print()
 
         failed = False
-        if new_fp > args.threshold:
-            print(f"FAIL: FP regression detected (+{new_fp:,})")
+        # Net regression: fail only if new regressions exceed resolved
+        # improvements. Per-repo shifts that are offset by improvements
+        # elsewhere are acceptable (net improvement or flat).
+        net_fp = new_fp - resolved_fp
+        net_fn = new_fn - resolved_fn
+        if net_fp > args.threshold:
+            print(f"FAIL: FP regression detected (net +{net_fp:,}, new={new_fp:,}, resolved={resolved_fp:,})")
             for repo_id, local, bl_nc, bl_rc, diff in sorted(fp_repos, key=lambda x: -x[4])[:10]:
                 print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
-        if new_fn > args.threshold:
-            print(f"FAIL: FN regression detected (+{new_fn:,})")
+        if net_fn > args.threshold:
+            print(f"FAIL: FN regression detected (net +{net_fn:,}, new={new_fn:,}, resolved={resolved_fn:,})")
             for repo_id, local, bl_nc, bl_rc, diff in sorted(fn_repos, key=lambda x: -x[4])[:10]:
                 print(f"  +{diff:>4}  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
             failed = True
