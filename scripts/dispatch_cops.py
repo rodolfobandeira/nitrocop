@@ -1259,7 +1259,34 @@ The `^` characters must align with the offending columns. The message format is 
 See the **Current Fixture** sections below for real examples from this cop.""")
 
     # Add diagnostic-aware guidance
-    if diagnostics and has_config_issues and not has_code_bugs:
+    # Check if config issues are FP-only (likely config-resolution bugs in nitrocop)
+    # vs FN-only (likely repo disables the cop — nothing to fix)
+    fp_config_only = (
+        diagnostics and has_config_issues and not has_code_bugs
+        and any(d["kind"] == "fp" and d.get("diagnosed") for d in diagnostics)
+        and not any(d["kind"] == "fn" and d.get("diagnosed") and not d.get("detected") for d in diagnostics)
+    )
+    if diagnostics and has_config_issues and not has_code_bugs and fp_config_only:
+        parts.append(f"""
+### Config-resolution FPs — the cop logic is correct but config handling differs
+Pre-diagnostic shows nitrocop detects these patterns correctly in isolation (with default
+config). The FPs only appear when running against target repos with custom `.rubocop.yml`.
+This means nitrocop is reading the repo's config differently than RuboCop does.
+
+**The detection logic is correct — the bug is in config resolution.**
+
+Do NOT add `no_offense.rb` fixtures for these patterns (they ARE offenses under default
+config). Instead:
+1. Use `python3 scripts/check_cop.py {cop} --rerun --clone --sample 15` to confirm the
+   FPs reproduce when running against real repos (this uses the repo's config, not defaults)
+2. Investigate `src/config/` for how this cop's config is loaded and applied
+3. Common causes: `Max` value not read from repo config, `Exclude` patterns not applied,
+   `Enabled: false` in a department-level override not respected, inherited configs
+   (e.g., `inherit_from`) not followed
+4. If you find a config-resolution fix, apply it and verify with `check_cop.py --rerun`
+5. Do NOT use `verify_cop_locations.py` unless the corpus repos are cloned locally —
+   it silently reports "fixed" when the repos are not on disk""")
+    elif diagnostics and has_config_issues and not has_code_bugs:
         parts.append("""
 ### IMPORTANT: This is a config/context issue, NOT a detection bug
 Pre-diagnostic shows nitrocop already detects all FP/FN patterns correctly in isolation.
