@@ -43,7 +43,17 @@ The workflow uses your ChatGPT Pro plan (flat rate, no per-token billing).
 3. Copy the auth file: `cat ~/.codex/auth.json`
 4. The content of this file becomes your `CODEX_AUTH_JSON` secret
 
-Codex automatically refreshes tokens, but if they expire between runs, re-run `codex login` locally and update the secret.
+Codex automatically refreshes tokens during normal runs, but GHA runners are ephemeral so the refreshed `auth.json` is lost. Use `scripts/refresh_codex_auth.sh` to rotate tokens locally and push the updated secret:
+
+```bash
+# First time: log in with the CI ChatGPT account
+scripts/refresh_codex_auth.sh login
+
+# Later: refresh stale tokens
+scripts/refresh_codex_auth.sh refresh
+```
+
+The script uses `~/.codex-gha` as a dedicated `CODEX_HOME` so the CI account's auth never collides with your personal `~/.codex`. Override with `CODEX_GHA_HOME`.
 
 **Important:** Use a dedicated ChatGPT subscription for CI dispatch — do not share with your personal Codex usage. Token refreshes from concurrent sessions will conflict and invalidate each other. A separate ChatGPT Plus ($20/mo) or Pro ($200/mo) account for CI keeps things clean.
 
