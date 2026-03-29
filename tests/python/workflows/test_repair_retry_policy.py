@@ -191,7 +191,7 @@ def test_gate_pr_rejects_head_moved_after_failed_checks():
 
 
 def test_policy_blocks_same_head_repeat():
-    should_run, reason, needs_human = repair_retry_policy.apply_policy(
+    should_run, reason = repair_retry_policy.apply_policy(
         route="easy",
         force=False,
         prior_attempted_current_head=True,
@@ -200,11 +200,10 @@ def test_policy_blocks_same_head_repeat():
     )
     assert should_run is False
     assert "already had an automatic repair attempt" in reason
-    assert needs_human is False
 
 
 def test_policy_blocks_after_two_pushes():
-    should_run, reason, needs_human = repair_retry_policy.apply_policy(
+    should_run, reason = repair_retry_policy.apply_policy(
         route="easy",
         force=False,
         prior_attempted_current_head=False,
@@ -213,11 +212,10 @@ def test_policy_blocks_after_two_pushes():
     )
     assert should_run is False
     assert "2 automatic repair pushes" in reason
-    assert needs_human is True
 
 
 def test_policy_blocks_after_two_repair_attempts():
-    should_run, reason, needs_human = repair_retry_policy.apply_policy(
+    should_run, reason = repair_retry_policy.apply_policy(
         route="hard",
         force=False,
         prior_attempted_current_head=False,
@@ -226,11 +224,10 @@ def test_policy_blocks_after_two_repair_attempts():
     )
     assert should_run is False
     assert "2 automatic repair attempts" in reason
-    assert needs_human is True
 
 
 def test_policy_force_bypasses_caps():
-    should_run, reason, needs_human = repair_retry_policy.apply_policy(
+    should_run, reason = repair_retry_policy.apply_policy(
         route="hard",
         force=True,
         prior_attempted_current_head=True,
@@ -239,7 +236,6 @@ def test_policy_force_bypasses_caps():
     )
     assert should_run is True
     assert reason == ""
-    assert needs_human is False
 
 
 def test_skip_comment_posts_pr_and_issue(monkeypatch, tmp_path):
@@ -267,8 +263,6 @@ def test_skip_comment_posts_pr_and_issue(monkeypatch, tmp_path):
         route="skip",
         run_id="888",
         run_url="https://example.com/runs/888",
-        needs_human=False,
-        issue_only_if_needs_human=False,
     )
     rc = repair_retry_policy.cmd_skip_comment(args)
     assert rc == 0
@@ -281,77 +275,6 @@ def test_skip_comment_posts_pr_and_issue(monkeypatch, tmp_path):
     assert "100" in calls[1]
     assert calls[2][0:3] == ["gh", "issue", "edit"]
     assert "state:blocked" in calls[2]
-
-
-def test_skip_comment_skips_issue_when_needs_human_false(monkeypatch):
-    """When issue_only_if_needs_human is set and needs_human is False, skip issue comment."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-
-        class Result:
-            returncode = 0
-        return Result()
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    args = argparse.Namespace(
-        repo="6/nitrocop",
-        pr_number="42",
-        linked_issue_number="100",
-        heading="Automatic PR repair stopped",
-        reason="too many attempts",
-        checks_run_id="999",
-        checks_url="https://example.com/runs/999",
-        backend_label="n/a",
-        route="",
-        run_id="888",
-        run_url="https://example.com/runs/888",
-        needs_human=False,
-        issue_only_if_needs_human=True,
-    )
-    rc = repair_retry_policy.cmd_skip_comment(args)
-    assert rc == 0
-
-    # Only PR comment, no issue comment/edit
-    assert len(calls) == 1
-    assert calls[0][0:3] == ["gh", "pr", "comment"]
-
-
-def test_skip_comment_posts_issue_when_needs_human(monkeypatch):
-    """When needs_human is True and issue_only_if_needs_human is set, post issue comment."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-
-        class Result:
-            returncode = 0
-        return Result()
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    args = argparse.Namespace(
-        repo="6/nitrocop",
-        pr_number="42",
-        linked_issue_number="100",
-        heading="Automatic PR repair stopped",
-        reason="too many attempts",
-        checks_run_id="999",
-        checks_url="https://example.com/runs/999",
-        backend_label="codex / hard",
-        route="",
-        run_id="888",
-        run_url="https://example.com/runs/888",
-        needs_human=True,
-        issue_only_if_needs_human=True,
-    )
-    rc = repair_retry_policy.cmd_skip_comment(args)
-    assert rc == 0
-
-    # PR comment + issue comment + issue edit
-    assert len(calls) == 3
 
 
 if __name__ == "__main__":

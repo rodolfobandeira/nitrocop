@@ -318,9 +318,7 @@ jobs:
             --checks-url "${{ steps.target.outputs.checks_url }}" \
             --backend-label "${{ steps.backend.outputs.display_label || 'n/a' }}" \
             --run-id "${{ github.run_id }}" \
-            --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            ${{ steps.policy.outputs.needs_human == 'true' && '--needs-human' || '' }} \
-            --issue-only-if-needs-human
+            --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Cache corpus bundle
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'

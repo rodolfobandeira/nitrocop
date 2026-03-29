@@ -112,18 +112,18 @@ def apply_policy(
     prior_attempted_current_head: bool,
     prior_pushes: int,
     prior_pr_repair_attempts: int,
-) -> tuple[bool, str, bool]:
+) -> tuple[bool, str]:
     if route == "skip":
-        return True, "", False
+        return True, ""
     if force:
-        return True, "", False
+        return True, ""
     if prior_attempted_current_head:
-        return False, "This PR head has already had an automatic repair attempt", False
+        return False, "This PR head has already had an automatic repair attempt"
     if prior_pushes >= 2:
-        return False, "PR already has 2 automatic repair pushes", True
+        return False, "PR already has 2 automatic repair pushes"
     if prior_pr_repair_attempts >= 2:
-        return False, "PR already has 2 automatic repair attempts", True
-    return True, "", False
+        return False, "PR already has 2 automatic repair attempts"
+    return True, ""
 
 
 def cmd_pr_state(args: argparse.Namespace) -> int:
@@ -184,8 +184,6 @@ def cmd_skip_comment(args: argparse.Namespace) -> int:
     route = args.route or ""
     run_id = args.run_id
     run_url = args.run_url
-    needs_human = args.needs_human
-
     # PR comment
     pr_lines = [
         f"## {heading}",
@@ -200,7 +198,7 @@ def cmd_skip_comment(args: argparse.Namespace) -> int:
     )
 
     # Linked issue comment + label
-    if linked_issue and (needs_human or not args.issue_only_if_needs_human):
+    if linked_issue:
         issue_lines = [
             f"{heading} for linked PR #{pr_number}.",
             "",
@@ -228,7 +226,7 @@ def cmd_skip_comment(args: argparse.Namespace) -> int:
 
 
 def cmd_policy(args: argparse.Namespace) -> int:
-    should_run, reason, needs_human = apply_policy(
+    should_run, reason = apply_policy(
         route=args.route,
         force=args.force,
         prior_attempted_current_head=args.prior_attempted_current_head,
@@ -237,7 +235,6 @@ def cmd_policy(args: argparse.Namespace) -> int:
     )
     print(f"should_repair={'true' if should_run else 'false'}")
     print(f"skip_reason={reason}")
-    print(f"needs_human={'true' if needs_human else 'false'}")
     return 0
 
 
@@ -280,8 +277,6 @@ def main() -> int:
     skip_comment.add_argument("--route", default="")
     skip_comment.add_argument("--run-id", required=True)
     skip_comment.add_argument("--run-url", required=True)
-    skip_comment.add_argument("--needs-human", action="store_true")
-    skip_comment.add_argument("--issue-only-if-needs-human", action="store_true")
     skip_comment.set_defaults(func=cmd_skip_comment)
 
     args = parser.parse_args()
