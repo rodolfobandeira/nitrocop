@@ -306,6 +306,108 @@ def test_generate_summary_no_result(tmp_path):
     assert "No file changes detected." in summary
 
 
+# ── cleanup-failure ─────────────────────────────────────────────────────
+
+def test_cleanup_failure_closes_pr_then_deletes_branch_and_requeues_issue(tmp_path):
+    claim_body = tmp_path / "context" / "claim-body.md"
+    claim_body.parent.mkdir(parents=True, exist_ok=True)
+
+    env_patch = {"CLAIM_BODY_FILE": str(claim_body)}
+    calls = []
+
+    def fake_run_ok(cmd, **kwargs):
+        del kwargs
+        calls.append(cmd)
+        if cmd[:4] == ["gh", "pr", "view", "https://github.com/6/nitrocop/pull/715"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout='{"headRefName":"fix/style-if_unless_modifier-23699434606"}', stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with (
+        patch.dict(os.environ, env_patch),
+        patch.object(cop_fix_lifecycle, "_run_ok", side_effect=fake_run_ok),
+    ):
+        result = cop_fix_lifecycle.cmd_cleanup_failure([
+            "--cop", "Style/IfUnlessModifier",
+            "--pr-url", "https://github.com/6/nitrocop/pull/715",
+            "--issue-number", "376",
+            "--repo", "6/nitrocop",
+            "--backend-label", "claude-oauth / hard",
+            "--model-label", "Claude Opus 4.6 (OAuth, high)",
+            "--mode", "fix",
+            "--run-url", "https://github.com/6/nitrocop/actions/runs/23699434606",
+        ])
+
+    assert result == 0
+    assert calls[1] == [
+        "gh", "pr", "close", "https://github.com/6/nitrocop/pull/715",
+        "--repo", "6/nitrocop",
+        "--comment", "Agent failed. See run: https://github.com/6/nitrocop/actions/runs/23699434606",
+    ]
+    assert calls[2] == [
+        "gh", "api", "-X", "DELETE",
+        "repos/6/nitrocop/git/refs/heads/fix/style-if_unless_modifier-23699434606",
+    ]
+    assert calls[4] == [
+        "gh", "issue", "edit", "376",
+        "--repo", "6/nitrocop",
+        "--remove-label", "state:pr-open,state:dispatched",
+        "--add-label", "state:backlog",
+    ]
+    assert "The draft PR was closed automatically." in claim_body.read_text()
+
+
+def test_cleanup_failure_warns_and_keeps_issue_state_when_pr_close_fails(tmp_path):
+    claim_body = tmp_path / "context" / "claim-body.md"
+    claim_body.parent.mkdir(parents=True, exist_ok=True)
+
+    env_patch = {"CLAIM_BODY_FILE": str(claim_body)}
+    calls = []
+    warnings = []
+
+    def fake_run_ok(cmd, **kwargs):
+        del kwargs
+        calls.append(cmd)
+        if cmd[:4] == ["gh", "pr", "view", "https://github.com/6/nitrocop/pull/715"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout='{"headRefName":"fix/style-if_unless_modifier-23699434606"}', stderr="",
+            )
+        if cmd[:4] == ["gh", "pr", "close", "https://github.com/6/nitrocop/pull/715"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="HTTP 403: forbidden")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with (
+        patch.dict(os.environ, env_patch),
+        patch.object(cop_fix_lifecycle, "_run_ok", side_effect=fake_run_ok),
+        patch.object(cop_fix_lifecycle, "_warning", side_effect=warnings.append),
+    ):
+        result = cop_fix_lifecycle.cmd_cleanup_failure([
+            "--cop", "Style/IfUnlessModifier",
+            "--pr-url", "https://github.com/6/nitrocop/pull/715",
+            "--issue-number", "376",
+            "--repo", "6/nitrocop",
+            "--backend-label", "claude-oauth / hard",
+            "--model-label", "Claude Opus 4.6 (OAuth, high)",
+            "--mode", "fix",
+            "--run-url", "https://github.com/6/nitrocop/actions/runs/23699434606",
+        ])
+
+    assert result == 0
+    assert any("Close failed draft PR failed: HTTP 403: forbidden" in msg for msg in warnings)
+    assert [
+        "gh", "api", "-X", "DELETE",
+        "repos/6/nitrocop/git/refs/heads/fix/style-if_unless_modifier-23699434606",
+    ] not in calls
+    assert [
+        "gh", "issue", "edit", "376",
+        "--repo", "6/nitrocop",
+        "--remove-label", "state:pr-open,state:dispatched",
+        "--add-label", "state:backlog",
+    ] not in calls
+    assert "automatic cleanup could not close the draft PR" in claim_body.read_text()
+
+
 # ── CLI error handling ──────────────────────────────────────────────────
 
 def test_unknown_command():

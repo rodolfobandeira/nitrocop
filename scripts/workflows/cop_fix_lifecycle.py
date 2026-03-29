@@ -92,6 +92,19 @@ def _run_ok(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, capture_output=True, check=False, **kwargs)
 
 
+def _warn_best_effort_failure(
+    label: str, result: subprocess.CompletedProcess[str],
+) -> subprocess.CompletedProcess[str]:
+    """Emit a concise warning when a best-effort command fails."""
+    if result.returncode == 0:
+        return result
+
+    detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+    detail = " | ".join(line.strip() for line in detail.splitlines() if line.strip())
+    _warning(f"{label} failed: {detail}")
+    return result
+
+
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], text=True, capture_output=True, check=check)
 
@@ -1153,28 +1166,67 @@ def cmd_cleanup_failure(args: list[str]) -> int:
     opts = p.parse_args(args)
 
     claim_body = _env_path("CLAIM_BODY_FILE")
+    pr_closed = False
+    head_ref = ""
 
     # If scope validation explicitly failed, the reject step already closed the PR
     if opts.file_guard_valid == "false":
         return 0
 
     if opts.pr_url:
-        _run_ok([
-            "gh", "pr", "close", opts.pr_url,
-            "--comment", f"Agent failed. See run: {opts.run_url}",
-            "--delete-branch",
+        pr_view = _run_ok([
+            "gh", "pr", "view", opts.pr_url,
+            "--repo", opts.repo,
+            "--json", "headRefName",
         ])
+        if pr_view.returncode == 0:
+            try:
+                head_ref = json.loads(pr_view.stdout).get("headRefName", "")
+            except json.JSONDecodeError:
+                _warning(f"Failed to parse PR metadata for cleanup: {opts.pr_url}")
+        else:
+            _warn_best_effort_failure("Read PR metadata for cleanup", pr_view)
+
+        pr_close = _warn_best_effort_failure(
+            "Close failed draft PR",
+            _run_ok([
+                "gh", "pr", "close", opts.pr_url,
+                "--repo", opts.repo,
+                "--comment", f"Agent failed. See run: {opts.run_url}",
+            ]),
+        )
+        pr_closed = pr_close.returncode == 0
+
+        if pr_closed and head_ref:
+            _warn_best_effort_failure(
+                f"Delete failed branch `{head_ref}`",
+                _run_ok([
+                    "gh", "api", "-X", "DELETE",
+                    f"repos/{opts.repo}/git/refs/heads/{head_ref}",
+                ]),
+            )
 
     if opts.issue_number:
         if opts.pr_url:
-            body = (
-                f"Agent fix failed before producing a usable PR for `{opts.cop}`.\n\n"
-                f"- Backend: `{opts.backend_label}`\n"
-                f"- Model: `{opts.model_label}`\n"
-                f"- Mode: `{opts.mode}`\n"
-                f"- Run: {opts.run_url}\n\n"
-                f"See the workflow summary and uploaded artifacts for the agent result and recovery patch.\n"
-            )
+            if pr_closed:
+                body = (
+                    f"Agent fix failed before producing a usable PR for `{opts.cop}`.\n\n"
+                    f"- Backend: `{opts.backend_label}`\n"
+                    f"- Model: `{opts.model_label}`\n"
+                    f"- Mode: `{opts.mode}`\n"
+                    f"- Run: {opts.run_url}\n\n"
+                    f"The draft PR was closed automatically. "
+                    f"See the workflow summary and uploaded artifacts for the agent result and recovery patch.\n"
+                )
+            else:
+                body = (
+                    f"Agent fix failed for `{opts.cop}`, but automatic cleanup could not close the draft PR.\n\n"
+                    f"- Backend: `{opts.backend_label}`\n"
+                    f"- Model: `{opts.model_label}`\n"
+                    f"- Mode: `{opts.mode}`\n"
+                    f"- Run: {opts.run_url}\n\n"
+                    f"Manual cleanup may be required for the stale draft PR.\n"
+                )
         else:
             body = (
                 f"Agent fix failed before it could create a draft PR for `{opts.cop}`.\n\n"
@@ -1184,18 +1236,24 @@ def cmd_cleanup_failure(args: list[str]) -> int:
                 f"Review the failed workflow run for details.\n"
             )
         write_and_read(claim_body, body)
-        _run_ok([
-            "gh", "issue", "comment", opts.issue_number,
-            "--repo", opts.repo,
-            "--body-file", str(claim_body),
-        ])
-        if opts.pr_url:
+        _warn_best_effort_failure(
+            f"Comment on issue #{opts.issue_number}",
             _run_ok([
-                "gh", "issue", "edit", opts.issue_number,
+                "gh", "issue", "comment", opts.issue_number,
                 "--repo", opts.repo,
-                "--remove-label", "state:pr-open,state:dispatched",
-                "--add-label", "state:backlog",
-            ])
+                "--body-file", str(claim_body),
+            ]),
+        )
+        if opts.pr_url and pr_closed:
+            _warn_best_effort_failure(
+                f"Move issue #{opts.issue_number} back to backlog",
+                _run_ok([
+                    "gh", "issue", "edit", opts.issue_number,
+                    "--repo", opts.repo,
+                    "--remove-label", "state:pr-open,state:dispatched",
+                    "--add-label", "state:backlog",
+                ]),
+            )
 
     return 0
 
