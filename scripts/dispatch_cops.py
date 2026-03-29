@@ -787,7 +787,7 @@ def run_diagnostic(
                 full_file_context: str | None = None
                 diagnosis_note: str | None = None
 
-                if not detected and kind == "fn":
+                if not detected and (kind == "fn" or kind == "fp"):
                     parsed = _parse_example_loc(loc)
                     if parsed:
                         repo_id, filepath, real_line = parsed
@@ -829,12 +829,19 @@ def run_diagnostic(
                                         )
                                     full_file_context = "\n".join(ctx_lines)
 
-                                if ff_hit:
+                                if ff_hit and kind == "fn":
                                     diagnosis_note = (
                                         "Snippet too narrow — offense is detected "
                                         "in the full file but not in the ±7-line "
                                         "extract. The enclosing structure chain "
                                         "shows the missing context."
+                                    )
+                                elif ff_hit and kind == "fp":
+                                    diagnosis_note = (
+                                        "Snippet too narrow — FP reproduces in "
+                                        "the full file but not in the ±7-line "
+                                        "extract. This is a real code/config bug, "
+                                        "not just context-dependent."
                                     )
 
                 results.append({
@@ -903,8 +910,18 @@ def _format_with_diagnostics(
         if not d.get("detected") and d.get("full_file_detected")
     )
     fn_config = sum(1 for d in fn_diagnosed if d.get("detected"))
-    fp_code_bugs = sum(1 for d in fp_diagnosed if d.get("detected"))
-    fp_config = sum(1 for d in fp_diagnosed if not d.get("detected"))
+    fp_code_bugs = sum(
+        1 for d in fp_diagnosed
+        if d.get("detected") or d.get("full_file_detected")
+    )
+    fp_context_narrow = sum(
+        1 for d in fp_diagnosed
+        if not d.get("detected") and d.get("full_file_detected")
+    )
+    fp_config = sum(
+        1 for d in fp_diagnosed
+        if not d.get("detected") and not d.get("full_file_detected")
+    )
 
     lines.append("### Diagnosis Summary")
     lines.append("Each example was tested by running nitrocop on the extracted source in isolation")
@@ -922,7 +939,14 @@ def _format_with_diagnostics(
             parts.append(f"{fn_config} config/context issue(s)")
         lines.append(f"- **FN:** {', '.join(parts)}" if parts else "- **FN:** 0 issues")
     if fp_diags:
-        lines.append(f"- **FP:** {fp_code_bugs} confirmed code bug(s), {fp_config} context-dependent")
+        fp_parts = []
+        if fp_code_bugs:
+            fp_parts.append(f"{fp_code_bugs} confirmed code bug(s)")
+        if fp_context_narrow:
+            fp_parts.append(f"{fp_context_narrow} context-dependent (detected in full file only)")
+        if fp_config:
+            fp_parts.append(f"{fp_config} context-dependent")
+        lines.append(f"- **FP:** {', '.join(fp_parts)}" if fp_parts else "- **FP:** 0 issues")
     if fn_diagnosed and fn_undiagnosed:
         no_context = sum(1 for d in fn_undiagnosed if d.get("reason") == "no source context")
         extra = len(fn_undiagnosed) - no_context
@@ -1030,15 +1054,28 @@ def _format_with_diagnostics(
                 elif d.get("offense_line"):
                     lines.append("\nAdd to no_offense.rb:")
                     lines.append(f"```ruby\n{d['offense_line']}\n```")
+            elif d.get("full_file_detected"):
+                lines.append("**DETECTED in full file only — CODE BUG (snippet too narrow)**")
+                lines.append("The ±7-line snippet is too narrow to reproduce this FP.")
+                lines.append("nitrocop flags this in the full file but RuboCop does not.")
+                lines.append("This is a real FP that needs a code or config fix.")
+                if d.get("diagnosis_note"):
+                    lines.append(f"\n> {d['diagnosis_note']}")
+                if d.get("full_file_enclosing"):
+                    lines.append(f"\n**Full-file enclosing chain:** {d['full_file_enclosing']}")
             else:
-                lines.append("**NOT REPRODUCED in isolation — CONTEXT-DEPENDENT**")
-                lines.append("nitrocop does not flag this in isolation. The FP is triggered")
-                lines.append("by surrounding code context or file-level state.")
-                lines.append("Investigate what full-file context causes the false detection.")
+                lines.append("**NOT REPRODUCED — CONFIG/CONTEXT issue**")
+                lines.append("nitrocop does not flag this in isolation or in the full file")
+                lines.append("(with default config). The FP is caused by the target repo's")
+                lines.append("config (e.g., different Max value, Include/Exclude patterns).")
                 if d.get("source_context"):
                     lines.append("\nSource context:")
                     lines.append(f"```ruby\n{d['source_context']}\n```")
             lines.append(f"\nMessage: `{d['msg']}`")
+            # Prefer full-file context when available (broader view)
+            if d.get("full_file_context"):
+                lines.append("\nFull file context (30 lines before offense):")
+                lines.append(f"```\n{d['full_file_context']}\n```")
         else:
             lines.append(f"(could not diagnose: {d.get('reason', 'unknown')})")
             lines.append(f"Message: `{d['msg']}`")
@@ -1168,9 +1205,9 @@ def generate_task(
                 has_code_bugs = True
             elif d["kind"] == "fn" and (d.get("detected") or d.get("full_file_detected")):
                 has_config_issues = True
-            elif d["kind"] == "fp" and d.get("detected"):
+            elif d["kind"] == "fp" and (d.get("detected") or d.get("full_file_detected")):
                 has_code_bugs = True
-            elif d["kind"] == "fp" and not d.get("detected"):
+            elif d["kind"] == "fp" and not d.get("detected") and not d.get("full_file_detected"):
                 has_config_issues = True
 
     # Detect Prism pitfalls

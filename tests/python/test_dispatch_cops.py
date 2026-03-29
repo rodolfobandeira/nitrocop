@@ -319,6 +319,65 @@ def test_sync_issue_labels_removes_then_readds_labels():
     assert add_kwargs["check"] is True
 
 
+def test_fp_full_file_detected_classified_as_code_bug():
+    """FP that reproduces in full file but not snippet should be a code bug."""
+    diagnostics = [
+        {
+            "kind": "fp",
+            "loc": "repo: file.rb:41",
+            "msg": "Method has too many lines. [12/10]",
+            "diagnosed": True,
+            "detected": False,            # not detected in snippet
+            "full_file_detected": True,   # but detected in full file
+            "offense_line": "def first_visit(schema, errors, path)",
+            "test_snippet": None,
+            "enclosing": None,
+            "node_type": None,
+            "source_context": "def first_visit(...)\n  true\nend",
+            "full_file_enclosing": "class Validator",
+            "full_file_context": "    41: def first_visit(...)",
+            "diagnosis_note": "Snippet too narrow",
+        },
+    ]
+    output = gct._format_with_diagnostics(
+        "Metrics/MethodLength",
+        diagnostics,
+        fp_examples=[{"loc": "repo: file.rb:41", "msg": "Method has too many lines. [12/10]"}],
+        fn_examples=[],
+    )
+    # Should be classified as code bug, not context-dependent
+    assert "CODE BUG" in output
+    assert "CONTEXT-DEPENDENT" not in output
+    assert "1 confirmed code bug(s)" in output
+
+
+def test_fp_not_detected_anywhere_classified_as_config():
+    """FP not reproduced in snippet or full file is context-dependent."""
+    diagnostics = [
+        {
+            "kind": "fp",
+            "loc": "repo: file.rb:92",
+            "msg": "Method has too many lines. [58/10]",
+            "diagnosed": True,
+            "detected": False,
+            "full_file_detected": False,
+            "offense_line": "def self.parseFilters(userFilters, logger)",
+            "test_snippet": None,
+            "enclosing": None,
+            "node_type": None,
+            "source_context": "def self.parseFilters(...)\nend",
+        },
+    ]
+    output = gct._format_with_diagnostics(
+        "Metrics/MethodLength",
+        diagnostics,
+        fp_examples=[{"loc": "repo: file.rb:92", "msg": "Method has too many lines. [58/10]"}],
+        fn_examples=[],
+    )
+    assert "CONTEXT-DEPENDENT" in output
+    assert "1 context-dependent" in output
+
+
 def test_config_only_requires_zero_matches():
     """Cops with corpus matches should never be config-only, even if
     the diagnostic finds 0 code bugs (the extract is often too small
