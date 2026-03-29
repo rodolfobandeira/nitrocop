@@ -82,9 +82,9 @@ runs:
         # can't read files directly.
         if [ "$(cfg action)" = "true" ]; then
           {
-            echo "prompt_content<<EOF"
+            echo "prompt_content<<NITROCOP_PROMPT_END_7f3a"
             cat "$FINAL_TASK_FILE"
-            echo "EOF"
+            echo "NITROCOP_PROMPT_END_7f3a"
           } >> "$GITHUB_OUTPUT"
         fi
 
