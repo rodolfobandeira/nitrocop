@@ -1888,7 +1888,31 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
 
     created = updated = reopened = closed = config_only = 0
 
+    # Precompute per-department cop counts for progress logging
+    dept_counts: dict[str, int] = {}
+    for cop in diverging_cops:
+        dept = cop.split("/")[0]
+        dept_counts[dept] = dept_counts.get(dept, 0) + 1
+
+    current_dept: str | None = None
+    dept_created = dept_updated = dept_reopened = 0
+
     for cop in sorted(diverging_cops):
+        dept = cop.split("/")[0]
+        if dept != current_dept:
+            if current_dept is not None:
+                print(
+                    f"  done ({dept_created} created, {dept_updated} updated,"
+                    f" {dept_reopened} reopened)",
+                    file=sys.stderr,
+                )
+            current_dept = dept
+            dept_created = dept_updated = dept_reopened = 0
+            print(
+                f"Syncing {dept} ({dept_counts[dept]} cops)...",
+                file=sys.stderr,
+            )
+
         entry = entries[cop]
         prior_prs = prs_by_cop.get(cop, [])
 
@@ -1933,6 +1957,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         if existing_issue is None:
             create_tracker_issue(repo, title, body, labels)
             created += 1
+            dept_created += 1
             continue
 
         if existing_issue.get("state") == "CLOSED":
@@ -1946,10 +1971,21 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
                 ),
             )
             reopened += 1
+            dept_reopened += 1
 
         update_tracker_issue(repo, existing_issue["number"], title, body, labels)
         updated += 1
+        dept_updated += 1
 
+    # Final department summary
+    if current_dept is not None:
+        print(
+            f"  done ({dept_created} created, {dept_updated} updated,"
+            f" {dept_reopened} reopened)",
+            file=sys.stderr,
+        )
+
+    print("Closing resolved issues...", file=sys.stderr)
     for cop, issue in issues_by_cop.items():
         if cop in diverging_cops:
             continue
