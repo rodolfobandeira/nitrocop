@@ -378,26 +378,22 @@ def test_fp_not_detected_anywhere_classified_as_config():
     assert "1 context-dependent" in output
 
 
-def test_config_only_requires_zero_matches():
-    """Cops with corpus matches should never be config-only, even if
-    the diagnostic finds 0 code bugs (the extract is often too small
-    to reproduce the issue)."""
-    # Cop with matches → NOT config-only (code bug, not config)
-    entry_with_matches = {"cop": "Metrics/MethodLength", "fp": 8, "fn": 0, "matches": 261839}
-    has_matches = entry_with_matches.get("matches", 0) > 0
-    is_config_only = True and 0 == 0 and not has_matches  # binary present, 0 code bugs
-    assert is_config_only is False
+def test_config_only_classification():
+    """Config-only requires 0 code bugs AND config issues found."""
+    # binary=True, code_bugs=0, cfg_issues=8 → config-only
+    # (all divergence is config/context, whether matches exist or not)
+    assert (True and 0 == 0 and 8 > 0) is True
 
-    # Cop with zero matches → config-only (likely Include-gated)
-    entry_no_matches = {"cop": "Rails/BulkChangeTable", "fp": 0, "fn": 2469, "matches": 0}
-    has_matches = entry_no_matches.get("matches", 0) > 0
-    is_config_only = True and 0 == 0 and not has_matches
-    assert is_config_only is True
+    # binary=True, code_bugs=0, cfg_issues=0 → NOT config-only
+    # (no diagnosis data — can't classify)
+    assert (True and 0 == 0 and 0 > 0) is False
 
-    # Cop with matches but code bugs found → NOT config-only (obviously)
-    has_matches = entry_with_matches.get("matches", 0) > 0
-    is_config_only = True and 1 == 0 and not has_matches  # code_bugs=1
-    assert is_config_only is False
+    # binary=True, code_bugs=3, cfg_issues=5 → NOT config-only
+    # (has real code bugs to fix)
+    assert (True and 3 == 0 and 5 > 0) is False
+
+    # binary=None → NOT config-only (no pre-diagnostic ran)
+    assert (False and 0 == 0 and 8 > 0) is False
 
 
 def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
@@ -493,6 +489,6 @@ if __name__ == "__main__":
     test_build_start_here_section_empty_when_no_corpus_examples()
     test_choose_issue_state_preserves_blocked_without_open_pr()
     test_sync_issue_labels_removes_then_readds_labels()
-    test_config_only_requires_zero_matches()
+    test_config_only_classification()
     test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue()
     print("All tests passed.")

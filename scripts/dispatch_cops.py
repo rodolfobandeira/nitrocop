@@ -2170,13 +2170,11 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         prior_prs = prs_by_cop.get(cop, [])
 
         code_bugs, cfg_issues = diagnosis.get(cop, (0, 0))
-        # Only classify as config-only when the cop has zero corpus matches.
-        # Zero matches means the cop never fires (likely Include-gated, e.g.
-        # Rails migration cops).  Cops WITH matches have working detection
-        # logic — any FP/FN divergence is a code bug, not a config issue,
-        # because both tools run on the exact same baseline config.
-        has_matches = entry.get("matches", 0) > 0
-        is_config_only = binary is not None and code_bugs == 0 and not has_matches
+        # Classify as config-only when pre-diagnostic finds 0 code bugs AND:
+        # - Zero matches (Include-gated cop, never fires), OR
+        # - All divergence is config/context issues (snippet + full-file
+        #   fallback couldn't reproduce any FP/FN with default config)
+        is_config_only = binary is not None and code_bugs == 0 and cfg_issues > 0
         precomputed = (code_bugs, cfg_issues) if binary else None
 
         recommendation = select_backend_for_entry(
