@@ -110,11 +110,11 @@ builder.define_method(:generated_method) do
   k = 11
 end
 
-# =begin/=end embedded documentation is NOT counted by RuboCop.
-# Parser's AST body range excludes =begin/=end content, so
-# body.source.lines only sees code lines. Total body = 13 code lines.
+# =begin/=end multi-line comments are counted as body lines by RuboCop.
+# RuboCop's comment_line? only matches # comments (regex /^\s*#/), so
+# =begin/=end content is always included regardless of CountComments.
 def method_with_begin_end_comment
-^^^ Metrics/MethodLength: Method has too many lines. [13/10]
+^^^ Metrics/MethodLength: Method has too many lines. [18/10]
   begin
     break 1
   rescue => e
@@ -131,8 +131,9 @@ def method_with_begin_end_comment
   end
 
 =begin
-  This is a multi-line comment. RuboCop does NOT count =begin/=end
-  content as body lines (Parser AST body range excludes them).
+  This is a multi-line comment. RuboCop counts =begin/=end
+  content as body lines (not skipped by CountComments: false).
+  Total body = 13 code lines + 5 =begin/=end lines = 18.
 =end
 end
 

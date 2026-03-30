@@ -229,23 +229,6 @@ def render_output(data)
   end
 end
 
-# =begin/=end embedded doc is excluded from body line count.
-# 7 code lines + 5 =begin/=end lines = 12 physical lines, but only 7 count.
-def method_with_begin_end_not_counted
-  if @descendant[0]
-    @descendant[0]
-  else
-    @descendant[0] = DescendantFont.new(self, 'latin')
-  end
-=begin
-  if @latin_descendant
-    @latin_descendant
-  else
-    @latin_descendant = DescendantFont.new(self, 'latin')
-  end
-=end
-end
-
 # Endless method with short multiline body (no offense)
 def compact_settings = {
   one: 1,
