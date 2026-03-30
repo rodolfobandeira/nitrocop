@@ -11,6 +11,12 @@ use ruby_prism::Visit;
 /// arguments, and attached blocks. We still preserve RuboCop's top-level paren
 /// behavior by only treating the predicate as direct `and`/`or` when the root
 /// node itself is an `AndNode` or `OrNode`.
+///
+/// Fixed 11 FP / 11 FN pairs caused by two issues:
+/// 1. Location: `keyword_loc()` → `location()`. For modifier `unless` spanning
+///    multiple lines, RuboCop's `add_offense(node)` uses `node.source_range`
+///    which starts at the statement beginning, not the `unless` keyword.
+/// 2. Messages: RuboCop uses `"in an \`unless\`."` not `"in \`unless\` conditions."`.
 pub struct UnlessLogicalOperators;
 
 impl Cop for UnlessLogicalOperators {
@@ -49,12 +55,12 @@ impl Cop for UnlessLogicalOperators {
                 // Flag any logical operators in unless conditions
                 if contains_logical_operator(&predicate) {
                     let (line, column) =
-                        source.offset_to_line_col(unless_node.keyword_loc().start_offset());
+                        source.offset_to_line_col(unless_node.location().start_offset());
                     diagnostics.push(self.diagnostic(
                         source,
                         line,
                         column,
-                        "Do not use logical operators in `unless` conditions.".to_string(),
+                        "Do not use any logical operator in an `unless`.".to_string(),
                     ));
                 }
             }
@@ -62,12 +68,12 @@ impl Cop for UnlessLogicalOperators {
                 // Flag mixed logical operators (both && and ||)
                 if contains_mixed_logical_operators(&predicate) {
                     let (line, column) =
-                        source.offset_to_line_col(unless_node.keyword_loc().start_offset());
+                        source.offset_to_line_col(unless_node.location().start_offset());
                     diagnostics.push(self.diagnostic(
                         source,
                         line,
                         column,
-                        "Do not use mixed logical operators in `unless` conditions.".to_string(),
+                        "Do not use mixed logical operators in an `unless`.".to_string(),
                     ));
                 }
             }
