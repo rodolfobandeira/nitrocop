@@ -1,7 +1,7 @@
 name: Batch Dispatch
 
 run-name: >-
-  Batch Dispatch: ${{ github.event.inputs.department || 'all' }}
+  Batch Dispatch: ${{ github.event.inputs.department }}
   × ${{ github.event.inputs.count }} (${{ github.event.inputs.backend }})
 
 permissions:
@@ -12,31 +12,47 @@ on:
   workflow_dispatch:
     inputs:
       department:
-        description: 'Department to target (e.g., Style, Layout, Lint). Empty = all.'
-        required: false
-        type: string
-        default: ''
+        description: 'Department to target'
+        required: true
+        type: choice
+        options:
+          - Bundler
+          - FactoryBot
+          - Gemspec
+          - Layout
+          - Lint
+          - Metrics
+          - Migration
+          - Naming
+          - Performance
+          - Rails
+          - RSpec
+          - RSpecRails
+          - Security
+          - Style
       count:
         description: 'Number of cops to dispatch'
         required: true
-        type: number
-        default: 10
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
+          - '9'
+          - '10'
+        default: '5'
       backend:
         description: 'Backend for dispatched agents'
         type: choice
         options:
           - codex
           - claude
-          - auto
         default: codex
-      min_bugs:
-        description: 'Minimum code bugs to include a cop'
-        type: number
-        default: 1
-      max_total:
-        description: 'Maximum total FP+FN to include a cop'
-        type: number
-        default: 999
       mode:
         description: 'Mode passed to agent-cop-fix'
         type: choice
@@ -80,7 +96,5 @@ jobs:
           INPUT_COUNT: ${{ github.event.inputs.count }}
           INPUT_BACKEND: ${{ github.event.inputs.backend }}
           INPUT_MODE: ${{ github.event.inputs.mode }}
-          INPUT_MIN_BUGS: ${{ github.event.inputs.min_bugs }}
-          INPUT_MAX_TOTAL: ${{ github.event.inputs.max_total }}
         run: |
           python3 scripts/workflows/batch_dispatch.py

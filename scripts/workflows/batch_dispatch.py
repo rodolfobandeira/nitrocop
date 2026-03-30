@@ -14,25 +14,22 @@ import time
 
 
 def main() -> int:
-    department = os.environ.get("INPUT_DEPARTMENT", "")
-    count = int(os.environ.get("INPUT_COUNT", "10"))
+    department = os.environ["INPUT_DEPARTMENT"]
+    count = int(os.environ.get("INPUT_COUNT", "5"))
     backend = os.environ.get("INPUT_BACKEND", "codex")
     mode = os.environ.get("INPUT_MODE", "fix")
-    min_bugs = os.environ.get("INPUT_MIN_BUGS", "1")
-    max_total = os.environ.get("INPUT_MAX_TOTAL", "999")
 
     # ── Rank cops ──────────────────────────────────────────────────────
     rank_cmd = [
         sys.executable, "scripts/dispatch_cops.py", "rank",
         "--json",
-        "--min-bugs", min_bugs,
-        "--max-total", max_total,
+        "--department", department,
+        "--min-bugs", "1",
+        "--max-total", "999",
         "--min-total", "1",
         "--min-matches", "0",
         "--limit", str(count),
     ]
-    if department:
-        rank_cmd += ["--department", department]
 
     print(f"Running: {' '.join(rank_cmd)}", flush=True)
     result = subprocess.run(rank_cmd, capture_output=True, text=True)
@@ -44,11 +41,9 @@ def main() -> int:
         return 1
 
     cops: list[dict] = json.loads(result.stdout)
-    dept_label = department or "all"
 
     if not cops:
-        print(f"::warning::No dispatchable cops found for {dept_label} "
-              f"(min_bugs={min_bugs}, max_total={max_total}). Nothing to dispatch.")
+        print(f"::warning::No dispatchable cops found for {department}. Nothing to dispatch.")
         return 0
 
     if len(cops) < count:
@@ -92,7 +87,7 @@ def main() -> int:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a") as f:
-            f.write(f"### Batch Dispatch: {dept_label} × {len(cops)} ({backend})\n\n")
+            f.write(f"### Batch Dispatch: {department} × {len(cops)} ({backend})\n\n")
             f.write("| Cop | FP | FN | Bugs | Cfg |\n")
             f.write("|-----|----|----|------|-----|\n")
             for c in cops:
