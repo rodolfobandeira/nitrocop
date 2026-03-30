@@ -17,32 +17,21 @@ def _extract_cop_from_pr_title(title: str) -> str | None:
     """Extract cop name from PR titles like '[bot] Fix Department/CopName'."""
     parts = title.split("Fix ", 1)
     if len(parts) == 2:
-        return parts[1].strip()
+        cop = parts[1].strip()
+        # Strip " (retry)" or similar parenthetical suffixes
+        paren = cop.find(" (")
+        if paren != -1:
+            cop = cop[:paren]
+        return cop
     return None
 
 
 def get_open_cop_fix_cops() -> set[str]:
     """Return cop names that already have an open type:cop-fix PR."""
     r = subprocess.run(
-        ["gh", "pr", "list", "--state", "open", "--label", "type:cop-fix",
-         "--json", "title", "--jq", ".[].title"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return set()
-    cops = set()
-    for line in r.stdout.strip().splitlines():
-        cop = _extract_cop_from_pr_title(line)
-        if cop:
-            cops.add(cop)
-    return cops
-
-
-def get_recently_merged_cop_fix_cops() -> set[str]:
-    """Return cop names that have a recently merged type:cop-fix PR."""
-    r = subprocess.run(
-        ["gh", "pr", "list", "--state", "merged", "--label", "type:cop-fix",
-         "--limit", "100",
+        ["gh", "pr", "list", "--state", "open",
+         "--search", "[bot] Fix in:title",
+         "--limit", "200",
          "--json", "title", "--jq", ".[].title"],
         capture_output=True, text=True,
     )
@@ -84,14 +73,11 @@ def main() -> int:
     backend = os.environ.get("INPUT_BACKEND", "codex")
     mode = os.environ.get("INPUT_MODE", "fix")
 
-    # ── Find cops with open or recently merged PRs ─────────────────────
+    # ── Find cops with open or draft PRs ────────────────────────────────
     open_cops = get_open_cop_fix_cops()
-    merged_cops = get_recently_merged_cop_fix_cops()
-    skip_cops = open_cops | merged_cops
+    skip_cops = open_cops
     if open_cops:
         print(f"Skipping {len(open_cops)} cops with open PRs: {', '.join(sorted(open_cops))}")
-    if merged_cops:
-        print(f"Skipping {len(merged_cops)} cops with recently merged PRs: {', '.join(sorted(merged_cops))}")
 
     # ── Look up tracker issue numbers ────────────────────────────────
     cop_issues = get_cop_issue_numbers(department)
