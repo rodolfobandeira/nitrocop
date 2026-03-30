@@ -95,8 +95,6 @@ def main() -> int:
         "--json",
         "--department", department,
         "--min-bugs", "1",
-        "--max-total", "0",
-        "--min-total", "1",
         "--min-matches", "0",
         "--limit", str(count + len(skip_cops)),
     ]

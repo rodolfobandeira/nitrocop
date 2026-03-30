@@ -61,7 +61,7 @@ cops with at least 1 real code bug.
 For the lighter Codex lane, prefer cops with 3-10 total FP+FN and mostly code bugs:
 
 ```bash
-python3 scripts/dispatch_cops.py rank --min-bugs 2 --max-total 10
+python3 scripts/dispatch_cops.py rank --min-bugs 2
 ```
 
 For harder cops or overview by tier:
@@ -108,8 +108,8 @@ gh workflow run batch-dispatch.yml -f department=Layout -f count=10 -f backend=c
 # Dispatch top 5 Style cops via claude
 gh workflow run batch-dispatch.yml -f department=Style -f count=5 -f backend=claude
 
-# All departments, codex, only cops with ≤20 total FP+FN
-gh workflow run batch-dispatch.yml -f count=10 -f backend=codex -f max_total=20
+# All departments, codex, force reduce mode for all cops
+gh workflow run batch-dispatch.yml -f count=10 -f backend=codex -f mode=reduce
 
 # Delayed dispatch — wait 60 minutes before dispatching (max 330m)
 gh workflow run batch-dispatch.yml -f department=Style -f count=5 -f backend=claude -f delay=60

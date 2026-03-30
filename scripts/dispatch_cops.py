@@ -2354,8 +2354,6 @@ def main():
     rank_parser = subparsers.add_parser("rank", help="Rank cops by dispatchability")
     rank_parser.add_argument("--binary", type=Path, help="Path to nitrocop binary")
     rank_parser.add_argument("--min-bugs", type=int, default=1)
-    rank_parser.add_argument("--max-total", type=int, default=15)
-    rank_parser.add_argument("--min-total", type=int, default=3)
     rank_parser.add_argument("--min-matches", type=int, default=50)
     rank_parser.add_argument("--department", help="Only include cops in this department (e.g., Style, Layout)")
     rank_parser.add_argument("--limit", type=int, default=0, help="Return at most N cops (0 = unlimited)")
@@ -2465,7 +2463,7 @@ def main():
             fp = entry.get("fp", 0)
             fn = entry.get("fn", 0)
             total = fp + fn
-            if total < args.min_total or (args.max_total > 0 and total > args.max_total):
+            if total < 1:
                 continue
             if entry.get("matches", 0) < args.min_matches:
                 continue
