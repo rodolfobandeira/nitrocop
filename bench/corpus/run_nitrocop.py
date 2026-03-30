@@ -157,6 +157,11 @@ def run_nitrocop(
     try:
         data = json.loads(result.stdout)
         offenses = normalize_offenses(data.get("offenses", []))
+        # --only filters which cops run, but Lint/RedundantCopDisableDirective
+        # always runs as post-processing. Filter offenses to the requested cop
+        # so per-cop corpus counts are not inflated by unrelated offenses.
+        if cop:
+            offenses = [o for o in offenses if o.get("cop_name") == cop]
         count = deduplicate_offenses(offenses)
         return {"raw": result.stdout, "offenses": offenses, "count": count, "error": None}
     except json.JSONDecodeError as e:
