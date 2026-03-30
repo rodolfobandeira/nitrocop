@@ -176,6 +176,13 @@ use crate::parse::source::SourceFile;
 /// siberas (1) — all config resolution or vendored file issues.
 /// No cop-level fix needed.
 ///
+/// ## Corpus FP=1 engineyard (2026-03-30)
+///
+/// RuboCop crashes on the `run` method in serverside_runner.rb (<<-ERROR
+/// heredoc inside rescue/begin/else triggers a RuboCop bug). RuboCop
+/// silently swallows the error and reports no offense; nitrocop correctly
+/// reports [23/10]. File excluded via repo_excludes.json.
+///
 /// ## =begin/=end trailing embdoc fix (2026-03-30)
 ///
 /// FP=7 root cause: methods containing `=begin/=end` embedded documentation

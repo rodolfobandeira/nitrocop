@@ -60,5 +60,11 @@
     "exclude": [
       "puppet/**/*"
     ]
+  },
+  "engineyard__engineyard__14a6698": {
+    "comment": "RuboCop crashes on Metrics/MethodLength for run() method (<<-ERROR heredoc inside rescue/begin/else). RuboCop silently swallows the error and reports 0 offenses for this method; nitrocop correctly reports [23/10]. Excluding to avoid false FP=1.",
+    "exclude": [
+      "lib/engineyard/serverside_runner.rb"
+    ]
   }
 }
