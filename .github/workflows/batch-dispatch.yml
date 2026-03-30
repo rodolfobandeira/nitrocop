@@ -2,7 +2,9 @@ name: Batch Dispatch
 
 run-name: >-
   Batch Dispatch: ${{ github.event.inputs.department }}
-  × ${{ github.event.inputs.count }} (${{ github.event.inputs.backend }})
+  × ${{ github.event.inputs.count }} (${{ github.event.inputs.backend }})${{
+    github.event.inputs.delay != '0' && format(' [delay {0}m]', github.event.inputs.delay) || ''
+  }}
 
 permissions:
   contents: read
@@ -60,11 +62,15 @@ on:
           - fix
           - retry
         default: fix
+      delay:
+        description: 'Minutes to wait before dispatching (0 = immediate)'
+        type: string
+        default: '0'
 
 jobs:
   dispatch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: ${{ fromJSON(github.event.inputs.delay || '0') + 30 }}
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
@@ -88,6 +94,12 @@ jobs:
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Wait before dispatching
+        if: github.event.inputs.delay != '0'
+        run: |
+          echo "Sleeping ${{ github.event.inputs.delay }} minutes before dispatching..."
+          sleep $(( ${{ github.event.inputs.delay }} * 60 ))
 
       - name: Rank and dispatch
         env:
