@@ -497,6 +497,8 @@ def build_prompt(
         "- Prefer the minimal patch that makes the deterministic verification pass.",
         "- A full revert to `origin/main` or an empty PR is treated as a failed repair, not a success.",
         "- If a fix is blocked by missing context, explain that clearly in the final message.",
+        "- Do not build a second binary from `origin/main` — use the pre-computed diagnosis packet for baseline data.",
+        "- Do not run `check_cop.py --rerun --clone` as your final verification step — it takes 20+ min and will likely time out. Use targeted spot-checks on specific repos instead. The workflow runs the full gate after you exit.",
         "",
     ])
     return "\n".join(lines)

@@ -30,6 +30,15 @@ These rules apply when `GITHUB_ACTIONS` is set and the workflow is driving the a
 - Keep fixes narrow. The workflow prefers a small correct fix over a broad cleanup.
 - Add or update tests with every real behavior fix.
 
+## Time Budget
+
+Agent runs have a hard timeout. Plan your work to finish well within it — a partial fix that passes tests is better than an unfinished fix that times out with no commit.
+
+- **Do not rebuild binaries you already have.** The workflow pre-builds a release binary and pre-runs `check_cop.py` before the agent starts. The diagnosis packet already contains the corpus regression data — do not re-derive it from scratch.
+- **Do not build `origin/main` from source.** Use the pre-computed diagnosis packet or `investigate_cop.py` with the corpus artifact for baseline data.
+- **Do not run full corpus reruns as verification.** `check_cop.py --rerun --clone` against the full diverging-repo set takes 20+ minutes. Use targeted spot-checks on specific repos/files instead. The workflow runs the full gate after you exit.
+- **Minimize cargo release builds.** Use `cargo test --lib` (debug, incremental) for fast iteration. Budget for at most one release build after your code fix.
+
 ## Helper Script Conventions
 
 - Public helper CLIs live in `scripts/`.

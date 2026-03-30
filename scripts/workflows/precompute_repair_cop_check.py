@@ -246,6 +246,7 @@ def render_packet(
         "",
         "The workflow already reran the changed-cop corpus check locally before agent execution.",
         "Use this packet as the starting point instead of rediscovering the same corpus regression.",
+        "Do NOT rebuild baseline binaries from `origin/main` or rerun the full corpus check yourself — this packet already contains that data.",
         "",
     ]
 
