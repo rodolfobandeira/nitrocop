@@ -2319,6 +2319,8 @@ def main():
     rank_parser.add_argument("--max-total", type=int, default=15)
     rank_parser.add_argument("--min-total", type=int, default=3)
     rank_parser.add_argument("--min-matches", type=int, default=50)
+    rank_parser.add_argument("--department", help="Only include cops in this department (e.g., Style, Layout)")
+    rank_parser.add_argument("--limit", type=int, default=0, help="Return at most N cops (0 = unlimited)")
     rank_parser.add_argument("--json", action="store_true")
 
     prior_parser = subparsers.add_parser("prior-attempts", help="Collect prior failed PR attempts")
@@ -2431,6 +2433,8 @@ def main():
                 continue
 
             cop_name = entry["cop"]
+            if args.department and not cop_name.startswith(args.department + "/"):
+                continue
             fn_bugs, fn_cfg = diagnose_examples(binary, cop_name, entry.get("fn_examples", []), "fn")
             fp_bugs, fp_cfg = diagnose_examples(binary, cop_name, entry.get("fp_examples", []), "fp")
             bugs = fn_bugs + fp_bugs
@@ -2445,6 +2449,13 @@ def main():
                     "config_issues": cfg,
                     "matches": entry.get("matches", 0),
                 })
+
+        # Sort: highest code-bug ratio first, then lowest total divergence, then name
+        results.sort(key=lambda r: (-r["code_bugs"] / max(r["code_bugs"] + r["config_issues"], 1),
+                                     r["fp"] + r["fn"],
+                                     r["cop"]))
+        if args.limit > 0:
+            results = results[:args.limit]
 
         if args.json:
             json.dump(results, sys.stdout, indent=2)

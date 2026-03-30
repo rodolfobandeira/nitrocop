@@ -99,7 +99,20 @@ gh issue list --state open --label "type:cop-issue" --label "state:backlog" \
   -q '.[] | select(.labels | map(.name) | all(. != "difficulty:config-only")) | "#\(.number) \(.title)"'
 ```
 
-Dispatch cops directly via `agent-cop-fix`:
+For batch dispatch (ranked by code-bug ratio, deterministic):
+
+```bash
+# Dispatch top 10 Layout cops via codex
+gh workflow run batch-dispatch.yml -f department=Layout -f count=10 -f backend=codex
+
+# Dispatch top 5 Style cops via claude
+gh workflow run batch-dispatch.yml -f department=Style -f count=5 -f backend=claude
+
+# All departments, codex, only cops with ≤20 total FP+FN
+gh workflow run batch-dispatch.yml -f count=10 -f backend=codex -f max_total=20
+```
+
+For single-cop dispatch via `agent-cop-fix`:
 
 ```bash
 gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars"
@@ -107,7 +120,7 @@ gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars" -f backend=codex
 gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars" -f backend=claude
 ```
 
-To dispatch multiple cops, run one command per cop. To link to a tracker issue:
+To link to a tracker issue:
 
 ```bash
 gh workflow run agent-cop-fix.yml -f cop="Style/ClassVars" -f issue_number=123
