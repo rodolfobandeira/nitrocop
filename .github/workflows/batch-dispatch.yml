@@ -70,7 +70,7 @@ on:
 jobs:
   dispatch:
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ fromJSON(github.event.inputs.delay || '0') + 30 }}
+    timeout-minutes: 360
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
