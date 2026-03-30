@@ -71,6 +71,27 @@ def get_cop_issue_numbers(department: str) -> dict[str, int]:
     return issues
 
 
+def get_closed_cop_issue_cops(department: str) -> set[str]:
+    """Return cop names that have a closed type:cop-issue tracker issue."""
+    r = subprocess.run(
+        ["gh", "issue", "list", "--state", "closed",
+         "--label", "type:cop-issue",
+         "--search", f"{department}/ in:title",
+         "--limit", "200",
+         "--json", "title"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return set()
+    cops = set()
+    for item in json.loads(r.stdout):
+        title = item.get("title", "")
+        if "[cop] " in title:
+            cop = title.split("[cop] ", 1)[1].strip()
+            cops.add(cop)
+    return cops
+
+
 def main() -> int:
     department = os.environ["INPUT_DEPARTMENT"]
     count = int(os.environ.get("INPUT_COUNT", "5"))
@@ -79,9 +100,15 @@ def main() -> int:
 
     # ── Find cops with open or draft PRs ────────────────────────────────
     open_cops = get_open_cop_fix_cops()
-    skip_cops = open_cops
+    skip_cops = set(open_cops)
     if open_cops:
         print(f"Skipping {len(open_cops)} cops with open PRs: {', '.join(sorted(open_cops))}")
+
+    # ── Skip cops whose tracker issues are already closed ─────────────
+    closed_issue_cops = get_closed_cop_issue_cops(department)
+    if closed_issue_cops:
+        print(f"Skipping {len(closed_issue_cops)} cops with closed issues: {', '.join(sorted(closed_issue_cops))}")
+        skip_cops |= closed_issue_cops
 
     # ── Look up tracker issue numbers ────────────────────────────────
     cop_issues = get_cop_issue_numbers(department)
