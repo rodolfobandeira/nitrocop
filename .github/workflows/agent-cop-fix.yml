@@ -335,6 +335,7 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --run-number "${{ github.run_number }}" \
             --tokens "${{ steps.task.outputs.tokens }}" \
+            --code-bugs "${{ steps.task.outputs.code_bugs }}" \
             >> "$GITHUB_OUTPUT"
 
       # --- Cleanup: close draft PR if agent failed ---

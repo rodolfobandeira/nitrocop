@@ -1007,6 +1007,8 @@ def cmd_finalize(args: list[str]) -> int:
     p.add_argument("--run-url", required=True)
     p.add_argument("--run-number", required=True)
     p.add_argument("--tokens", required=True)
+    p.add_argument("--code-bugs", default="0",
+                   help="Number of CODE BUG examples from pre-diagnostic")
     opts = p.parse_args(args)
 
     scope_report_file = _env_path("AGENT_SCOPE_REPORT_FILE")
@@ -1118,8 +1120,23 @@ def cmd_finalize(args: list[str]) -> int:
 
     # 8b. Detect docs-only changes (no real cop logic fix)
     docs_only = _is_docs_only_change(signed_sha, opts.repo)
+    had_code_bugs = int(opts.code_bugs or "0") > 0
+
+    # If docs-only AND pre-diagnostic reported CODE BUGs, the agent gave up on
+    # real fixes. Close the PR instead of merging — doc-only commits add noise
+    # without closing the FP/FN gap.
+    if docs_only and had_code_bugs:
+        _log("Docs-only change but pre-diagnostic had CODE BUGs — closing PR")
+        _close_pr_no_changes(
+            opts.pr_url, opts.cop, opts.backend_label, opts.model_label,
+            opts.mode, opts.run_url, opts.issue_number, opts.repo,
+        )
+        _output("result", "docs_only_rejected")
+        _output("has_pr", "false")
+        return 0
+
     if docs_only:
-        _log("Docs-only change — will merge documentation but keep issue open as blocked")
+        _log("Docs-only change (config-only task) — will merge documentation but keep issue open as blocked")
 
     # 9. Build and update PR body
     body = _build_final_pr_body(

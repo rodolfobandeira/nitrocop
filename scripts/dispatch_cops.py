@@ -1335,6 +1335,17 @@ caused by config/context differences, not a detection bug.
 3. If you cannot determine the root cause within 5 minutes, document your findings as
    a `///` comment on the cop struct and commit
 
+### Do NOT commit doc-only changes when CODE BUGs were reported
+If the pre-diagnostic classified examples as **CODE BUG** but you cannot reproduce them
+or find a code fix, do NOT fall back to committing only `///` doc comments. The
+pre-diagnostic ran your binary against real corpus files — if it says CODE BUG, the
+mismatch is real. Re-read the pre-diagnostic output and double-check your test covers
+the exact pattern (receiver shape, nesting depth, argument structure, modifier context).
+
+If after thorough investigation you still cannot fix the code, **exit without committing**.
+The workflow will close the PR cleanly and the issue stays open for a future retry.
+Doc-only commits add noise to git history without closing the FP/FN gap.
+
 ### When the pre-diagnostic contradicts existing doc comments
 If the pre-diagnostic classifies an example as **CODE BUG** but existing `///` doc
 comments on the cop struct say it's "not real" or a "corpus artifact," the

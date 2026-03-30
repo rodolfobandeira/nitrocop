@@ -86,3 +86,4 @@ Show a table of actions taken:
 - When fixing, commit with a clear message explaining what was changed
 - When closing, always leave a comment with the specific reason so the dispatch system can learn
 - If the diff contains changes to Python files (`.py`), treat this as suspicious — agent cop-fix should only touch Rust code and test fixtures. Flag it to the user before approving.
+- If the diff contains only `///` doc comment changes in `.rs` files and no code logic or fixture changes, close the PR. Doc-only PRs indicate the agent couldn't find a code fix — they add git noise without closing any FP/FN gap. The agent should have exited without committing.
