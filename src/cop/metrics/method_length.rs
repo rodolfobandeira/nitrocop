@@ -175,6 +175,15 @@ use crate::parse::source::SourceFile;
 /// ConfigLMM (1), brandur (1), engineyard (1), gisiahq (1), samvera (1),
 /// siberas (1) — all config resolution or vendored file issues.
 /// No cop-level fix needed.
+///
+/// ## =begin/=end fix (2026-03-29)
+///
+/// FP root cause for ruby/tk, brandur, siberas: methods containing
+/// `=begin/=end` embedded documentation blocks were over-counted.
+/// Parser's AST body range excludes `=begin/=end` content, so RuboCop's
+/// `body.source.lines` doesn't see them. Prism includes them in the
+/// DefNode location. Fix: skip `=begin/=end` blocks in
+/// `count_body_lines_impl` (src/cop/util.rs).
 pub struct MethodLength;
 
 /// Parsed config values for MethodLength.

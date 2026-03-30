@@ -99,6 +99,12 @@ fn count_body_lines_impl(
     let lines: Vec<&[u8]> = source.lines().collect();
     let mut count = 0;
 
+    // Track =begin/=end embedded documentation blocks. RuboCop's MethodLength
+    // uses `body.source.lines` which excludes =begin/=end content because the
+    // Parser AST body range doesn't include embedded doc. Prism includes them
+    // in the node location, so we must explicitly skip them.
+    let mut in_embdoc = false;
+
     // Lines between start_line and end_line (exclusive)
     // start_line and end_line are 1-indexed
     for line_num in (start_line + 1)..end_line {
@@ -125,12 +131,20 @@ fn count_body_lines_impl(
         }
         let line = lines[line_index];
 
-        // NOTE: =begin/=end multi-line comments are NOT excluded here.
-        // RuboCop's `comment_line?` only matches `#`-style comments (regex /^\s*#/),
-        // so =begin/=end content is always counted as body lines regardless of
-        // the `CountComments` setting. This matches RuboCop behavior.
-
         let trimmed = trim_bytes(line);
+
+        // =begin/=end must start at column 0 (no leading whitespace)
+        if line.starts_with(b"=begin") {
+            in_embdoc = true;
+            continue;
+        }
+        if line.starts_with(b"=end") {
+            in_embdoc = false;
+            continue;
+        }
+        if in_embdoc {
+            continue;
+        }
 
         // Skip blank lines
         if trimmed.is_empty() {
