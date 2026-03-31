@@ -2230,17 +2230,32 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
     created = updated = reopened = closed = config_only = 0
 
     # ── Phase 1: Pre-diagnose all cops in parallel ──────────────────────
+    # Prefer pre-computed diagnosis from corpus oracle (embedded in by_cop
+    # entries by bench/corpus/diagnose_corpus.py). Falls back to runtime
+    # diagnosis when pre-computed data is missing (older corpus artifacts).
     diagnosis: dict[str, tuple[int, int]] = {}  # cop -> (code_bugs, config_issues)
-    if binary:
+    precomputed_count = 0
+    for cop_entry in data.get("by_cop", []):
+        diag = cop_entry.get("diagnosis")
+        if diag and cop_entry["cop"] in diverging_cops:
+            diagnosis[cop_entry["cop"]] = (diag["code_bugs"], diag["config_issues"])
+            precomputed_count += 1
+
+    if precomputed_count:
+        print(f"Using pre-computed diagnosis for {precomputed_count} cops", file=sys.stderr)
+
+    # Fall back to runtime diagnosis for any cops without pre-computed data
+    remaining = diverging_cops - diagnosis.keys()
+    if remaining and binary:
         def _diagnose_cop(cop: str) -> tuple[str, int, int]:
             entry = entries[cop]
             fn_bugs, fn_cfg = diagnose_examples(binary, cop, entry.get("fn_examples", []), "fn")
             fp_bugs, fp_cfg = diagnose_examples(binary, cop, entry.get("fp_examples", []), "fp")
             return cop, fn_bugs + fp_bugs, fn_cfg + fp_cfg
 
-        print(f"Pre-diagnosing {len(diverging_cops)} cops...", file=sys.stderr)
+        print(f"Pre-diagnosing {len(remaining)} cops (no pre-computed data)...", file=sys.stderr)
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_diagnose_cop, cop): cop for cop in diverging_cops}
+            futures = {pool.submit(_diagnose_cop, cop): cop for cop in remaining}
             for future in as_completed(futures):
                 cop_name, code_bugs, cfg_issues = future.result()
                 diagnosis[cop_name] = (code_bugs, cfg_issues)

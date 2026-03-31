@@ -396,6 +396,59 @@ def test_config_only_classification():
     assert (False and 0 == 0 and 8 > 0) is False
 
 
+def test_precomputed_diagnosis_from_corpus_artifact():
+    """Pre-computed diagnosis in by_cop entries is extracted correctly."""
+    data = {
+        "by_cop": [
+            {"cop": "Style/Foo", "fp": 3, "fn": 0, "diagnosis": {"code_bugs": 2, "config_issues": 1}},
+            {"cop": "Style/Bar", "fp": 1, "fn": 0, "diagnosis": {"code_bugs": 0, "config_issues": 1}},
+            {"cop": "Style/NoDiag", "fp": 2, "fn": 0},
+            {"cop": "Style/Perfect", "fp": 0, "fn": 0, "diagnosis": {"code_bugs": 0, "config_issues": 0}},
+        ],
+    }
+    diverging = {"Style/Foo", "Style/Bar", "Style/NoDiag"}
+    diagnosis = {}
+    for cop_entry in data.get("by_cop", []):
+        diag = cop_entry.get("diagnosis")
+        if diag and cop_entry["cop"] in diverging:
+            diagnosis[cop_entry["cop"]] = (diag["code_bugs"], diag["config_issues"])
+
+    # Style/Foo has code bugs → not config-only
+    assert diagnosis["Style/Foo"] == (2, 1)
+    code_bugs, cfg_issues = diagnosis["Style/Foo"]
+    assert not (code_bugs == 0 and cfg_issues > 0)
+
+    # Style/Bar has 0 code bugs, 1 config → config-only
+    assert diagnosis["Style/Bar"] == (0, 1)
+    code_bugs, cfg_issues = diagnosis["Style/Bar"]
+    assert code_bugs == 0 and cfg_issues > 0
+
+    # Style/NoDiag has no diagnosis → not in precomputed, needs runtime
+    assert "Style/NoDiag" not in diagnosis
+
+    # Style/Perfect is not diverging → not extracted
+    assert "Style/Perfect" not in diagnosis
+
+
+def test_precomputed_diagnosis_identifies_remaining_cops():
+    """Cops without pre-computed diagnosis are identified for runtime fallback."""
+    data = {
+        "by_cop": [
+            {"cop": "Style/Foo", "fp": 3, "fn": 0, "diagnosis": {"code_bugs": 2, "config_issues": 1}},
+            {"cop": "Style/NoDiag", "fp": 2, "fn": 0},
+        ],
+    }
+    diverging = {"Style/Foo", "Style/NoDiag"}
+    diagnosis = {}
+    for cop_entry in data.get("by_cop", []):
+        diag = cop_entry.get("diagnosis")
+        if diag and cop_entry["cop"] in diverging:
+            diagnosis[cop_entry["cop"]] = (diag["code_bugs"], diag["config_issues"])
+
+    remaining = diverging - diagnosis.keys()
+    assert remaining == {"Style/NoDiag"}
+
+
 def test_generate_task_includes_diagnostic_contradiction_guidance(tmp_path):
     """When pre-diagnostic says CODE BUG, the prompt should warn agents not to
     defer to doc comments that say otherwise."""
