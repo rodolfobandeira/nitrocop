@@ -1,5 +1,16 @@
 /// Checks the indentation of the first line of the right-hand-side of a multi-line assignment.
 ///
+/// ## Investigation findings (2026-03-31)
+///
+/// **FP root cause (1 FP):** Embedded assignments used as bare method arguments like
+/// `body = wrap_file_body path =\n                          File.expand_path(...)`
+/// are not chained assignments. The previous source-text scan treated any earlier `=`
+/// on the same line as a chain base, so it borrowed `body`'s column instead of `path`'s
+/// and falsely flagged the correctly aligned value. Fixed by requiring the current
+/// assignment target to begin immediately after only whitespace following the preceding
+/// `=`. Direct chains like `foo = bar =` still match, but bare method arguments like
+/// `wrap_file_body path =` no longer do.
+///
 /// ## Investigation findings (2026-03-14)
 ///
 /// **FP root cause (30 FPs):** The cop was using line indentation (`indentation_of`) as the
@@ -78,38 +89,41 @@ use crate::parse::source::SourceFile;
 pub struct AssignmentIndentation;
 
 impl AssignmentIndentation {
-    /// Check if there is an assignment operator (`=`) on the same line before `name_offset`,
-    /// indicating this write is the RHS of a chained assignment (e.g., `a = b = \n val`).
-    /// Returns `Some(col)` with the column of the variable name immediately preceding that `=`,
-    /// matching RuboCop's `leftmost_multiple_assignment` which goes one level up.
+    fn is_setter_name(name_bytes: &[u8]) -> bool {
+        name_bytes.ends_with(b"=")
+            && name_bytes != b"=="
+            && name_bytes != b"!="
+            && name_bytes != b"==="
+            && name_bytes != b"<=>"
+            && name_bytes != b">="
+            && name_bytes != b"<="
+    }
+
+    /// Detect direct chained assignments like `a = b = \n value`.
     ///
-    /// If there are unbalanced opening parens/brackets between the `=` and `name_offset`,
-    /// we are inside a nested expression (not a direct chain), so returns `None`.
+    /// The current assignment target must start immediately after only whitespace
+    /// following the preceding `=` on the same line. That keeps true chains like
+    /// `foo = bar =` while rejecting embedded assignments like
+    /// `wrap_file_body path =`, where a method name appears between the two.
     fn find_chained_assignment_base(source: &SourceFile, name_offset: usize) -> Option<usize> {
         let bytes = source.as_bytes();
-        // Find the start of the line containing name_offset
         let mut line_start = name_offset;
         while line_start > 0 && bytes[line_start - 1] != b'\n' {
             line_start -= 1;
         }
 
-        // If name is at line start (after whitespace), no chained assignment possible
         let prefix = &bytes[line_start..name_offset];
         if prefix.iter().all(|&b| b == b' ' || b == b'\t') {
             return None;
         }
 
-        // Scan prefix for the LAST `=` that is part of an assignment (not ==, !=, ===, <=>, >=, <=)
-        // We want the `=` closest to (immediately before) name_offset.
         let mut last_eq_pos: Option<usize> = None;
         let mut i = 0;
         while i < prefix.len() {
             let b = prefix[i];
             if b == b'=' {
-                // Check it's not ==, ===
                 let next = prefix.get(i + 1).copied();
                 if next == Some(b'=') {
-                    // Skip == or ===
                     i += if prefix.get(i + 2) == Some(&b'=') {
                         3
                     } else {
@@ -117,13 +131,11 @@ impl AssignmentIndentation {
                     };
                     continue;
                 }
-                // Check it's not !=, >=, <=, <=>
                 let prev = if i > 0 { Some(prefix[i - 1]) } else { None };
                 if prev == Some(b'!') || prev == Some(b'>') || prev == Some(b'<') {
                     i += 1;
                     continue;
                 }
-                // Check it's not ||= or &&= (compound operator, not simple chain)
                 if prev == Some(b'|') || prev == Some(b'&') {
                     i += 1;
                     continue;
@@ -132,55 +144,36 @@ impl AssignmentIndentation {
                 i += 1;
                 continue;
             }
-            // Skip string literals (single and double quoted)
             if b == b'"' || b == b'\'' {
                 let quote = b;
                 i += 1;
                 while i < prefix.len() && prefix[i] != quote {
                     if prefix[i] == b'\\' {
-                        i += 1; // skip escaped char
+                        i += 1;
                     }
                     i += 1;
                 }
-                i += 1; // skip closing quote
+                i += 1;
                 continue;
             }
             i += 1;
         }
 
         let eq_pos = last_eq_pos?;
-
-        // Check for unbalanced opening parens/brackets between the `=` and name_offset.
-        // If there are more `(` / `[` than `)` / `]`, we're inside a nested expression.
         let after_eq = &prefix[eq_pos + 1..];
-        let mut depth: i32 = 0;
-        for &b in after_eq {
-            match b {
-                b'(' | b'[' => depth += 1,
-                b')' | b']' => depth -= 1,
-                _ => {}
-            }
-        }
-        if depth > 0 {
+        if after_eq.iter().any(|&b| b != b' ' && b != b'\t') {
             return None;
         }
 
-        // Find the variable name that precedes the `=` sign.
-        // Scan backwards from eq_pos to find the start of the token (variable name).
         let mut end = eq_pos;
-        // Skip whitespace before `=`
         while end > 0 && (prefix[end - 1] == b' ' || prefix[end - 1] == b'\t') {
             end -= 1;
         }
         if end == 0 {
             return None;
         }
-        // Now end points just past the last char of the variable name.
-        // Scan backwards to find the start of the token.
+
         let token_end = end;
-        // Handle closing brackets: `)` or `]` means the preceding expression
-        // ends with a method call or indexing — scan back to find the matching opener,
-        // then continue to find the start of the receiver.
         let mut pos = token_end;
         if pos > 0 && (prefix[pos - 1] == b')' || prefix[pos - 1] == b']') {
             let close = prefix[pos - 1];
@@ -195,10 +188,7 @@ impl AssignmentIndentation {
                     bracket_depth -= 1;
                 }
             }
-            // pos now points to the opening bracket; continue scanning left
-            // to find the start of the receiver expression.
         }
-        // Scan backwards over identifier characters, dots, colons, @, $
         while pos > 0 {
             let c = prefix[pos - 1];
             if c.is_ascii_alphanumeric()
@@ -220,8 +210,7 @@ impl AssignmentIndentation {
         if pos >= token_end {
             return None;
         }
-        // pos is the start of the preceding variable/expression in the prefix.
-        // Its column = pos (since prefix starts at line_start, column = pos).
+
         Some(pos)
     }
 
@@ -588,17 +577,7 @@ impl Cop for AssignmentIndentation {
 
         // Setter calls (obj.x = val, hash[key] = val)
         if let Some(n) = node.as_call_node() {
-            let name = n.name();
-            let name_bytes = name.as_slice();
-            // Only handle setter methods: name ends with '=' but is not ==, !=, ===, <=>, >=, <=
-            if name_bytes.ends_with(b"=")
-                && name_bytes != b"=="
-                && name_bytes != b"!="
-                && name_bytes != b"==="
-                && name_bytes != b"<=>"
-                && name_bytes != b">="
-                && name_bytes != b"<="
-            {
+            if Self::is_setter_name(n.name().as_slice()) {
                 if let Some(args) = n.arguments() {
                     let arg_list: Vec<_> = args.arguments().iter().collect();
                     if let Some(last_arg) = arg_list.last() {
