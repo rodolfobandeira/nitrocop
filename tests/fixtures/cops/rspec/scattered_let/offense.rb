@@ -27,12 +27,12 @@ RSpec.feature "Widgets" do
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredLet: Group all let/let! blocks in the example group together.
 end
 
-# let with &block_pass counts as a let declaration (RuboCop's `let?` matches both forms)
+# parenthesized let with &block_pass is still reported when scattered
 describe Connection do
   let(:connection) { described_class.new }
   before { setup }
-  let :fresh_connection, &NEW_PG_CONNECTION
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredLet: Group all let/let! blocks in the example group together.
+  let(:fresh_connection, &NEW_PG_CONNECTION)
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RSpec/ScatteredLet: Group all let/let! blocks in the example group together.
 end
 
 # block_pass let in initial group, then scattered regular let
