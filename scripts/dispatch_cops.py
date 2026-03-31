@@ -1707,12 +1707,18 @@ def classify_issue_difficulty(entry: dict, recommendation: dict[str, object]) ->
     return "medium"
 
 
-def run_nitrocop(binary: Path, cwd: str, cop: str) -> list[dict]:
+def run_nitrocop(binary: Path, cwd: str, cop: str, filename: str = "test.rb") -> list[dict]:
+    cmd = [str(binary), "--preview", "--no-cache", "--format", "json"]
+    if BASELINE_CONFIG.exists():
+        cmd.extend(["--config", str(BASELINE_CONFIG)])
+    else:
+        cmd.append("--force-default-config")
+    cmd.extend(["--only", cop, filename])
     proc = subprocess.run(
-        [str(binary), "--force-default-config", "--only", cop, "--format", "json", "test.rb"],
+        cmd,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=30,
         cwd=cwd,
     )
     if proc.stdout.strip():
@@ -1742,15 +1748,20 @@ def diagnose_examples(binary: Path, cop: str, examples: list, kind: str) -> tupl
         lines, offense = extract_diagnostic_lines(example["src"])
         if not lines:
             continue
+        # Use original filename for Include pattern matching (e.g., *_spec.rb)
+        loc = example.get("loc", "")
+        parsed = _parse_example_loc(loc)
+        filename = os.path.basename(parsed[1]) if parsed else "test.rb"
         tmp = tempfile.mkdtemp()
+        filepath = os.path.join(tmp, filename)
         try:
-            with open(os.path.join(tmp, "test.rb"), "w") as file_handle:
+            with open(filepath, "w") as file_handle:
                 file_handle.write("\n".join(lines) + "\n")
-            offenses = run_nitrocop(binary, tmp, cop)
+            offenses = run_nitrocop(binary, tmp, cop, filename)
             if not offenses and offense:
-                with open(os.path.join(tmp, "test.rb"), "w") as file_handle:
+                with open(filepath, "w") as file_handle:
                     file_handle.write(offense + "\n")
-                offenses = run_nitrocop(binary, tmp, cop)
+                offenses = run_nitrocop(binary, tmp, cop, filename)
             detected = len(offenses) > 0
             if (kind == "fn" and not detected) or (kind == "fp" and detected):
                 bugs += 1
@@ -1760,7 +1771,7 @@ def diagnose_examples(binary: Path, cop: str, examples: list, kind: str) -> tupl
             pass
         finally:
             try:
-                os.unlink(os.path.join(tmp, "test.rb"))
+                os.unlink(filepath)
                 os.rmdir(tmp)
             except OSError:
                 pass
