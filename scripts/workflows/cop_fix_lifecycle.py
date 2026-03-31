@@ -84,7 +84,13 @@ def _warning(msg: str) -> None:
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, capture_output=True, check=True, **kwargs)
+    try:
+        return subprocess.run(cmd, text=True, capture_output=True, check=True, **kwargs)
+    except subprocess.CalledProcessError as exc:
+        _error(f"Command failed (exit {exc.returncode}): {' '.join(cmd)}")
+        if exc.stderr:
+            _error(f"stderr: {exc.stderr.strip()}")
+        raise
 
 
 def _run_ok(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
@@ -543,13 +549,25 @@ def cmd_claim_pr(args: list[str]) -> int:
     )
     write_and_read(claim_body_file, body)
 
-    r = _run([
+    pr_cmd = [
         "gh", "pr", "create",
         "--draft", "--base", "main", "--head", opts.branch,
         "--label", f"type:cop-fix,{model_label_name}",
         "--title", f"[bot] Fix {opts.cop}{mode_note}",
         "--body-file", str(claim_body_file),
-    ])
+    ]
+    # Retry: the branch was just created via API and may not be visible yet
+    import time
+    for attempt in range(3):
+        r = _run_ok(pr_cmd)
+        if r.returncode == 0:
+            break
+        _warning(f"gh pr create attempt {attempt + 1}/3 failed: {r.stderr.strip()}")
+        if attempt < 2:
+            time.sleep(2)
+    else:
+        _error(f"gh pr create failed after 3 attempts: {r.stderr.strip()}")
+        raise subprocess.CalledProcessError(r.returncode, pr_cmd, r.stdout, r.stderr)
     pr_url = r.stdout.strip()
     _output("pr_url", pr_url)
     _log(f"Created draft PR: {pr_url}")
