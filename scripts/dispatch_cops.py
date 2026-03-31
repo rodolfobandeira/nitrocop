@@ -2536,10 +2536,17 @@ def main():
             cop_name = entry["cop"]
             if args.department and not cop_name.startswith(args.department + "/"):
                 continue
-            fn_bugs, fn_cfg = diagnose_examples(binary, cop_name, entry.get("fn_examples", []), "fn")
-            fp_bugs, fp_cfg = diagnose_examples(binary, cop_name, entry.get("fp_examples", []), "fp")
-            bugs = fn_bugs + fp_bugs
-            cfg = fn_cfg + fp_cfg
+
+            # Use pre-computed diagnosis from corpus artifact when available
+            diag = entry.get("diagnosis")
+            if diag:
+                bugs = diag["code_bugs"]
+                cfg = diag["config_issues"]
+            else:
+                fn_bugs, fn_cfg = diagnose_examples(binary, cop_name, entry.get("fn_examples", []), "fn")
+                fp_bugs, fp_cfg = diagnose_examples(binary, cop_name, entry.get("fp_examples", []), "fp")
+                bugs = fn_bugs + fp_bugs
+                cfg = fn_cfg + fp_cfg
 
             if bugs >= args.min_bugs:
                 results.append({
