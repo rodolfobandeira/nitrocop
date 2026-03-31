@@ -751,19 +751,17 @@ impl FlashVisitor<'_> {
                             // Multi-statement block: begin wrapper hides outer
                             // redirect. Always implicit render.
                             true
+                        } else if outer_redirect_visible {
+                            // Single-statement block: parent is block node,
+                            // can see outer scope for redirect when the block
+                            // is itself the statement (e.g. `each { flash... }`).
+                            let outer_has_redirect =
+                                outer_siblings.iter().any(|s| is_redirect_sibling(s));
+                            !outer_has_redirect
                         } else {
-                            if outer_redirect_visible {
-                                // Single-statement block: parent is block node,
-                                // can see outer scope for redirect when the block
-                                // is itself the statement (e.g. `each { flash... }`).
-                                let outer_has_redirect =
-                                    outer_siblings.iter().any(|s| is_redirect_sibling(s));
-                                !outer_has_redirect
-                            } else {
-                                // Embedded lambdas/blocks (e.g. local assignments)
-                                // hide later outer redirects from RuboCop's context.parent.
-                                true
-                            }
+                            // Embedded lambdas/blocks (e.g. local assignments)
+                            // hide later outer redirects from RuboCop's context.parent.
+                            true
                         }
                     } else {
                         false
