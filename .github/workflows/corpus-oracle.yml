@@ -6,7 +6,7 @@ permissions:
 
 concurrency:
   group: corpus-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 on:
   # Manual trigger only — corpus oracle runs against thousands of repos
@@ -486,7 +486,7 @@ jobs:
     needs: [oracle-repo, run-synthetic]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - name: Free disk space
         run: |
@@ -656,30 +656,6 @@ jobs:
             echo "No include-gated results to merge"
           fi
 
-      - name: Download nitrocop binary for diagnosis
-        uses: actions/download-artifact@v8
-        with:
-          name: nitrocop-binary
-          path: bin/
-
-      - name: Make binary executable
-        run: chmod +x bin/nitrocop
-
-      - uses: ruby/setup-ruby@v1
-
-      - name: Install corpus bundle for diagnosis
-        run: |
-          cd bench/corpus
-          bundle config set --local path vendor/bundle
-          bundle install --jobs 4 --retry 3
-
-      - name: Pre-compute per-cop diagnosis
-        run: |
-          python3 bench/corpus/diagnose_corpus.py \
-            --input corpus-results.json \
-            --output corpus-results.json \
-            --binary bin/nitrocop
-
       - name: Generate tiers.json
         run: |
           python3 bench/corpus/gen_tiers.py \
@@ -795,3 +771,47 @@ jobs:
               --body-file "$PR_BODY_FILE" \
               --head "$BRANCH" \
               --base main
+
+      # ── Pre-compute diagnosis (non-blocking) ─────────────────────
+      # Runs AFTER artifact upload and PR creation so those succeed
+      # even if diagnosis is slow or fails.
+
+      - name: Download nitrocop binary for diagnosis
+        uses: actions/download-artifact@v8
+        with:
+          name: nitrocop-binary
+          path: bin/
+
+      - name: Make binary executable
+        run: chmod +x bin/nitrocop
+
+      - uses: ruby/setup-ruby@v1
+
+      - name: Install corpus bundle for diagnosis
+        run: |
+          cd bench/corpus
+          bundle config set --local path vendor/bundle
+          bundle install --jobs 4 --retry 3
+
+      - name: Pre-compute per-cop diagnosis
+        run: |
+          python3 bench/corpus/diagnose_corpus.py \
+            --input corpus-results.json \
+            --output corpus-results.json \
+            --binary bin/nitrocop
+
+      - name: Re-upload report with diagnosis
+        uses: actions/upload-artifact@v6
+        with:
+          name: corpus-report
+          path: |
+            corpus-results.json
+            corpus-results.md
+            include-gated-results.json
+            include-gated-results.md
+            tiers.json
+            bench/synthetic/synthetic-results.json
+            docs/corpus.md
+            docs/cop_coverage.md
+          retention-days: 30
+          overwrite: true

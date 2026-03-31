@@ -125,8 +125,11 @@ jobs:
           wc -l "$TASK_FILE"
           grep -c "CODE BUG\|CONFIG/CONTEXT\|CONFIRMED\|NOT REPRODUCED" "$TASK_FILE" || echo "no diagnostics"
 
-          CODE_BUGS=$(grep -c "CODE BUG" "$TASK_FILE" || true)
-          CONFIG_ISSUES=$(grep -c "CONFIG/CONTEXT" "$TASK_FILE" || true)
+          # Count actual diagnostic markers only (not template instructional text).
+          # Diagnostic lines use "— CODE BUG" with an em-dash; template text uses
+          # plain "CODE BUG" without the dash, so the em-dash distinguishes them.
+          CODE_BUGS=$(grep -c "— CODE BUG" "$TASK_FILE" || true)
+          CONFIG_ISSUES=$(grep -c "— CONFIG/CONTEXT" "$TASK_FILE" || true)
           echo "code_bugs=$CODE_BUGS" >> "$GITHUB_OUTPUT"
           echo "Code bugs: $CODE_BUGS, Config issues: $CONFIG_ISSUES"
 
