@@ -2052,15 +2052,86 @@ def get_failed_check_logs(pr_number: int) -> str:
         return ""
 
 
+def _collect_nofix_findings(cop: str) -> list[str]:
+    """Scrape 'Agent findings' from tracker issue comments for no-fix runs.
+
+    Both cop-fix and PR-repair workflows post agent findings to the tracker
+    issue when the agent investigates but fails to produce a fix.  These
+    contain what was tried and why it failed — critical context for future
+    agents.
+    """
+    title = make_issue_title(cop)
+    try:
+        output = run_gh([
+            "issue", "list",
+            "--search", f"{title} in:title",
+            "--state", "all",
+            "--json", "number",
+            "--limit", "1",
+        ])
+    except subprocess.CalledProcessError:
+        return []
+    issues = json.loads(output) if output else []
+    if not issues:
+        return []
+
+    issue_number = issues[0]["number"]
+    try:
+        output = run_gh([
+            "issue", "view", str(issue_number),
+            "--json", "comments",
+        ])
+    except subprocess.CalledProcessError:
+        return []
+    if not output:
+        return []
+
+    try:
+        comments = json.loads(output).get("comments", [])
+    except json.JSONDecodeError:
+        return []
+
+    findings: list[str] = []
+    for comment in comments:
+        body = comment.get("body", "")
+        # Match comments that contain agent findings (from cop-fix or repair)
+        if "Agent findings" not in body:
+            continue
+        lines = body.splitlines()
+        in_fence = False
+        finding_lines: list[str] = []
+        run_url = ""
+        for line in lines:
+            if line.startswith("- Run:") or line.startswith("- Repair workflow:"):
+                run_url = line.split(":", 1)[1].strip().split("]")[0].lstrip("[")
+            if line.strip() == "```" and in_fence:
+                in_fence = False
+                continue
+            if in_fence:
+                finding_lines.append(line)
+            if line.strip() == "```" and not in_fence:
+                in_fence = True
+        if finding_lines:
+            header = "#### No-fix run findings"
+            if run_url:
+                header += f" ({run_url})"
+            if len(finding_lines) > 30:
+                finding_lines = [*finding_lines[:30], "... (truncated)"]
+            findings.append(f"{header}\n```\n" + "\n".join(finding_lines) + "\n```")
+    return findings
+
+
 def collect_attempts(cop: str) -> str:
     prs = find_prior_prs(cop)
-    if not prs:
+    nofix_findings = _collect_nofix_findings(cop)
+
+    if not prs and not nofix_findings:
         return ""
 
     prs.sort(key=lambda pr: pr.get("number", 0))
     failed = [pr for pr in prs if not pr.get("mergedAt")]
     merged = [pr for pr in prs if pr.get("mergedAt")]
-    if not failed and not merged:
+    if not failed and not merged and not nofix_findings:
         return ""
 
     parts = [f"## Prior Attempts ({len(failed)} failed, {len(merged)} merged)", ""]
@@ -2087,6 +2158,15 @@ def collect_attempts(cop: str) -> str:
         logs = get_failed_check_logs(number)
         if logs:
             parts.extend(["#### Failure Logs", logs, ""])
+
+    if nofix_findings:
+        parts.append("### No-Fix Runs (agent investigated but reverted or produced no code change)")
+        parts.append("")
+        parts.append("**IMPORTANT: These contain findings from agents that tried and failed.")
+        parts.append("Do NOT repeat the same approaches. Study what was tried and why it failed.**")
+        parts.append("")
+        parts.extend(nofix_findings)
+        parts.append("")
 
     if merged:
         parts.append("### Previously Merged PRs (for reference)")

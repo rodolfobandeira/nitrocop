@@ -548,6 +548,29 @@ jobs:
           GH_TOKEN: ${{ steps.refreshed-app-token.outputs.token }}
         run: |
           RESULT="${{ steps.assess.outputs.result }}"
+
+          # Append agent findings to the comment file so knowledge is not lost
+          # when the agent investigates but fails to produce a fix.
+          append_agent_findings() {
+            if [ ! -s "$AGENT_RESULT_FILE" ]; then
+              return
+            fi
+            FINDINGS=$(jq -r '.result // ""' "$AGENT_RESULT_FILE" 2>/dev/null | head -40)
+            if [ -z "$FINDINGS" ]; then
+              return
+            fi
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>Agent findings (what was tried)</summary>"
+              echo ""
+              echo '```'
+              echo "$FINDINGS"
+              echo '```'
+              echo "</details>"
+            } >> "$REPAIR_COMMENT_FILE"
+          }
+
           if [ "$RESULT" = "pushable" ] && [ "${{ steps.push.outcome }}" = "success" ]; then
             {
               echo "## Auto-repair Succeeded"
@@ -649,6 +672,11 @@ jobs:
               echo '```'
               echo "</details>"
             } > "$REPAIR_COMMENT_FILE"
+          fi
+          # For non-success outcomes, append agent findings so the knowledge
+          # of what was tried is preserved in the PR/issue comment.
+          if ! { [ "$RESULT" = "pushable" ] && [ "${{ steps.push.outcome }}" = "success" ]; }; then
+            append_agent_findings
           fi
           gh pr comment "${{ steps.pr.outputs.number }}" --repo "${{ github.repository }}" --body-file "$REPAIR_COMMENT_FILE"
           if [ -n "${{ steps.pr.outputs.linked_issue_number }}" ] && ! { [ "$RESULT" = "pushable" ] && [ "${{ steps.push.outcome }}" = "success" ]; }; then

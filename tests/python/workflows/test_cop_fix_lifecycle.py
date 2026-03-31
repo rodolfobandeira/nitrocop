@@ -408,6 +408,194 @@ def test_cleanup_failure_warns_and_keeps_issue_state_when_pr_close_fails(tmp_pat
     assert "automatic cleanup could not close the draft PR" in claim_body.read_text()
 
 
+# ── _read_agent_findings ───────────────────────────────────────────────
+
+def test_read_agent_findings_with_result(tmp_path):
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text(json.dumps({
+        "result": "Tried adding per-file detection.\n+147 FNs. Reverted.",
+    }))
+    env_patch = {"AGENT_RESULT_FILE": str(result_file)}
+    with patch.dict(os.environ, env_patch):
+        findings = cop_fix_lifecycle._read_agent_findings()
+    assert "per-file detection" in findings
+    assert "+147 FNs" in findings
+
+
+def test_read_agent_findings_empty_file(tmp_path):
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text("")
+    env_patch = {"AGENT_RESULT_FILE": str(result_file)}
+    with patch.dict(os.environ, env_patch):
+        findings = cop_fix_lifecycle._read_agent_findings()
+    assert findings == ""
+
+
+def test_read_agent_findings_missing_file(tmp_path):
+    result_file = tmp_path / "agent" / "agent-result.json"
+    env_patch = {"AGENT_RESULT_FILE": str(result_file)}
+    with patch.dict(os.environ, env_patch):
+        findings = cop_fix_lifecycle._read_agent_findings()
+    assert findings == ""
+
+
+def test_read_agent_findings_no_result_key(tmp_path):
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text(json.dumps({"total_cost_usd": 0.5}))
+    env_patch = {"AGENT_RESULT_FILE": str(result_file)}
+    with patch.dict(os.environ, env_patch):
+        findings = cop_fix_lifecycle._read_agent_findings()
+    assert findings == ""
+
+
+def test_read_agent_findings_truncates_long_result(tmp_path):
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    long_result = "\n".join(f"Line {i}" for i in range(60))
+    result_file.write_text(json.dumps({"result": long_result}))
+    env_patch = {"AGENT_RESULT_FILE": str(result_file)}
+    with patch.dict(os.environ, env_patch):
+        findings = cop_fix_lifecycle._read_agent_findings()
+    lines = findings.splitlines()
+    assert len(lines) == 41  # 40 content + 1 truncation notice
+    assert "20 more lines" in lines[-1]
+
+
+def test_read_agent_findings_invalid_json(tmp_path):
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text("not valid json{{{")
+    env_patch = {"AGENT_RESULT_FILE": str(result_file)}
+    with patch.dict(os.environ, env_patch):
+        findings = cop_fix_lifecycle._read_agent_findings()
+    assert findings == ""
+
+
+# ── _close_pr_no_changes with findings ─────────────────────────────────
+
+def test_close_pr_no_changes_includes_findings(tmp_path):
+    claim_body = tmp_path / "context" / "claim-body.md"
+    claim_body.parent.mkdir(parents=True)
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text(json.dumps({
+        "result": "Investigated: FNs live in post-processing, not per-file scope.",
+    }))
+    env_patch = {
+        "CLAIM_BODY_FILE": str(claim_body),
+        "AGENT_RESULT_FILE": str(result_file),
+    }
+    calls = []
+
+    def fake_run_ok(cmd, **kwargs):
+        del kwargs
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with (
+        patch.dict(os.environ, env_patch),
+        patch.object(cop_fix_lifecycle, "_run_ok", side_effect=fake_run_ok),
+    ):
+        cop_fix_lifecycle._close_pr_no_changes(
+            pr_url="https://github.com/6/nitrocop/pull/999",
+            cop="Lint/RedundantCopDisableDirective",
+            backend_label="codex / hard",
+            model_label="gpt-5.4",
+            mode="reduce",
+            run_url="https://github.com/6/nitrocop/actions/runs/123",
+            issue_number="293",
+            repo="6/nitrocop",
+        )
+
+    body = claim_body.read_text()
+    assert "Agent findings (what was tried)" in body
+    assert "post-processing" in body
+    assert "Lint/RedundantCopDisableDirective" in body
+    # Should NOT have the bare "did not produce" message when findings exist
+    assert "did not produce any branch changes" not in body
+
+
+def test_close_pr_no_changes_bare_message_without_findings(tmp_path):
+    claim_body = tmp_path / "context" / "claim-body.md"
+    claim_body.parent.mkdir(parents=True)
+    result_file = tmp_path / "agent" / "agent-result.json"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text("")
+    env_patch = {
+        "CLAIM_BODY_FILE": str(claim_body),
+        "AGENT_RESULT_FILE": str(result_file),
+    }
+    calls = []
+
+    def fake_run_ok(cmd, **kwargs):
+        del kwargs
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with (
+        patch.dict(os.environ, env_patch),
+        patch.object(cop_fix_lifecycle, "_run_ok", side_effect=fake_run_ok),
+    ):
+        cop_fix_lifecycle._close_pr_no_changes(
+            pr_url="https://github.com/6/nitrocop/pull/999",
+            cop="Lint/Foo",
+            backend_label="codex / hard",
+            model_label="gpt-5.4",
+            mode="fix",
+            run_url="https://github.com/6/nitrocop/actions/runs/456",
+            issue_number="100",
+            repo="6/nitrocop",
+        )
+
+    body = claim_body.read_text()
+    assert "did not produce any branch changes" in body
+    assert "Agent findings" not in body
+
+
+# ── build-prompt reduce mode collects prior attempts ───────────────────
+
+def test_build_prompt_reduce_collects_prior_attempts(tmp_path):
+    task_file = tmp_path / "context" / "task.md"
+    final_file = tmp_path / "context" / "final-task.md"
+    prior_file = tmp_path / "context" / "prior-attempts.md"
+    task_file.parent.mkdir(parents=True, exist_ok=True)
+    task_file.write_text("Fix the cop.\n")
+
+    env = {
+        **os.environ,
+        "TASK_FILE": str(task_file),
+        "FINAL_TASK_FILE": str(final_file),
+        "PRIOR_ATTEMPTS_FILE": str(prior_file),
+        "GITHUB_OUTPUT": str(tmp_path / "output.txt"),
+    }
+
+    def fake_run_ok(cmd, **kwargs):
+        del kwargs
+        # Simulate prior-attempts writing content
+        if "prior-attempts" in cmd:
+            prior_file.write_text("## Prior Attempts (1 failed, 0 merged)\n\nPrior attempt info.\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with (
+        patch.dict(os.environ, env),
+        patch.object(cop_fix_lifecycle, "_run_ok", side_effect=fake_run_ok),
+    ):
+        result = cop_fix_lifecycle.cmd_build_prompt([
+            "--cop", "Lint/RedundantCopDisableDirective",
+            "--mode", "reduce",
+            "--extra-context", "",
+            "--filter", "cop::lint::redundant_cop_disable_directive",
+        ])
+
+    assert result == 0
+    content = final_file.read_text()
+    assert "Prior Attempts" in content
+    assert "Reduce Mode" in content
+
+
 # ── CLI error handling ──────────────────────────────────────────────────
 
 def test_unknown_command():
@@ -457,4 +645,22 @@ if __name__ == "__main__":
         test_generate_summary_with_result(Path(d))
     with tempfile.TemporaryDirectory() as d:
         test_generate_summary_no_result(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_read_agent_findings_with_result(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_read_agent_findings_empty_file(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_read_agent_findings_missing_file(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_read_agent_findings_no_result_key(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_read_agent_findings_truncates_long_result(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_read_agent_findings_invalid_json(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_close_pr_no_changes_includes_findings(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_close_pr_no_changes_bare_message_without_findings(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_build_prompt_reduce_collects_prior_attempts(Path(d))
     print("All tests passed.")

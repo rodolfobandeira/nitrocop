@@ -486,6 +486,242 @@ def test_generate_task_includes_diagnostic_contradiction_guidance(tmp_path):
             setattr(gct, k, v)
 
 
+def test_collect_nofix_findings_extracts_from_issue_comments():
+    """_collect_nofix_findings scrapes Agent findings blocks from issue comments."""
+    import json as _json
+
+    calls = []
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        cmd_str = " ".join(str(a) for a in args)
+        if "issue" in cmd_str and "list" in cmd_str and "--search" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps([{"number": 293}]),
+                stderr="", returncode=0,
+            )
+        if "issue" in cmd_str and "view" in cmd_str and "293" in cmd_str:
+            comments = [
+                {"body": "Reopened from corpus sync."},
+                {
+                    "body": (
+                        "No fix PR was produced for `Lint/RedundantCopDisableDirective`.\n\n"
+                        "- Backend: `codex / hard`\n"
+                        "- Mode: `reduce`\n"
+                        "- Run: https://github.com/6/nitrocop/actions/runs/123\n\n"
+                        "<details>\n"
+                        "<summary>Agent findings (what was tried)</summary>\n\n"
+                        "```\n"
+                        "Tried per-file detection. +147 FNs. Reverted.\n"
+                        "```\n"
+                        "</details>\n"
+                    ),
+                },
+                {"body": "No fix PR was produced for `Lint/RedundantCopDisableDirective`.\n\nThe agent did not produce any branch changes.\n"},
+            ]
+            return SimpleNamespace(
+                stdout=_json.dumps({"comments": comments}),
+                stderr="", returncode=0,
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    gct.subprocess.run = fake_run
+    try:
+        findings = gct._collect_nofix_findings("Lint/RedundantCopDisableDirective")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert len(findings) == 1
+    assert "per-file detection" in findings[0]
+    assert "+147 FNs" in findings[0]
+
+
+def test_collect_nofix_findings_empty_when_no_findings():
+    """_collect_nofix_findings returns empty when no Agent findings blocks exist."""
+    import json as _json
+
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        cmd_str = " ".join(str(a) for a in args)
+        if "issue" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps([{"number": 100}]),
+                stderr="", returncode=0,
+            )
+        if "issue" in cmd_str and "view" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps({"comments": [
+                    {"body": "No fix PR was produced.\n\nThe agent did not produce any branch changes.\n"},
+                ]}),
+                stderr="", returncode=0,
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    gct.subprocess.run = fake_run
+    try:
+        findings = gct._collect_nofix_findings("Style/Foo")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert findings == []
+
+
+def test_collect_nofix_findings_handles_repair_comments():
+    """_collect_nofix_findings also scrapes repair workflow findings."""
+    import json as _json
+
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        cmd_str = " ".join(str(a) for a in args)
+        if "issue" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps([{"number": 50}]),
+                stderr="", returncode=0,
+            )
+        if "issue" in cmd_str and "view" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps({"comments": [
+                    {
+                        "body": (
+                            "## Auto-repair Did Not Produce a Fix\n\n"
+                            "- Repair workflow: [#999](https://github.com/6/nitrocop/actions/runs/999)\n\n"
+                            "The repair attempt produced no branch changes.\n\n"
+                            "<details>\n"
+                            "<summary>Agent findings (what was tried)</summary>\n\n"
+                            "```\n"
+                            "Tried fixing the test but the cop logic is wrong.\n"
+                            "```\n"
+                            "</details>\n"
+                        ),
+                    },
+                ]}),
+                stderr="", returncode=0,
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    gct.subprocess.run = fake_run
+    try:
+        findings = gct._collect_nofix_findings("Style/Bar")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert len(findings) == 1
+    assert "cop logic is wrong" in findings[0]
+
+
+def test_collect_nofix_findings_no_issue():
+    """_collect_nofix_findings returns empty when no tracker issue exists."""
+    import json as _json
+
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        cmd_str = " ".join(str(a) for a in args)
+        if "issue" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(stdout=_json.dumps([]), stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    gct.subprocess.run = fake_run
+    try:
+        findings = gct._collect_nofix_findings("Style/NonExistent")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert findings == []
+
+
+def test_collect_attempts_includes_nofix_findings():
+    """collect_attempts integrates no-fix findings from issue comments."""
+    import json as _json
+
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        cmd_str = " ".join(str(a) for a in args)
+        # find_prior_prs
+        if "pr" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps([{
+                    "number": 1027,
+                    "title": "[bot] Fix Lint/Foo",
+                    "state": "CLOSED",
+                    "headRefName": "fix/lint-foo-123",
+                    "mergedAt": None,
+                    "closedAt": "2026-03-31",
+                    "url": "https://github.com/6/nitrocop/pull/1027",
+                }]),
+                stderr="", returncode=0,
+            )
+        # get_pr_diff
+        if "pr" in cmd_str and "diff" in cmd_str:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        # get_pr_checks
+        if "pr" in cmd_str and "checks" in cmd_str:
+            return SimpleNamespace(stdout="all passed", stderr="", returncode=0)
+        # issue list (for _collect_nofix_findings)
+        if "issue" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps([{"number": 293}]),
+                stderr="", returncode=0,
+            )
+        # issue view
+        if "issue" in cmd_str and "view" in cmd_str:
+            return SimpleNamespace(
+                stdout=_json.dumps({"comments": [
+                    {
+                        "body": (
+                            "No fix PR was produced for `Lint/Foo`.\n\n"
+                            "- Run: https://github.com/6/nitrocop/actions/runs/999\n\n"
+                            "<details>\n"
+                            "<summary>Agent findings (what was tried)</summary>\n\n"
+                            "```\nTried approach X, regressed.\n```\n"
+                            "</details>\n"
+                        ),
+                    },
+                ]}),
+                stderr="", returncode=0,
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    gct.subprocess.run = fake_run
+    try:
+        result = gct.collect_attempts("Lint/Foo")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert "Prior Attempts" in result
+    assert "No-Fix Runs" in result
+    assert "Tried approach X" in result
+    assert "Do NOT repeat" in result
+    assert "PR #1027" in result
+
+
+def test_collect_attempts_empty_when_no_prs_or_findings():
+    """collect_attempts returns empty when no PRs and no findings exist."""
+    import json as _json
+
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        cmd_str = " ".join(str(a) for a in args)
+        if "pr" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(stdout=_json.dumps([]), stderr="", returncode=0)
+        if "issue" in cmd_str and "list" in cmd_str:
+            return SimpleNamespace(stdout=_json.dumps([]), stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    gct.subprocess.run = fake_run
+    try:
+        result = gct.collect_attempts("Style/NonExistent")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert result == ""
+
+
 def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
     calls = []
     original_funcs = {
@@ -580,5 +816,11 @@ if __name__ == "__main__":
     test_choose_issue_state_preserves_blocked_without_open_pr()
     test_sync_issue_labels_removes_then_readds_labels()
     test_config_only_classification()
+    test_collect_nofix_findings_extracts_from_issue_comments()
+    test_collect_nofix_findings_empty_when_no_findings()
+    test_collect_nofix_findings_handles_repair_comments()
+    test_collect_nofix_findings_no_issue()
+    test_collect_attempts_includes_nofix_findings()
+    test_collect_attempts_empty_when_no_prs_or_findings()
     test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue()
     print("All tests passed.")

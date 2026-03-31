@@ -326,8 +326,9 @@ def cmd_build_prompt(args: list[str]) -> int:
     parts.append("Before making changes, read `docs/agent-ci.md`.\n")
     parts.append(task_file.read_text())
 
-    # Retry mode: collect prior attempts and close stale PRs
-    if opts.mode == "retry":
+    # Collect prior attempts so the agent knows what was already tried.
+    # In retry mode, also close stale PRs.
+    if opts.mode in ("retry", "reduce"):
         _run_ok([
             sys.executable, str(SCRIPTS_DIR.parent / "dispatch_cops.py"),
             "prior-attempts",
@@ -338,6 +339,7 @@ def cmd_build_prompt(args: list[str]) -> int:
         if prior.strip():
             parts.append("\n" + prior)
 
+    if opts.mode == "retry":
         # Close prior open PRs
         ids = cop_identifiers(opts.cop)
         r = _run_ok([
@@ -813,6 +815,30 @@ def _is_docs_only_change(signed_sha: str, repo: str) -> bool:
 
 # ── finalize ────────────────────────────────────────────────────────────
 
+def _read_agent_findings() -> str:
+    """Extract the agent's investigation summary from the result file.
+
+    When an agent investigates a cop, tries a fix, and reverts, the findings
+    are only in the result file.  Including them in the issue comment prevents
+    future agents from repeating the same failed approach.
+    """
+    result_file = _env_path("AGENT_RESULT_FILE")
+    if not result_file.exists() or result_file.stat().st_size == 0:
+        return ""
+    try:
+        data = json.loads(result_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return ""
+    result_text = str(data.get("result", "")).strip()
+    if not result_text:
+        return ""
+    # Truncate to keep issue comments reasonable
+    lines = result_text.splitlines()
+    if len(lines) > 40:
+        lines = [*lines[:40], f"... ({len(lines) - 40} more lines, see run log)"]
+    return "\n".join(lines)
+
+
 def _close_pr_no_changes(
     pr_url: str,
     cop: str,
@@ -830,8 +856,17 @@ def _close_pr_no_changes(
             f"- Model: `{model_label}`\n"
             f"- Mode: `{mode}`\n"
             f"- Run: {run_url}\n\n"
-            f"The agent did not produce any branch changes.\n"
         )
+        findings = _read_agent_findings()
+        if findings:
+            body += (
+                "<details>\n"
+                "<summary>Agent findings (what was tried)</summary>\n\n"
+                f"```\n{findings}\n```\n"
+                "</details>\n"
+            )
+        else:
+            body += "The agent did not produce any branch changes.\n"
         claim_body = _env_path("CLAIM_BODY_FILE")
         write_and_read(claim_body, body)
         _run_ok(["gh", "issue", "comment", issue_number, "--repo", repo, "--body-file", str(claim_body)])
