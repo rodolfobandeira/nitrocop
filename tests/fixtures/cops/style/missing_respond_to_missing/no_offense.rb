@@ -69,3 +69,22 @@ module Test7
     end
   end
 end
+
+Class.new do
+  def respond_to_missing?
+  end
+
+  def method_missing
+  end
+end
+
+# Top-level method_missing is never an offense — RuboCop's grandparent
+# lookup returns nil at program scope, so it skips the check entirely.
+def respond_to_missing?
+end
+
+def method_missing
+end
+
+def method_missing(*args)
+end
