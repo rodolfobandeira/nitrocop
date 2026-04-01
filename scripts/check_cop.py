@@ -1096,7 +1096,13 @@ def main():
 
         print("  Gate: per-repo regression vs oracle baseline")
         print(f"  New FP (worse than baseline): {new_fp:>6,}")
+        if fp_repos:
+            for repo_id, local, bl_nc, bl_rc, diff in sorted(fp_repos, key=lambda x: -x[4]):
+                print(f"    +{diff:>3} FP  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
         print(f"  New FN (worse than baseline): {new_fn:>6,}")
+        if fn_repos:
+            for repo_id, local, bl_nc, bl_rc, diff in sorted(fn_repos, key=lambda x: -x[4]):
+                print(f"    +{diff:>3} FN  {repo_id}  (local={local}, baseline_nc={bl_nc}, rubocop={bl_rc})")
         if resolved_fp or resolved_fn:
             print(f"  Resolved FP (better):         {resolved_fp:>6,}")
             print(f"  Resolved FN (better):         {resolved_fn:>6,}")
