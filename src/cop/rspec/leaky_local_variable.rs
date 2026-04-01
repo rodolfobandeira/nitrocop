@@ -489,6 +489,67 @@ use crate::parse::source::SourceFile;
 ///   requires VariableForce-level per-assignment reference tracking.
 /// - FN=20: VariableForce scope-tracking gaps, conditional write/kill analysis,
 ///   lambda capture semantics, and `def` body edge cases.
+///
+/// ## Fix (FP/FN: inline assignments, ||=, operator-write kills, 2026-04-01)
+///
+/// **FN fix: `||=`/`&&=` in `node_references_var`**
+/// `LocalVariableOrWriteNode` and `LocalVariableAndWriteNode` were not matching
+/// by variable name — only recursed into value. `||=` reads the variable first,
+/// so it IS a reference. Added name check. Resolves capybara-envjs (2 FN).
+///
+/// **FN fix: inline assignments in call arguments**
+/// `collect_assignments_in_scope` stopped at example group/scope calls without
+/// extracting assignments from their arguments. `context path = '...' do` and
+/// `under(user = Obj.new) do` embed `LocalVariableWriteNode` in call args.
+/// Now collects assignments from args before returning.
+/// Linear flow analysis in non-RSpec blocks also handles the case where the
+/// assignment is in call args (not block body) by treating all block body
+/// statements as "past assignment".
+/// Resolves rack-server-pages (1 FN), zendesk (1 FN), puppet-ssh (1 FN).
+///
+/// **FP fix: `&var` in example method args**
+/// `BlockArgumentNode` for `it`/`xit`/`specify` calls was incorrectly treated
+/// as an example-scope read. `&execute_deferred` in `xit("...", &execute_deferred)`
+/// reads the variable at the call site (group scope), not inside the example.
+/// Resolves celluloid (1 FP).
+///
+/// **Behavior change: operator-writes no longer kill in `stmt_reassigns_var`**
+/// `x += y` reads `x` first (`x = x + y`), so the previous assignment's value
+/// IS referenced by the operator-write at group scope. Both the original
+/// assignment and the operator-write are separate offenses. This matches
+/// RuboCop's VariableForce per-assignment tracking. Net effect: some repos
+/// gain new true positive offenses that offset remaining FN.
+///
+/// **FN fix: `example_group_args_reference_var` fallback in shared groups**
+/// Inside `it_behaves_like` blocks, nested `describe package(var)` calls have
+/// variable references in their arguments. Added a fallback check that recurses
+/// into the shared group block body looking for describe/context args that
+/// reference the variable.
+///
+/// ## Remaining gaps (FP=2, FN=13 as of 2026-04-01)
+///
+/// **2 FP — puppetlabs-docker:**
+/// Dead assignments within conditional branches inside `.each` blocks. Requires
+/// VariableForce-level per-assignment reference tracking.
+///
+/// **13 FN — categorized:**
+/// - Conditional before hook writes (fastlane 2, nginx_omniauth 1): `unless initialized;
+///   var = ...; end` in before hook incorrectly kills file-level value.
+/// - Lambda/closure captures (excon 1): assignments inside lambda bodies not collected.
+/// - begin/rescue scoping (elasticsearch 1): assignments inside begin blocks in .each.
+/// - Inline assignment in case predicate (stupidedi 1): `case path = path.to_s`.
+/// - def method not in describe block (cocoapods-generate 1, volt 2): methods in
+///   module mixins or class methods that contain RSpec blocks.
+/// - Group-scope variables in iterator logic (sensu-puppet 2): variables referenced
+///   at iterator level, not directly in example scopes.
+/// - Repos with 0 local offenses (pleaserun 1): unless modifier on let in
+///   it_behaves_like block.
+/// - Corpus artifact (pry 1): `_version = 1` has no real variable reference in
+///   example scopes (only regex literal `/_version/`). RuboCop flags it
+///   incorrectly or via an implicit binding reference we don't track.
+///
+/// All remaining FN require VariableForce-level dataflow analysis or are corpus
+/// artifacts. Net missing is only 2 offenses (5519 vs 5521).
 pub struct LeakyLocalVariable;
 
 impl Cop for LeakyLocalVariable {
@@ -1653,10 +1714,15 @@ fn stmt_example_scope_var_interaction(
                 }
                 // BlockArgumentNode: `let(:foo, &bar)` — the variable is
                 // passed as a block argument, which is a reference.
-                if let Some(ba) = blk.as_block_argument_node() {
-                    if let Some(expr) = ba.expression() {
-                        if node_references_var(&expr, var_name) {
-                            result = combine_var_interactions(result, VarInteraction::ReadOnly);
+                // But for actual example methods (it/xit/specify), `&var`
+                // reads the variable at the call site (group scope), not
+                // inside the example, so it should not count.
+                if !is_rspec_example(name) {
+                    if let Some(ba) = blk.as_block_argument_node() {
+                        if let Some(expr) = ba.expression() {
+                            if node_references_var(&expr, var_name) {
+                                result = combine_var_interactions(result, VarInteraction::ReadOnly);
+                            }
                         }
                     }
                 }
@@ -1699,6 +1765,17 @@ fn stmt_example_scope_var_interaction(
                                 }
                                 if !matches!(result, VarInteraction::None) {
                                     return result;
+                                }
+                                // Fallback: check if describe/context call arguments
+                                // within the block body reference the variable. Inside
+                                // shared group blocks (it_behaves_like), describe args
+                                // like `describe package(var)` run at shared group scope
+                                // and count as leaky references (unlike top-level describe
+                                // args which are group-scope reads).
+                                for s in stmts.body().iter() {
+                                    if example_group_args_reference_var(&s, var_name) {
+                                        return VarInteraction::ReadOnly;
+                                    }
                                 }
                             }
                         }
@@ -1803,7 +1880,17 @@ fn stmt_example_scope_var_interaction(
                             //     name = File.expand_path(name)  # kills tracked
                             //     it { IO.read(name) }     # reads new value
                             //   end
-                            let mut past_assign = false;
+
+                            // Check if the assignment is in the call arguments
+                            // rather than in the block body (e.g.,
+                            // `under(user = Obj.new) do ... end`). If so, all
+                            // block body statements come after the assignment.
+                            let assign_in_block_body = stmts
+                                .body()
+                                .iter()
+                                .any(|s| stmt_contains_offset(&s, assign_offset));
+
+                            let mut past_assign = !assign_in_block_body;
                             let mut result = VarInteraction::None;
                             for s in stmts.body().iter() {
                                 if !past_assign {
@@ -2284,14 +2371,11 @@ fn stmt_reassigns_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
     if let Some(lw) = node.as_local_variable_write_node() {
         return lw.name().as_slice() == var_name;
     }
-    // Operator-writes (`x += ...`, `x -= ...`) always produce a new value,
-    // consuming the old one at group scope. The old assignment's value is
-    // replaced and doesn't reach example scopes. This matches RuboCop's
-    // VariableForce per-assignment tracking: the operator-write's read of the
-    // old value counts as a group-scope reference, not an example-scope one.
-    if let Some(ow) = node.as_local_variable_operator_write_node() {
-        return ow.name().as_slice() == var_name;
-    }
+    // Note: operator-writes (`x += ...`, `x -= ...`) are NOT kills because
+    // they READ the old value first (`x = x + ...`). The previous assignment's
+    // value is referenced by the operator-write, so it IS a leaky variable.
+    // RuboCop's VariableForce tracks this correctly — both the original
+    // assignment and the operator-write are separate offenses.
     if let Some(mw) = node.as_multi_write_node() {
         for target in mw.lefts().iter() {
             if let Some(lt) = target.as_local_variable_target_node() {
@@ -2414,10 +2498,18 @@ fn collect_assignments_in_scope(
             .receiver()
             .is_some_and(|r| util::constant_name(&r).is_some_and(|n| n == b"RSpec"));
 
-        // Stop at example scopes, nested example groups, includes methods
+        // Stop at example scopes, nested example groups, includes methods.
+        // But still collect assignments embedded in call ARGUMENTS (e.g.,
+        // `context path = '/foo' do` or `under(user = Obj.new) do`).
         if (no_recv && (is_example_scope(name) || is_includes_method(name)))
             || ((no_recv || is_rspec_recv) && is_rspec_example_group(name))
         {
+            // Collect assignments from arguments before returning.
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    collect_assignments_in_scope(&arg, assigns, inside_block);
+                }
+            }
             return;
         }
 
@@ -3191,6 +3283,59 @@ fn node_writes_var_deep(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
 }
 
 /// Check if a node is an interpolated string or symbol.
+/// Check if a node is an example group call (describe/context) whose arguments
+/// reference the given variable. Recurses into nested nodes (if/case/blocks)
+/// to find embedded describe/context calls with variable references in args.
+fn example_group_args_reference_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
+    if let Some(call) = node.as_call_node() {
+        let name = call.name().as_slice();
+        let no_recv = call.receiver().is_none();
+        let is_rspec_recv = call
+            .receiver()
+            .is_some_and(|r| util::constant_name(&r).is_some_and(|n| n == b"RSpec"));
+        if (no_recv || is_rspec_recv) && is_rspec_example_group(name) {
+            if let Some(args) = call.arguments() {
+                for arg in args.arguments().iter() {
+                    if node_references_var(&arg, var_name) {
+                        return true;
+                    }
+                }
+            }
+            // Also recurse into the block body for nested describe/context calls
+            if let Some(blk) = call.block() {
+                if let Some(bn) = blk.as_block_node() {
+                    if let Some(body) = bn.body() {
+                        if let Some(stmts) = body.as_statements_node() {
+                            for s in stmts.body().iter() {
+                                if example_group_args_reference_var(&s, var_name) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        // For non-example-group calls with blocks, recurse into the block body
+        if let Some(blk) = call.block() {
+            if let Some(bn) = blk.as_block_node() {
+                if let Some(body) = bn.body() {
+                    if let Some(stmts) = body.as_statements_node() {
+                        for s in stmts.body().iter() {
+                            if example_group_args_reference_var(&s, var_name) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    false
+}
+
 fn is_interpolated_string_or_symbol(node: &ruby_prism::Node<'_>) -> bool {
     node.as_interpolated_string_node().is_some() || node.as_interpolated_symbol_node().is_some()
 }
@@ -3566,11 +3711,19 @@ fn node_references_var(node: &ruby_prism::Node<'_>, var_name: &[u8]) -> bool {
         return node_references_var(&cpw.value(), var_name);
     }
 
-    // Local variable or-write / and-write
+    // Local variable or-write / and-write: `x ||= expr`, `x &&= expr`.
+    // These implicitly read the variable first (to check its current value),
+    // then conditionally write. If the variable name matches, it's a reference.
     if let Some(ow) = node.as_local_variable_or_write_node() {
+        if ow.name().as_slice() == var_name {
+            return true;
+        }
         return node_references_var(&ow.value(), var_name);
     }
     if let Some(aw) = node.as_local_variable_and_write_node() {
+        if aw.name().as_slice() == var_name {
+            return true;
+        }
         return node_references_var(&aw.value(), var_name);
     }
 
@@ -4673,10 +4826,11 @@ end
     #[test]
     fn test_fp_operator_write_kills_group_scope_value() {
         // leftovers pattern: `merged_config_methods = X; merged_config_methods -= Y`
-        // then used in it block. Lines 21 and 22 should NOT be flagged because
-        // the operator-write at group scope kills the earlier assignment's value.
-        // Only the final value (after all group-scope operator-writes) should be
-        // flagged if it leaks into examples.
+        // then used in it block. RuboCop flags ALL three lines because:
+        // - Line 2 (`=`): value read by line 3's `-=`
+        // - Line 3 (`-=`): value read by line 4's `-=`
+        // - Line 4 (`-=`): value reaches `it` block
+        // `-=` reads the old value, so earlier assignments are NOT dead.
         let source = br#"context 'when merged' do
   merged_config_methods = ::Leftovers.config.public_methods
   merged_config_methods -= ::Class.new.new.public_methods
@@ -4688,26 +4842,29 @@ end
 end
 "#;
         let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
-        // Only the last assignment (line 4: -= %i{<<}) should be flagged,
-        // because the earlier assignments' values are consumed by later
-        // operator-writes at group scope.
+        // All three assignments should be flagged — `-=` reads the old value.
         assert_eq!(
             diags.len(),
-            1,
-            "Expected 1 offense (last operator-write only), got {}: {:?}",
+            3,
+            "Expected 3 offenses (all assignments), got {}: {:?}",
             diags.len(),
             diags
                 .iter()
                 .map(|d| format!("{}:{}", d.location.line, d.location.column))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(diags[0].location.line, 4, "Offense should be on line 4");
+        assert_eq!(diags[0].location.line, 2, "First offense on line 2");
+        assert_eq!(diags[1].location.line, 3, "Second offense on line 3");
+        assert_eq!(diags[2].location.line, 4, "Third offense on line 4");
     }
 
     #[test]
     fn test_fp_plus_equals_kills_group_scope_value() {
         // SlideHub pattern: `list_json_keys = %w[...]; list_json_keys += %w[...]`
-        // then used in it block. The first assignment should NOT be flagged.
+        // then used in it block. RuboCop flags BOTH assignments because:
+        // - Line 2 (`=`): leaky — value is read by line 3's `+=` at group scope
+        // - Line 3 (`+=`): leaky — result reaches the `it` block
+        // `+=` reads the old value, so the first assignment is NOT dead.
         let source = br#"RSpec.describe SomeClass do
   list_json_keys = %w[id user_id name]
   list_json_keys += %w[num_of_pages created_at]
@@ -4723,18 +4880,25 @@ end
 end
 "#;
         let diags = crate::testutil::run_cop_full(&LeakyLocalVariable, source);
-        // Only the second assignment (line 3: += ...) should be flagged.
+        // Both assignments should be flagged — `+=` reads the old value.
         assert_eq!(
             diags.len(),
-            1,
-            "Expected 1 offense (second assignment only), got {}: {:?}",
+            2,
+            "Expected 2 offenses (both assignments), got {}: {:?}",
             diags.len(),
             diags
                 .iter()
                 .map(|d| format!("{}:{}", d.location.line, d.location.column))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(diags[0].location.line, 3, "Offense should be on line 3");
+        assert_eq!(
+            diags[0].location.line, 2,
+            "First offense should be on line 2"
+        );
+        assert_eq!(
+            diags[1].location.line, 3,
+            "Second offense should be on line 3"
+        );
     }
 
     #[test]
