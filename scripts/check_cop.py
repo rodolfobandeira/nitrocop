@@ -577,13 +577,13 @@ def _parse_example_loc(loc_str: str) -> tuple[str, str, int]:
     return repo_id, filepath, line
 
 
-def spot_check_examples(cop_name: str, data: dict) -> tuple[int, int, int, int]:
+def spot_check_examples(cop_name: str, data: dict) -> tuple[int, int, int, int, int, int]:
     """Spot-check oracle FP/FN examples against local nitrocop.
 
     Runs nitrocop on the specific files referenced in the oracle's fp_examples
     and fn_examples, then checks whether each known issue persists or is resolved.
 
-    Returns (fp_remain, fp_resolved, fn_remain, fn_resolved).
+    Returns (fp_remain, fp_resolved, fn_remain, fn_resolved, fp_unchecked, fn_unchecked).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -626,12 +626,14 @@ def spot_check_examples(cop_name: str, data: dict) -> tuple[int, int, int, int]:
     # Run nitrocop on each repo's files and collect offense lines
     nitrocop_lines: dict[tuple[str, str], set[int]] = {}
 
-    def _check_repo(repo_id: str, files: list[str]) -> dict[str, set[int]]:
+    def _check_repo(repo_id: str, files: list[str]) -> tuple[dict[str, set[int]], bool]:
         repo_dir = corpus_dir / repo_id
+        if not repo_dir.exists():
+            return {fp: set() for fp in files}, False  # repo not available
         existing = [fp for fp in files if (repo_dir / fp).exists()]
         result_map: dict[str, set[int]] = {fp: set() for fp in files}
         if not existing:
-            return result_map
+            return result_map, True
 
         env = build_env(str(repo_dir))
         config = resolve_repo_config(repo_id, str(repo_dir))
@@ -656,7 +658,9 @@ def spot_check_examples(cop_name: str, data: dict) -> tuple[int, int, int, int]:
                         break
         except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
             pass
-        return result_map
+        return result_map, True
+
+    available_repos: set[str] = set()
 
     workers = min(os.cpu_count() or 4, 16)
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -666,12 +670,24 @@ def spot_check_examples(cop_name: str, data: dict) -> tuple[int, int, int, int]:
         }
         for future in as_completed(futures):
             repo_id = futures[future]
-            for filepath, lines in future.result().items():
+            result_map, repo_available = future.result()
+            if repo_available:
+                available_repos.add(repo_id)
+            for filepath, lines in result_map.items():
                 nitrocop_lines[(repo_id, filepath)] = lines
 
-    # Evaluate each example
+    # Evaluate each example — only count examples from available repos.
+    # Examples from non-cloned repos cannot be verified and must not be
+    # reported as "resolved" (the file simply isn't there to check).
     fp_remain = fp_resolved = fn_remain = fn_resolved = 0
+    fp_unchecked = fn_unchecked = 0
     for repo_id, filepath, line, kind in checks:
+        if repo_id not in available_repos:
+            if kind == "fp":
+                fp_unchecked += 1
+            else:
+                fn_unchecked += 1
+            continue
         lines = nitrocop_lines.get((repo_id, filepath), set())
         if kind == "fp":
             if line in lines:
@@ -684,7 +700,7 @@ def spot_check_examples(cop_name: str, data: dict) -> tuple[int, int, int, int]:
             else:
                 fn_remain += 1
 
-    return fp_remain, fp_resolved, fn_remain, fn_resolved
+    return fp_remain, fp_resolved, fn_remain, fn_resolved, fp_unchecked, fn_unchecked
 
 
 def main():
@@ -994,6 +1010,10 @@ def main():
         adjusted_excess = max(0, excess - file_drop_offenses)
         print(f"  Excess (adjusted):    {adjusted_excess:>10,}  "
               f"(excess minus file-drop noise)")
+        if excess > 0 and file_drop_offenses >= excess:
+            print(f"  WARNING: file-drop noise ({file_drop_offenses:,}) masks "
+                  f"raw excess ({excess:,}). Real FPs may exist — use "
+                  f"verify_cop_locations.py for ground truth.")
     print()
 
     print("  Gate type: count-only / cop-level regression")
@@ -1135,18 +1155,30 @@ def main():
         # Per-line spot-check: verify known FP/FN examples from the oracle.
         # This catches regressions that cancel out in per-repo counts
         # (e.g. +5 FP and -5 FN in the same repo = net 0 change).
-        fp_remain, fp_resolved, fn_remain, fn_resolved = spot_check_examples(
+        fp_remain, fp_resolved, fn_remain, fn_resolved, fp_unchecked, fn_unchecked = spot_check_examples(
             args.cop, data,
         )
-        total_examples = fp_remain + fp_resolved + fn_remain + fn_resolved
-        if total_examples > 0:
-            print(f"  Spot-check ({total_examples} oracle examples):")
-            if fp_remain + fp_resolved > 0:
-                print(f"    FP: {fp_resolved} resolved, {fp_remain} remain "
-                      f"(of {fp_remain + fp_resolved})")
-            if fn_remain + fn_resolved > 0:
-                print(f"    FN: {fn_resolved} resolved, {fn_remain} remain "
-                      f"(of {fn_remain + fn_resolved})")
+        total_checked = fp_remain + fp_resolved + fn_remain + fn_resolved
+        total_unchecked = fp_unchecked + fn_unchecked
+        if total_checked + total_unchecked > 0:
+            print(f"  Spot-check ({total_checked + total_unchecked} oracle examples, "
+                  f"{total_unchecked} unchecked — repo not cloned):")
+            if fp_remain + fp_resolved + fp_unchecked > 0:
+                parts = [f"{fp_resolved} resolved", f"{fp_remain} remain"]
+                if fp_unchecked:
+                    parts.append(f"{fp_unchecked} unchecked")
+                print(f"    FP: {', '.join(parts)} "
+                      f"(of {fp_remain + fp_resolved + fp_unchecked})")
+            if fn_remain + fn_resolved + fn_unchecked > 0:
+                parts = [f"{fn_resolved} resolved", f"{fn_remain} remain"]
+                if fn_unchecked:
+                    parts.append(f"{fn_unchecked} unchecked")
+                print(f"    FN: {', '.join(parts)} "
+                      f"(of {fn_remain + fn_resolved + fn_unchecked})")
+            if total_unchecked > total_checked:
+                print(f"    WARNING: {total_unchecked} examples could not be verified "
+                      f"(repos not cloned with --sample). Use --sample with a higher "
+                      f"value or verify_cop_locations.py for ground truth.")
             print()
 
         print("PASS: no per-repo regressions vs baseline")
