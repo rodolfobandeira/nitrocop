@@ -195,6 +195,11 @@ Read reduced repros from `/tmp/nitrocop-reduce/` and capture root-cause hypothes
 3. Implement the fix in `src/cop/<dept>/<cop_name>.rs`.
 
 4. Re-run targeted tests and ensure they pass.
+   **Important:** Fixture tests bypass config (Include patterns, Enabled status).
+   A passing test does NOT guarantee the binary fires on real files. If fixing
+   an FN, also verify the binary detects the pattern — see AGENTS.md Key
+   Constraints for Prism block body shape gotchas (BeginNode vs StatementsNode,
+   itblock/numblock).
 
 5. Verify with the right acceptance gate for cops changed in this loop:
    ```bash

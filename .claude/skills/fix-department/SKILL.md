@@ -337,6 +337,11 @@ if the prompt/examples require local corpus source context.
    - `cargo test --release -p nitrocop --lib -- <cop_name_snake>` — all tests pass
    - `cargo fmt`
    - `cargo clippy --release -- -D warnings`
+   - **Important:** Fixture tests bypass config (Include patterns, Enabled status).
+     A passing test does NOT guarantee the binary fires on real files. If fixing
+     an FN, also verify the binary detects the pattern — see AGENTS.md Key
+     Constraints for Prism block body shape gotchas (BeginNode vs StatementsNode,
+     itblock/numblock).
 
 7. **Commit your fix**:
    ```bash
