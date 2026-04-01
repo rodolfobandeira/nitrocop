@@ -168,6 +168,20 @@ From the deep-dive output, select **up to 4 cops** for this batch. Priority orde
 
 Skip Layout/ alignment cops unless they're the only ones remaining (complex multi-line state machines).
 
+**Establish ground truth first** — before reading cop source or running reducers,
+run these commands **in parallel** for each selected cop:
+```bash
+git log --oneline -5 -- src/cop/<dept>/<cop_name>.rs   # what's been committed recently?
+python3 scripts/check_cop.py Department/CopName --verbose  # oracle FP/FN — the actual current gap
+```
+Compare the latest cop commit date against the corpus oracle run date (shown in
+`check_cop.py` output). If the oracle ran AFTER the latest fix, its FP/FN
+numbers are the real remaining gap — not stale data from before the fix. This
+tells you exactly what still needs fixing before you spend time reading source
+or running reducers. Do NOT read the full cop source (which may have hundreds
+of lines of investigation comments) until you know the current numbers and
+which repos are diverging.
+
 For each selected cop, investigate the FP/FN pattern:
 ```bash
 python3 scripts/investigate_cop.py Department/CopName --context --fp-only --limit 10
