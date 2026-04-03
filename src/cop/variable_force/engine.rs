@@ -901,6 +901,18 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.branch_depth -= 1;
     }
 
+    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
+        // Declare and assign all pattern match variables before visiting the
+        // pattern. Guard clauses like `in _ if _.blank?` are represented as
+        // IfNode where the predicate (guard) references the variable before
+        // the pattern target declares it. Pre-declaring and assigning ensures
+        // the variable exists when the guard's LocalVariableReadNode is visited.
+        // The default visitor traversal is safe because there is no generic
+        // visit_local_variable_target_node handler to cause double assignments.
+        declare_and_assign_pattern_targets(self, &node.pattern());
+        ruby_prism::visit_in_node(self, node);
+    }
+
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
         let parent_id = node.location().start_offset();
         if let Some(pred) = node.predicate() {
@@ -990,7 +1002,42 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         // Branch context is managed by the caller (visit_begin_node).
-        ruby_prism::visit_rescue_node(self, node);
+        // Visit children manually instead of delegating to the default visitor
+        // so we can handle the exception capture variable explicitly.
+
+        // Exception class references
+        for exc in node.exceptions().iter() {
+            self.visit(&exc);
+        }
+
+        // Exception capture: `rescue Error => e`
+        if let Some(ref_node) = node.reference() {
+            if let Some(t) = ref_node.as_local_variable_target_node() {
+                let name = t.name().as_slice().to_vec();
+                let offset = t.location().start_offset();
+                if !self.table.variable_exists(&name) {
+                    self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
+                }
+                let seq = self.next_sequence();
+                let mut a = Assignment::new(offset, AssignmentKind::ExceptionCapture);
+                a.sequence = seq;
+                a.in_branch = self.branch_depth > 0;
+                a.branch_id = self.current_branch_id();
+                self.table.assign_to_variable(&name, a);
+            }
+        }
+
+        // Rescue body statements
+        if let Some(stmts) = node.statements() {
+            for stmt in stmts.body().iter() {
+                self.visit(&stmt);
+            }
+        }
+
+        // Chained rescue clauses
+        if let Some(subsequent) = node.subsequent() {
+            self.visit_rescue_node(&subsequent);
+        }
 
         // If any rescue clause contains a `retry`, treat the entire rescue
         // as a loop — the retry causes the begin body to re-execute.
@@ -1188,6 +1235,46 @@ fn predicate_has_lvar_write(node: &ruby_prism::Node<'_>) -> bool {
     let mut detector = LvarWriteDetector { found: false };
     detector.visit(node);
     detector.found
+}
+
+/// Declare and assign all `LocalVariableTargetNode` variables found in a
+/// pattern match node. This ensures guard clause references (`in _ if _.blank?`)
+/// can find the variable before the pattern target node is visited. Without the
+/// generic `visit_local_variable_target_node` handler, this function must also
+/// create assignments (not just declarations) for pattern match variables.
+fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+    struct TargetCollector {
+        targets: Vec<(Vec<u8>, usize)>,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for TargetCollector {
+        fn visit_local_variable_target_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableTargetNode<'pr>,
+        ) {
+            self.targets.push((
+                node.name().as_slice().to_vec(),
+                node.location().start_offset(),
+            ));
+        }
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'_>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'_>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'_>) {}
+    }
+    let mut collector = TargetCollector {
+        targets: Vec::new(),
+    };
+    collector.visit(node);
+    for (name, offset) in collector.targets {
+        if !engine.table.variable_exists(&name) {
+            engine.declare_variable(name.clone(), offset, DeclarationKind::PatternMatch);
+        }
+        let seq = engine.next_sequence();
+        let mut a = Assignment::new(offset, AssignmentKind::Simple);
+        a.sequence = seq;
+        a.in_branch = engine.branch_depth > 0;
+        a.branch_id = engine.current_branch_id();
+        engine.table.assign_to_variable(&name, a);
+    }
 }
 
 /// Check if a rescue node (or its chained subsequent rescue clauses)
@@ -1885,6 +1972,130 @@ mod tests {
         assert!(
             first.referenced || !first.reassigned,
             "result = nil should not be flagged as useless (rescue may use it)"
+        );
+    }
+
+    // ── Rescue exception capture tests ────────────────────────────────
+
+    #[test]
+    fn test_rescue_exception_capture_tracked() {
+        // `rescue StandardError => e; puts e.message` — the exception variable
+        // should be declared, assigned with ExceptionCapture, and referenced.
+        let scopes = run_engine(
+            "def foo\n  begin\n    risky\n  rescue StandardError => e\n    puts e.message\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+        assert!(
+            def_scope.vars.contains_key("e"),
+            "rescue exception variable 'e' should be tracked"
+        );
+        let e = &def_scope.vars["e"];
+        assert_eq!(e.num_assignments, 1, "should have exactly 1 assignment");
+        assert_eq!(
+            e.assignments[0].kind,
+            crate::cop::variable_force::assignment::AssignmentKind::ExceptionCapture,
+            "assignment should be ExceptionCapture"
+        );
+        assert!(
+            e.num_references > 0,
+            "e should be referenced by puts e.message"
+        );
+    }
+
+    #[test]
+    fn test_rescue_exception_capture_unused() {
+        // `rescue StandardError => e; puts "error"` — exception variable assigned
+        // but never read.
+        let scopes = run_engine(
+            "def foo\n  begin\n    risky\n  rescue StandardError => e\n    puts \"error\"\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let e = &def_scope.vars["e"];
+        assert_eq!(e.num_assignments, 1);
+        assert_eq!(e.num_references, 0, "e should have no references");
+    }
+
+    #[test]
+    fn test_rescue_chained_clauses() {
+        // Multiple rescue clauses each with their own exception variable.
+        let scopes = run_engine(
+            "def foo\n  begin\n    risky\n  rescue TypeError => e1\n    puts e1\n  rescue => e2\n    puts e2\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+        assert!(def_scope.vars.contains_key("e1"), "e1 should be tracked");
+        assert!(def_scope.vars.contains_key("e2"), "e2 should be tracked");
+        assert!(def_scope.vars["e1"].num_references > 0);
+        assert!(def_scope.vars["e2"].num_references > 0);
+    }
+
+    // ── Pattern match variable tests ──────────────────────────────────
+
+    #[test]
+    fn test_pattern_match_variable_tracked() {
+        // `case v; in x; puts x; end` — pattern match variable should be
+        // declared with PatternMatch kind, assigned, and referenced.
+        let scopes = run_engine("def foo(v)\n  case v\n  in x\n    puts x\n  end\nend\n");
+        let def_scope = &scopes[0];
+        assert!(
+            def_scope.vars.contains_key("x"),
+            "pattern match variable 'x' should be tracked"
+        );
+        let x = &def_scope.vars["x"];
+        assert_eq!(x.decl_kind, DeclarationKind::PatternMatch);
+        assert_eq!(x.num_assignments, 1, "should have exactly 1 assignment");
+        assert!(x.num_references > 0, "x should be referenced by puts x");
+    }
+
+    #[test]
+    fn test_pattern_match_variable_unused() {
+        // `case v; in x; "matched"; end` — pattern variable assigned but not read.
+        let scopes = run_engine("def foo(v)\n  case v\n  in x\n    \"matched\"\n  end\nend\n");
+        let def_scope = &scopes[0];
+        let x = &def_scope.vars["x"];
+        assert_eq!(x.decl_kind, DeclarationKind::PatternMatch);
+        assert_eq!(x.num_references, 0, "x should have no references");
+    }
+
+    #[test]
+    fn test_pattern_match_guard_clause() {
+        // `case v; in _ if _.blank?; 42; end` — guard references the variable
+        // before the pattern target declares it. Pre-declaration should ensure
+        // the reference is tracked.
+        let scopes = run_engine("def foo(v)\n  case v\n  in _ if _.blank?\n    42\n  end\nend\n");
+        let def_scope = &scopes[0];
+        assert!(
+            def_scope.vars.contains_key("_"),
+            "pattern match variable '_' should be tracked"
+        );
+        let underscore = &def_scope.vars["_"];
+        assert!(
+            underscore.num_references > 0,
+            "_ should be referenced by guard clause _.blank?"
+        );
+    }
+
+    // ── Nested multi-write should NOT create extra assignments ────────
+
+    #[test]
+    fn test_nested_multi_write_no_extra_assignments() {
+        // `a, (b, c) = 1, [2, 3]` — nested multi-write targets b and c should
+        // NOT be tracked by the VF engine (matching RuboCop behavior). Only
+        // top-level target 'a' should have an assignment.
+        let scopes = run_engine("a, (b, c) = 1, [2, 3]\nputs a\n");
+        let top = &scopes[0];
+        assert!(
+            top.vars.contains_key("a"),
+            "top-level target 'a' should be tracked"
+        );
+        assert_eq!(top.vars["a"].num_assignments, 1);
+        // Nested targets should NOT be tracked (no generic handler to catch them)
+        assert!(
+            !top.vars.contains_key("b"),
+            "nested multi-write target 'b' should not be tracked"
+        );
+        assert!(
+            !top.vars.contains_key("c"),
+            "nested multi-write target 'c' should not be tracked"
         );
     }
 }
