@@ -74,8 +74,7 @@ jobs:
           git add Cargo.toml Cargo.lock gem/lib/nitrocop.rb
           COMMIT_MSG="Release v${{ steps.version.outputs.tag }}"
           git commit -m "$COMMIT_MSG"
-          git push origin main
-          eval "$(python3 scripts/workflows/workflow_git.py promote \
+          eval "$(python3 scripts/workflows/workflow_git.py push-local \
             --repo "${{ github.repository }}" \
             --branch main \
             --message "$COMMIT_MSG")"

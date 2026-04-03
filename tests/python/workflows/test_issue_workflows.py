@@ -139,7 +139,7 @@ def test_release_workflow_commits_directly_to_main() -> None:
     assert "GH_TOKEN: ${{ github.token }}" in content
     assert "--identity github-actions" in content
     assert "git checkout -B main origin/main" in content
-    assert "git push origin main" in content
+    assert "push-local" in content
     assert "--branch main \\" in content
     assert 'gh pr create' not in content
     assert 'gh pr merge' not in content

@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -2483,7 +2484,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
     if dept_filter:
         diverging_cops = {cop for cop in diverging_cops if cop.startswith(dept_filter + "/")}
 
-    created = updated = reopened = closed = config_only = 0
+    created = updated = reopened = closed = config_only = failed = 0
 
     # ── Phase 1: Pre-diagnose all cops in parallel ──────────────────────
     # Prefer pre-computed diagnosis from corpus oracle (embedded in by_cop
@@ -2600,18 +2601,46 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         with ThreadPoolExecutor(max_workers=4) as pool:
             def _run_action(action: Action) -> str:
                 action_type, fn = action
-                fn()
-                return action_type
+                max_attempts = 3
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        fn()
+                        return action_type
+                    except Exception as exc:
+                        if attempt < max_attempts:
+                            backoff = attempt  # 1s then 2s
+                            print(
+                                f"  warning: {action_type} attempt {attempt}/{max_attempts}"
+                                f" failed ({exc}), retrying in {backoff}s...",
+                                file=sys.stderr,
+                            )
+                            time.sleep(backoff)
+                        else:
+                            print(
+                                f"  warning: {action_type} failed after {max_attempts}"
+                                f" attempts: {exc}",
+                                file=sys.stderr,
+                            )
+                            return "failed"
+                return "failed"  # unreachable, but keeps mypy happy
             results = list(pool.map(_run_action, actions))
         dept_created = results.count("created")
         dept_updated = results.count("updated")
         dept_reopened = results.count("reopened")
+        dept_failed = results.count("failed")
         created += dept_created
         updated += dept_updated
         reopened += dept_reopened
+        failed += dept_failed
+        summary_parts = [
+            f"{dept_created} created",
+            f"{dept_updated} updated",
+            f"{dept_reopened} reopened",
+        ]
+        if dept_failed:
+            summary_parts.append(f"{dept_failed} failed")
         print(
-            f"  done ({dept_created} created, {dept_updated} updated,"
-            f" {dept_reopened} reopened)",
+            f"  done ({', '.join(summary_parts)})",
             file=sys.stderr,
         )
 
@@ -2637,6 +2666,13 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
             list(pool.map(lambda t: close_tracker_issue(repo, t[0], t[1]), to_close))
         closed = len(to_close)
 
+    if failed:
+        print(
+            f"warning: {failed} action(s) failed due to transient errors"
+            " (sync is best-effort)",
+            file=sys.stderr,
+        )
+
     print(
         json.dumps(
             {
@@ -2644,6 +2680,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
                 "updated": updated,
                 "reopened": reopened,
                 "closed": closed,
+                "failed": failed,
                 "config_only": config_only,
                 "diverging_cops": len(diverging_cops),
             },
