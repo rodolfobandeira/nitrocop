@@ -32,11 +32,11 @@
     "rc_files": 288
   },
   "ruby-formatter__rufo__a90e654": {
-    "fn": 378,
-    "fp": 96,
-    "matches": 10525,
+    "fn": 141,
+    "fp": 120,
+    "matches": 10762,
     "nc_files": 158,
-    "rate": 96.4,
+    "rate": 97.6,
     "rc_files": 158
   },
   "standardrb__standard__c886a57": {
